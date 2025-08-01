@@ -74,7 +74,7 @@ def process_real(tracer, zone):
         dfs.append(df)
     df = pd.concat(dfs, ignore_index=True)
     df = compute_cartesian(df)
-    df['TRACERTYPE'] = np.full(len(df), tracer + "_DATA", dtype='U14')
+    df['TRACERTYPE'] = np.full(len(df), tracer + "_DATA", dtype='S14')
     df['RANDITER'] = -1
 
     return df
@@ -102,7 +102,7 @@ def generate_randoms_for_zone(tracer, zone, full_random_df, n_random=100):
     for j in range(n_random):
         sample_df = zone_df.sample(n=len(zone_df), random_state=j).reset_index(drop=True)
         sample_df = compute_cartesian(sample_df)
-        tracer_type_str = np.full(len(sample_df), tracer + "_RAND", dtype='U14')
+        tracer_type_str = np.full(len(sample_df), tracer + "_RAND", dtype='S14')
         sample_df['TRACERTYPE'] = tracer_type_str
         sample_df['RANDITER'] = j
         all_randoms.append(sample_df)
