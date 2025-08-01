@@ -25,6 +25,9 @@ from astropy.cosmology import Planck18
 import astropy.units as u
 from io import BytesIO
 import requests
+from tqdm import tqdm
+import time
+from astropy.table import Table
 
 # Parameters
 base_url = "https://data.desi.lbl.gov/public/edr/vac/edr/lss/v2.0/LSScats/clustering/"
@@ -36,23 +39,30 @@ selected_columns = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
 output_dir = "01_CREATE_RAW"
 os.makedirs(output_dir, exist_ok=True)
 
+n_random = 10
+n_zones = 2
+
 def load_fits_file_from_url(url, columns):
-    with fits.open(BytesIO(requests.get(url).content)) as hdul:
-        data = hdul[1].data
-        df = pd.DataFrame({
-            col: data[col].byteswap().view(data[col].dtype.newbyteorder()) if data[col].dtype.byteorder not in ('=', '|') else data[col]
-            for col in columns
-        })
-        df = df.rename(columns={'ROSETTE_NUMBER': 'ZONE'})
-        return df
+
+    table = Table.read(url)
+    cols_to_select = [col for col in columns if col in table.colnames]
+    table = table[cols_to_select]
+    
+    if 'ROSETTE_NUMBER' in table.colnames:
+        table.rename_column('ROSETTE_NUMBER', 'ZONE')
+        
+    # Convert to pandas DataFrame
+    df = table.to_pandas()
+    
+    return df
 
 def compute_cartesian(df):
     df = df.copy()
     comoving_distance = Planck18.comoving_distance(df['Z'].values)
     coords = SkyCoord(ra=df['RA'].values * u.deg, dec=df['DEC'].values * u.deg, distance=comoving_distance)
-    df['X_CART'] = coords.cartesian.x.value
-    df['Y_CART'] = coords.cartesian.y.value
-    df['Z_CART'] = coords.cartesian.z.value
+    df['XCART'] = coords.cartesian.x.value
+    df['YCART'] = coords.cartesian.y.value
+    df['ZCART'] = coords.cartesian.z.value
     return df
 
 def process_real(tracer, zone):
@@ -64,55 +74,116 @@ def process_real(tracer, zone):
         dfs.append(df)
     df = pd.concat(dfs, ignore_index=True)
     df = compute_cartesian(df)
-    df['TRACERTYPE'] = tracer + "_DATA"
+    df['TRACERTYPE'] = np.full(len(df), tracer + "_DATA", dtype='U14')
     df['RANDITER'] = -1
+
     return df
 
-def process_random(tracer, zone):
+def process_random(tracer):
     dfs = []
 
     for hemi in ['N', 'S']:
-        ran_urls = [base_url + tracer + f"_{hemi}_{i}_clustering.ran.fits" for i in range(18)]
+        ran_urls = [base_url + tracer + f"_{hemi}_{i}_clustering.ran.fits" for i in range(1)]
         for url in ran_urls:
             df = load_fits_file_from_url(url, selected_columns)
-            df = df[df['ZONE'] == zone]  # Filter by zone
             df['HEMI'] = hemi
             dfs.append(df)
 
     full_df = pd.concat(dfs, ignore_index=True)
-    
+    return full_df
+
+def generate_randoms_for_zone(tracer, zone, full_random_df, n_random=100):
     all_randoms = []
 
-    # Iterate over unique rosettes in this zone
-    for rosetta in full_df['ZONE'].unique():
-        rosetta_df = full_df[full_df['ZONE'] == rosetta]
+    zone_df = full_random_df[full_random_df['ZONE'] == zone]
+    if zone_df.empty:
+        return pd.DataFrame()
 
-        n_rows = len(rosetta_df)
-        if n_rows == 0:
-            continue
+    for j in range(n_random):
+        sample_df = zone_df.sample(n=len(zone_df), random_state=j).reset_index(drop=True)
+        sample_df = compute_cartesian(sample_df)
+        tracer_type_str = np.full(len(sample_df), tracer + "_RAND", dtype='U14')
+        sample_df['TRACERTYPE'] = tracer_type_str
+        sample_df['RANDITER'] = j
+        all_randoms.append(sample_df)
 
-        for j in range(100):
-            sample_df = rosetta_df.sample(n=n_rows, random_state=j).reset_index(drop=True)
-            sample_df = compute_cartesian(sample_df)
-            sample_df['TRACERTYPE'] = tracer + "_RANDOM"
-            sample_df['RANDITER'] = j
-            all_randoms.append(sample_df)
+    return pd.concat(all_randoms, ignore_index=True)
 
-    final_df = pd.concat(all_randoms, ignore_index=True)
-    return final_df
 
-for zone in range(20):
-    all_dfs = []
-    for tracer in tracers:
-        real = process_real(tracer, zone)     # returns real data (N + S) for the zone
-        random = process_random(tracer, zone) # returns 100x random samples for the zone
-        all_dfs.extend([real, random])
+# def process_random(tracer, zone):
+#     dfs = []
+
+#     for hemi in ['N', 'S']:
+#         ran_urls = [base_url + tracer + f"_{hemi}_{i}_clustering.ran.fits" for i in range(18)]
+#         for url in ran_urls:
+#             df = load_fits_file_from_url(url, selected_columns)
+#             df = df[df['ZONE'] == zone]  # Filter by zone
+#             df['HEMI'] = hemi
+#             dfs.append(df)
+
+#     full_df = pd.concat(dfs, ignore_index=True)
     
+#     all_randoms = []
+
+#     # Iterate over unique rosettes in this zone
+#     for rosetta in full_df['ZONE'].unique():
+#         rosetta_df = full_df[full_df['ZONE'] == rosetta]
+
+#         n_rows = len(rosetta_df)
+#         if n_rows == 0:
+#             continue
+
+#         for j in range(n_random):
+#             sample_df = rosetta_df.sample(n=n_rows, random_state=j).reset_index(drop=True)
+#             sample_df = compute_cartesian(sample_df)
+#             sample_df['TRACERTYPE'] = tracer + "_RANDOM"
+#             sample_df['RANDITER'] = j
+#             all_randoms.append(sample_df)
+
+#     final_df = pd.concat(all_randoms, ignore_index=True)
+#     return final_df
+
+random_cache = {}
+print("Loading random files per tracer...")
+
+for tracer in tqdm(tracers, desc="Randoms (once per tracer)"):
+    start = time.perf_counter()
+    random_cache[tracer] = process_random(tracer)
+    print(f" Loaded randoms for {tracer} in {time.perf_counter() - start:.2f} seconds.")
+
+print("\n Starting zone-wise processing...\n")
+
+for zone in tqdm(range(n_zones), desc="Zones"):
+    zone_start = time.perf_counter()
+    all_dfs = []
+
+    for tracer in tracers:
+        print(f"Processing REAL for tracer {tracer}, zone {zone}")
+        start_real = time.perf_counter()
+        real = process_real(tracer, zone)
+        print(f"Real done in {time.perf_counter() - start_real:.2f} s")
+
+        print(f"Generating RANDOMS for tracer {tracer}, zone {zone}")
+        start_rand = time.perf_counter()
+        random = generate_randoms_for_zone(tracer, zone, random_cache[tracer], n_random=n_random)
+        print(f"Randoms done in {time.perf_counter() - start_rand:.2f} s")
+
+        all_dfs.extend([real, random])
+
+    print(f"Concatenating data for zone {zone}")
     combined = pd.concat(all_dfs, ignore_index=True)
 
     # Final column order
-    combined = combined[['TARGETID', 'TRACERTYPE', 'RANDITER', 'RA', 'DEC', 'Z', 'X_CART', 'Y_CART', 'Z_CART']]
+    combined = combined[['TARGETID', 'TRACERTYPE', 'RANDITER', 'RA', 'DEC', 'Z', 'XCART', 'YCART', 'ZCART']]
 
-    # Save to compressed FITS
+    # for col in combined.select_dtypes(include='object').columns:
+    #   max_len = combined[col].astype(str).str.len().max()
+    #   fixed = combined[col].astype(str).values.astype(f'U{max_len}')
+    #   combined[col] = fixed
+    combined['TRACERTYPE'] = combined['TRACERTYPE'].astype(str).values.astype('U14')
+
+    # Save
     output_path = os.path.join(output_dir, f"ZONE_{zone:02d}.fits.gz")
+    print(f"Saving to {output_path}")
     fits.writeto(output_path, combined.to_records(index=False), overwrite=True)
+    print(f"Zone {zone} completed in {time.perf_counter() - zone_start:.2f} seconds\n")
