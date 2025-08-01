@@ -36,7 +36,7 @@ real_suffix = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
 random_suffix = {'N': '_N_{}_clustering.ran.fits', 'S': '_S_{}_clustering.ran.fits'}
 n_random_files = 18
 selected_columns = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
-output_dir = "01_CREATE_RAW"
+output_dir = "01_create_raw"
 os.makedirs(output_dir, exist_ok=True)
 
 n_random = 10
@@ -183,7 +183,7 @@ for zone in tqdm(range(n_zones), desc="Zones"):
     combined['TRACERTYPE'] = combined['TRACERTYPE'].astype(str).values.astype('S14')
 
     # Save
-    output_path = os.path.join(output_dir, f"ZONE_{zone:02d}.fits.gz")
+    output_path = os.path.join(output_dir, f"zone_{zone:02d}.fits.gz")
     print(f"Saving to {output_path}")
     fits.writeto(output_path, combined.to_records(index=False), overwrite=True)
     print(f"Zone {zone} completed in {time.perf_counter() - zone_start:.2f} seconds\n")
