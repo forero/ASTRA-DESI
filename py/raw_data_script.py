@@ -30,7 +30,10 @@ os.makedirs(output_dir, exist_ok=True)
 def load_fits_file_from_url(url, columns):
     with fits.open(BytesIO(requests.get(url).content)) as hdul:
         data = hdul[1].data
-        df = pd.DataFrame({col: data[col] for col in columns})
+        df = pd.DataFrame({
+            col: data[col].byteswap().newbyteorder() if data[col].dtype.byteorder not in ('=', '|') else data[col]
+            for col in columns
+        })
         df = df.rename(columns={'ROSETTE_NUMBER': 'ZONE'})
         return df
 
