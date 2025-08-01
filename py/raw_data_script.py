@@ -67,7 +67,7 @@ def process_random(tracer, rosettas_N, rosettas_S, ran_files_N, ran_files_S, rea
     import random
     import os
 
-    print(f"\n📦 Processing 100 random realizations for tracer: {tracer}")
+    print(f"\n Processing 100 random realizations for tracer: {tracer}")
     output_rows = []
 
     n_randoms = 100
@@ -84,7 +84,7 @@ def process_random(tracer, rosettas_N, rosettas_S, ran_files_N, ran_files_S, rea
             ran_files = ran_files_S
             hemisphere = 'S'
         else:
-            print(f"⚠️ Skipping unknown ZONE: {zone}")
+            print(f" Skipping unknown ZONE: {zone}")
             continue
 
         used_ran = set()
@@ -106,7 +106,7 @@ def process_random(tracer, rosettas_N, rosettas_S, ran_files_N, ran_files_S, rea
             ran_df = ran_df[ran_df['ROSETTE_NUMBER'] == zone]  # still uses old name in file
 
             if len(ran_df) == 0:
-                print(f"⚠️ No rows for ZONE {zone} in {os.path.basename(ran_file)}")
+                print(f" No rows for ZONE {zone} in {os.path.basename(ran_file)}")
                 continue
 
             ran_df = ran_df.sample(n=n_rows, random_state=j).reset_index(drop=True)
