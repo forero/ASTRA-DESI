@@ -11,7 +11,11 @@ import os
 import pandas as pd
 import numpy as np
 from astropy.io import fits
-from glob import glob
+from astropy.coordinates import SkyCoord
+from astropy.cosmology import Planck18
+import astropy.units as u
+from io import BytesIO
+import requests
 
 # Parameters
 base_url = "https://data.desi.lbl.gov/public/edr/vac/edr/lss/v2.0/LSScats/clustering/"
@@ -20,57 +24,137 @@ real_suffix = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
 random_suffix = {'N': '_N_{}_clustering.ran.fits', 'S': '_S_{}_clustering.ran.fits'}
 n_random_files = 18
 selected_columns = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
-
-def load_real_data(tracer):
-    dfs = []
-    for hemi in ['N', 'S']:
-        filename = f"{tracer}{real_suffix[hemi]}"
-        path = os.path.join(base_url, filename)
-        with fits.open(path) as hdul:
-            data = hdul[1].data
-            df = pd.DataFrame({col: data[col] for col in selected_columns})
-        df = df.rename(columns={'ROSETTE_NUMBER': 'ZONE'})
-        df['TRACERTYPE'] = f"{tracer.split('_')[0]}_REAL"
-        dfs.append(df)
-    return pd.concat(dfs, ignore_index=True)
-
-real_all = pd.concat([load_real_data(tr) for tr in tracers], ignore_index=True)
-
-def load_random_data(tracer):
-    dfs = []
-    for hemi in ['N', 'S']:
-        for i in range(n_random_files):
-            filename = f"{tracer}{random_suffix[hemi].format(i)}"
-            path = os.path.join(base_url, filename)
-            with fits.open(path) as hdul:
-                data = hdul[1].data
-                df = pd.DataFrame({col: data[col] for col in selected_columns})
-            df = df.rename(columns={'ROSETTEID': 'ZONE'})
-            df['TRACERTYPE'] = f"{tracer.split('_')[0]}_RAND"
-            dfs.append(df)
-    return pd.concat(dfs, ignore_index=True)
-
-random_all = pd.concat([load_random_data(tr) for tr in tracers], ignore_index=True)
-
-def sample_randoms(random_df, multiplier=100):
-    grouped = random_df.groupby(['TRACERTYPE', 'ZONE'], group_keys=False)
-    return grouped.apply(lambda g: g.sample(n=multiplier * len(g), replace=True)).reset_index(drop=True)
-
-random_100x = sample_randoms(random_all)
-
-from astropy.table import Table
-
 output_dir = "01_CREATE_RAW"
 os.makedirs(output_dir, exist_ok=True)
 
+def load_fits_file_from_url(url, columns):
+    with fits.open(BytesIO(requests.get(url).content)) as hdul:
+        data = hdul[1].data
+        df = pd.DataFrame({col: data[col] for col in columns})
+        df = df.rename(columns={'ROSETTE_NUMBER': 'ZONE'})
+        return df
+
+def compute_cartesian(df):
+    df = df.copy()
+    df['distance'] = Planck18.comoving_distance(df['Z'])
+    coords = SkyCoord(ra=df['RA'] * u.deg, dec=df['DEC'] * u.deg, distance=df['distance'])
+    df['X_CART'] = coords.cartesian.x.value
+    df['Y_CART'] = coords.cartesian.y.value
+    df['Z_CART'] = coords.cartesian.z.value
+    df.drop(columns=['distance'], inplace=True)
+    return df
+
+def process_real(tracer, zone):
+    dfs = []
+    for hemi in ['N', 'S']:
+        url = base_url + tracer + real_suffix[hemi]
+        df = load_fits_file_from_url(url, selected_columns)
+        df = df[df['ZONE'] == zone]
+        dfs.append(df)
+    df = pd.concat(dfs, ignore_index=True)
+    df = compute_cartesian(df)
+    df['TRACERTYPE'] = tracer + "_DATA"
+    df['RANDITER'] = -1
+    return df
+
+def process_random(tracer, rosettas_N, rosettas_S, ran_files_N, ran_files_S, real_dfs):
+    from astropy.table import Table
+    from astropy.coordinates import SkyCoord
+    from astropy.cosmology import Planck18 as cosmo
+    from astropy import units as u
+    import pandas as pd
+    import numpy as np
+    import random
+    import os
+
+    print(f"\n📦 Processing 100 random realizations for tracer: {tracer}")
+    output_rows = []
+
+    n_randoms = 100
+
+    for i, real_df in enumerate(real_dfs):
+        zone = real_df['ZONE'].iloc[0]
+        n_rows = len(real_df)
+
+        # File selection by hemisphere
+        if zone in rosettas_N:
+            ran_files = ran_files_N
+            hemisphere = 'N'
+        elif zone in rosettas_S:
+            ran_files = ran_files_S
+            hemisphere = 'S'
+        else:
+            print(f"⚠️ Skipping unknown ZONE: {zone}")
+            continue
+
+        used_ran = set()
+
+        for j in range(n_randoms):
+            if len(used_ran) == len(ran_files):
+                used_ran = set()
+
+            # Pick one random file not yet used (until all are used)
+            available = [f for f in ran_files if f not in used_ran]
+            ran_file = random.choice(available)
+            used_ran.add(ran_file)
+
+            print(f"→ ZONE {zone} | RANDITER {j} using: {os.path.basename(ran_file)}")
+
+            # Load file, filter to current zone
+            ran_table = Table.read(ran_file)
+            ran_df = ran_table.to_pandas()
+            ran_df = ran_df[ran_df['ROSETTE_NUMBER'] == zone]  # still uses old name in file
+
+            if len(ran_df) == 0:
+                print(f"⚠️ No rows for ZONE {zone} in {os.path.basename(ran_file)}")
+                continue
+
+            ran_df = ran_df.sample(n=n_rows, random_state=j).reset_index(drop=True)
+
+            # Set tracer type
+            ran_df['TRACERTYPE'] = tracer
+            ran_df['RANDITER'] = j
+
+            # Rename ZONE
+            ran_df = ran_df.rename(columns={'ROSETTE_NUMBER': 'ZONE'})
+
+            # Calculate Cartesian coordinates
+            zvals = ran_df['Z'].values
+            comov = cosmo.comoving_distance(zvals).to(u.Mpc)
+
+            coords = SkyCoord(
+                ra=ran_df['RA'].values * u.deg,
+                dec=ran_df['DEC'].values * u.deg,
+                distance=comov
+            )
+
+            ran_df['X_CART'] = coords.cartesian.x.value
+            ran_df['Y_CART'] = coords.cartesian.y.value
+            ran_df['Z_CART'] = coords.cartesian.z.value
+
+            # Keep only needed columns
+            ran_df = ran_df[['TARGETID', 'TRACERTYPE', 'RANDITER', 'RA', 'DEC', 'Z', 'X_CART', 'Y_CART', 'Z_CART']]
+
+            output_rows.append(ran_df)
+
+    # Concatenate all 100xN pieces
+    if output_rows:
+        full_random = pd.concat(output_rows, ignore_index=True)
+        return full_random
+    else:
+        return pd.DataFrame(columns=['TARGETID', 'TRACERTYPE', 'RANDITER', 'RA', 'DEC', 'Z', 'X_CART', 'Y_CART', 'Z_CART'])
+
 for zone in range(20):
-    real_zone = real_all[real_all['ZONE'] == zone]
-    rand_zone = random_100x[random_100x['ZONE'] == zone]
-    combined = pd.concat([real_zone, rand_zone], ignore_index=True)
+    all_dfs = []
+    for tracer in tracers:
+        real = process_real(tracer, zone)
+        random = process_random(tracer, zone)
+        all_dfs.extend([real, random])
+    combined = pd.concat(all_dfs, ignore_index=True)
 
-    # Keep final column order
-    combined = combined[['TARGETID', 'TRACERTYPE', 'RA', 'DEC', 'Z', 'ZONE']]
+    # Ensure final column order
+    combined = combined[['TARGETID', 'TRACERTYPE', 'RANDITER', 'RA', 'DEC', 'Z', 'X_CART', 'Y_CART', 'Z_CART']]
 
-    # Write as FITS
-    table = Table.from_pandas(combined)
-    table.write(os.path.join(output_dir, f"ZONE_{zone:02d}.fits.gz"), overwrite=True)
+    # Save to file
+    path = os.path.join(output_dir, f"ZONE_{zone:02d}.fits.gz")
+    fits.writeto(path, combined.to_records(index=False), overwrite=True)
