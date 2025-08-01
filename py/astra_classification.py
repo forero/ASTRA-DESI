@@ -6,7 +6,7 @@ from astropy.io import fits
 import os
 
 input_dir = "./01_create_raw/"        # Carpeta con los archivos zone_*.fits.gz
-output_dir = "./"                    # Carpeta donde se guarda el zone_*.pairs.fits.gz
+output_dir = "./02_astra_classification/"                    # Carpeta donde se guarda el zone_*.pairs.fits.gz
 n_random = 10                       # Número de iteraciones random a usar
 
 def load_dataframe_fix_endianness(path):
