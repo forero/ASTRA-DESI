@@ -180,7 +180,7 @@ for zone in tqdm(range(n_zones), desc="Zones"):
     #   max_len = combined[col].astype(str).str.len().max()
     #   fixed = combined[col].astype(str).values.astype(f'U{max_len}')
     #   combined[col] = fixed
-    combined['TRACERTYPE'] = combined['TRACERTYPE'].astype(str).values.astype('U14')
+    combined['TRACERTYPE'] = combined['TRACERTYPE'].astype(str).values.astype('S14')
 
     # Save
     output_path = os.path.join(output_dir, f"ZONE_{zone:02d}.fits.gz")
