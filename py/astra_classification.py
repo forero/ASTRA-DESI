@@ -9,7 +9,7 @@ input_dir = "./01_create_raw/"        # Carpeta con los archivos zone_*.fits.gz
 output_dir = "./02_astra_classification/"                    # Carpeta donde se guarda el zone_*.pairs.fits.gz
 n_random = 10                       # Número de iteraciones random a usar
 
-def load_dataframe_fix_endianness(path):
+def load_dataframe(path):
     with fits.open(path) as hdul:
         data = hdul[1].data
         df = pd.DataFrame({
@@ -59,6 +59,8 @@ def save_pairs_fits(rows, output_path):
     print(f"Saved: {output_path}")
 
 def main():
+    os.makedirs(output_dir, exist_ok=True)
+    
     for fname in sorted(os.listdir(input_dir)):
         if not fname.startswith("zone_") or not fname.endswith(".fits.gz"):
             continue
@@ -68,7 +70,7 @@ def main():
         output_path = os.path.join(output_dir, f"{zone_name}.pairs.fits.gz")
 
         print(f"\n[→] Processing {zone_name}")
-        df = load_dataframe_fix_endianness(input_path)
+        df = load_dataframe(input_path)
         rows = generate_pairs_for_zone(df, n_random)
         save_pairs_fits(rows, output_path)
 
