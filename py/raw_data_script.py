@@ -84,8 +84,8 @@ def process_random(tracer, zone):
     all_randoms = []
 
     # Iterate over unique rosettes in this zone
-    for rosetta in full_df['ROSETTE_NUMBER'].unique():
-        rosetta_df = full_df[full_df['ROSETTE_NUMBER'] == rosetta]
+    for rosetta in full_df['ZONE'].unique():
+        rosetta_df = full_df[full_df['ZONE'] == rosetta]
 
         n_rows = len(rosetta_df)
         if n_rows == 0:
