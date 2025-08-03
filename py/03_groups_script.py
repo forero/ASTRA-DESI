@@ -60,31 +60,31 @@ def open_webtype(data_zone, zone=1, randiter=1):
 
     return data_class
 
-def ids_webtype(data_class, web_type = 'filament'):
+def ids_webtype(data_class,limit, webtype = 'filament'):
 
-    data_webtype = parameter_r(data_class)
+    data_webtype = parameter_r(data_class,limit)
     data_webtype_filtered = data_webtype[['TARGETID','WEBTYPE']]
-    data_webtype_filtered = data_webtype_filtered[data_webtype_filtered['WEBTYPE'] == web_type]
+    data_webtype_filtered = data_webtype_filtered[data_webtype_filtered['WEBTYPE'] == webtype]
 
     ids_webtype = list(data_webtype_filtered['TARGETID'])
 
     return ids_webtype
 
-def parameter_r(data_class):
+def parameter_r(data_class,limit):
 
     n_data = data_class['NDATA'].values
     n_rand = data_class['NRAND'].values
     data_class['r'] = (n_data - n_rand) / (n_data + n_rand)
-    data_webtype = classification(data_class)
+    data_webtype = classification(data_class,limit)
 
     return data_webtype
 
-def classification(data_class):
+def classification(data_class,limit):
 
-    data_class.loc[(data_class['r'] >= -1.0) & (data_class['r'] <= -(limit_classification_r)), 'WEBTYPE'] = 'void'
-    data_class.loc[(data_class['r'] >  -(limit_classification_r)) & (data_class['r'] <=  0.0), 'WEBTYPE'] = 'sheet'
-    data_class.loc[(data_class['r'] >   0.0) & (data_class['r'] <=  (limit_classification_r)), 'WEBTYPE'] = 'filament'
-    data_class.loc[(data_class['r'] >   (limit_classification_r)) & (data_class['r'] <=  1.0), 'WEBTYPE'] = 'knot'
+    data_class.loc[(data_class['r'] >= -1.0) & (data_class['r'] <= -(limit)), 'WEBTYPE'] = 'void'
+    data_class.loc[(data_class['r'] >  -(limit)) & (data_class['r'] <=  0.0), 'WEBTYPE'] = 'sheet'
+    data_class.loc[(data_class['r'] >   0.0) & (data_class['r'] <=  (limit)), 'WEBTYPE'] = 'filament'
+    data_class.loc[(data_class['r'] >   (limit)) & (data_class['r'] <=  1.0), 'WEBTYPE'] = 'knot'
 
     return data_class
 
@@ -134,7 +134,7 @@ def identify_fof_groups(df_raw, ids_webtype, type_data, tracer_type, webtype, li
 
 n_zones = 20
 n_rand = 100
-webtype = 'knot'
+web_type = 'knot'
 data_type = 'data'
 tracer_type = 'LRG'
 limit_classification_r = 0.9
@@ -150,13 +150,15 @@ for i in range(n_zones):
         
         #data_class = data_class[['TARGETID','NDATA', 'NRAND']]
         data_webtype = open_webtype(data_zone_raw, zone = i, randiter = j )
+        print(data_webtype)
         
         #List of id according to the webtype
-        ids_classified = ids_webtype(data_webtype)
+        ids_classified = ids_webtype(data_webtype,limit=limit_classification_r,webtype = web_type)
+        print(ids_classified[:50])
 
         #df_connected_by_webtype = df_connected_by_webtype[['TRACERTYPE','TARGETID','GROUPID','RANDITER']]
         groups = identify_fof_groups(data_zone_raw,ids_classified,data_type,
-                                     tracer_type,webtype=webtype,linking_length=20, randiter = j)
+                                     tracer_type,webtype=web_type,linking_length=20, randiter = j)
         
         dfs_groups.append(groups)
     
@@ -166,7 +168,7 @@ for i in range(n_zones):
     
     table_connection = Table.from_pandas(df_final)
 
-    uncompressed_file = f"03_groups/zone_{i:02d}_groups_fof_{webtype}.fits"
+    uncompressed_file = f"03_groups/zone_{i:02d}_groups_fof_{web_type}.fits"
     compressed_file = uncompressed_file + ".gz"
     table_connection.write(uncompressed_file, format='fits', overwrite=True)
 
