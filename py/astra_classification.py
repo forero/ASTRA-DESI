@@ -5,10 +5,11 @@ from itertools import combinations
 from astropy.io import fits
 import os
 from collections import defaultdict
+from tqdm import tqdm
 
 input_dir = "./01_create_raw/"                           # Folder with zone_*.fits.gz files
 output_dir = "./02_astra_classification/"                # Folder where the files are saved
-n_random = 10                                            # Number of random iterations to use
+n_random = 100                                            # Number of random iterations to use
 
 
 def load_dataframe(path):
@@ -30,7 +31,7 @@ def generate_pairs_classification_probability(df, n_random):
     for tracer in tracers:
         df_tracer = df[df['TRACERTYPE'].str.startswith(tracer)]
 
-        for rand_iter in range(n_random):
+        for rand_iter in tqdm(range(n_random), desc=f"  Iterations for {tracer}"):
             mask = (df_tracer['RANDITER'] == -1) | (df_tracer['RANDITER'] == rand_iter)
             df_iter = df_tracer[mask]
 
@@ -145,8 +146,11 @@ def main():
         print(f"\nProcessing {zone_name}")
         df = load_dataframe(input_path)
         pair_rows, class_rows, r_by_tid = generate_pairs_classification_probability(df, n_random)
+        print('Saving pair file...')
         save_pairs_fits(pair_rows, output_pairs)
+        print('Saving class file...')
         save_classification_fits(class_rows, output_class)
+        print('Saving probability file...')
         save_probability_fits(r_by_tid, output_prob)
 
 if __name__ == "__main__":
