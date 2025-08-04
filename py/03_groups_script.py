@@ -39,8 +39,8 @@ def open_raw(zone=1, randiter=1, tracer_type='filament'):
 def open_webtype(data_zone, zone=1, randiter=1):
     ids = data_zone['TARGETID'].tolist()
 
-    columns = ['TARGETID', 'RANDITER', 'NDATA', 'NRAND']
-    filename = f'02_astra_classification/zone_{zone:02d}_classified.fits.gz'
+    columns = ['TARGETID', 'RANDITER', 'NDATA', 'NRAND','ISDATA']
+    filename = f'02_astra_classification/zone_{zone:02d}_class.fits.gz'
 
     with fits.open(filename, memmap=True) as hdul:
         data_fits = hdul[1].data
@@ -51,12 +51,9 @@ def open_webtype(data_zone, zone=1, randiter=1):
             for name in columns
         })
 
-    data_class = data_class[
-    (data_class['TARGETID'].isin(ids)) &
-    (data_class['RANDITER'] == randiter)
-    ].reset_index(drop=True)
+    data_class = data_class[data_class['RANDITER'] == randiter].reset_index(drop=True)
 
-    data_class = data_class[['TARGETID','RANDITER','NDATA', 'NRAND']]
+    data_class = data_class[['TARGETID','RANDITER','NDATA', 'NRAND','ISDATA']]
 
     return data_class
 
@@ -125,10 +122,9 @@ def identify_fof_groups(df_raw, ids_webtype, type_data, tracer_type, webtype, li
     _, group_ids = np.unique(group_ids, return_inverse=True)
     df_fof['GROUPID'] = group_ids
 
-    df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART', 'YCART', 'ZCART']]
+    df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART', 'YCART', 'ZCART','ISDATA']]
 
     df_fof['WEBTYPE'] = webtype
-    df_fof['RANDITER'] = randiter
 
     return df_fof
 
@@ -181,10 +177,10 @@ def inertia_tensor(df_fof):
     
     return df_fof 
 
-n_zones = 20
-n_rand = 100
-web_type = 'filament'
-data_type = 'data'
+n_zones = 1
+n_rand = 1
+web_type = 'void'
+data_type = 'rand'
 tracer_type = 'LRG'
 limit_classification_r = 0.9
 
@@ -198,17 +194,18 @@ for i in range(n_zones):
         #data_zone = data_zone[['TRACERTYPE','TARGETID','RANDITER','X_CART', 'Y_CART', 'Z_CART']]
         data_zone_raw = open_raw(zone = i, randiter = j,tracer_type = tracer_type)
 
-        #data_class = data_class[['TARGETID','NDATA', 'NRAND']]
+        #data_class = data_class[['TARGETID','NDATA', 'NRAND','ISDATA']]
         data_webtype = open_webtype(data_zone_raw, zone = i, randiter = j )
-        
+        print(data_webtype)
+      
         #List of id according to the webtype
         ids_classified = ids_webtype(data_webtype,limit=limit_classification_r,webtype = web_type)
 
         #df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART','YCART','ZCART','WEBTYPE]]
         groups = identify_fof_groups(data_zone_raw,ids_classified,data_type,
                                      tracer_type,webtype=web_type,linking_length=20, randiter = j)
-
-        #groups with ['XCM','YCM','ZCM','A','B','C']
+        print(groups)
+'''        #groups with ['XCM','YCM','ZCM','A','B','C']
         df_result = (
                 groups.groupby('GROUPID', group_keys=False)
             .apply(inertia_tensor)
@@ -239,3 +236,4 @@ for i in range(n_zones):
 
 total_elapsed = (time.time() - start_total)/60
 print(f'Total time:{total_elapsed:.2f} minutes')
+'''

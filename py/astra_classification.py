@@ -138,9 +138,9 @@ def main():
 
         input_path = os.path.join(input_dir, fname)
         zone_name = fname.replace(".fits.gz", "")
-        output_pairs = os.path.join(output_dir, f"{zone_name}.pairs.fits.gz")
-        output_class = os.path.join(output_dir, f"{zone_name}.class.fits.gz")
-        output_prob = os.path.join(output_dir, f"{zone_name}.probability.fits.gz")
+        output_pairs = os.path.join(output_dir, f"{zone_name}_pairs.fits.gz")
+        output_class = os.path.join(output_dir, f"{zone_name}_class.fits.gz")
+        output_prob = os.path.join(output_dir, f"{zone_name}_probability.fits.gz")
 
         print(f"\nProcessing {zone_name}")
         df = load_dataframe(input_path)
