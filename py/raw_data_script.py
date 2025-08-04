@@ -20,9 +20,9 @@ base_url = "https://data.desi.lbl.gov/public/edr/vac/edr/lss/v2.0/LSScats/cluste
 tracers = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
 real_suffix = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
 random_suffix = {'N': '_N_{}_clustering.ran.fits', 'S': '_S_{}_clustering.ran.fits'}
-n_random_files = 5 # Number of random files available per hemisphere at the url
-n_random = 10
-n_zones = 4
+n_random_files = 18 # Number of random files available per hemisphere at the url
+n_random = 100
+n_zones = 20
 output_dir = "01_create_raw"
 os.makedirs(output_dir, exist_ok=True)
 
