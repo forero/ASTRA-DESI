@@ -6,7 +6,7 @@ from astropy.table import Table
 from astropy.cosmology import Planck18
 
 def load_reals(zone, base_dir):
-    path = os.path.join(base_dir, f'ZONE_{zone:02d}.fits.gz')
+    path = os.path.join(base_dir, f'zone_{zone:02d}.fits.gz')
     df = Table.read(path).to_pandas()
     return df[df['RANDITER'] == -1].reset_index(drop=True)
 
