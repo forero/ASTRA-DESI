@@ -6,9 +6,9 @@ from astropy.io import fits
 import os
 from collections import defaultdict
 
-input_dir = "./01_create_raw/"                           # Carpeta con los archivos zone_*.fits.gz
-output_dir = "./02_astra_classification/"                # Carpeta donde se guarda el zone_*.pairs.fits.gz
-n_random = 10                                            # Número de iteraciones random a usar
+input_dir = "./01_create_raw/"                           # Folder with zone_*.fits.gz files
+output_dir = "./02_astra_classification/"                # Folder where the files are saved
+n_random = 10                                            # Number of random iterations to use
 
 
 def load_dataframe(path):
@@ -40,18 +40,19 @@ def generate_pairs_classification_probability(df, n_random):
 
             tri = Delaunay(coords)
 
+            # 1. For the pairs file
             neighbors = {i: set() for i in range(len(coords))}
             for simplex in tri.simplices:
                 for i, j in combinations(simplex, 2):
-                    # Vecinos de cada punto (por índice)
+                    # We save connections by index
                     neighbors[i].add(j)
                     neighbors[j].add(i)
 
-                    # IDs de los puntos conectados (para guardar como par)
+                    # We save connections by TARGETID
                     tid1, tid2 = targetids[i], targetids[j]
                     pair_rows.append((tid1, tid2, rand_iter))
 
-            # Clasificación por punto real
+            # 2. For the class file
             for i, nbrs in neighbors.items():
                 tid = targetids[i]
                 ndata = np.sum(is_data[list(nbrs)])
@@ -60,6 +61,7 @@ def generate_pairs_classification_probability(df, n_random):
                 is_data_flag = bool(is_data[i])  # True si es real, False si es random
                 class_rows.append((tid, rand_iter, is_data_flag, ndata, nrand))
 
+                # 3. For the probability file
                 if is_data_flag and (ndata + nrand) > 0:
                     r = (ndata - nrand) / (ndata + nrand)
                     if tid not in r_by_tid:
