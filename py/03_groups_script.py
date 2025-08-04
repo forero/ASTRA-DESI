@@ -125,16 +125,65 @@ def identify_fof_groups(df_raw, ids_webtype, type_data, tracer_type, webtype, li
     _, group_ids = np.unique(group_ids, return_inverse=True)
     df_fof['GROUPID'] = group_ids
 
-    df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER']]
+    df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART', 'YCART', 'ZCART']]
 
     df_fof['WEBTYPE'] = webtype
     df_fof['RANDITER'] = randiter
 
     return df_fof
 
+def inertia_tensor(df_fof):
+
+    df_fof = df_fof.copy()
+
+    x, y , z = df_fof['XCART'].values, df_fof['YCART'].values, df_fof['ZCART'].values
+    xcm, ycm, zcm = np.mean(x),np.mean(y),np.mean(z)
+    df_fof['XCM'], df_fof['YCM'], df_fof['ZCM'] = xcm, ycm, zcm
+
+    x = x - xcm
+    y = y - ycm
+    z = z - zcm
+
+    if len(df_fof) < 2:
+        df_fof[['A', 'B', 'C']] = np.nan
+        return df_fof
+
+
+    r = np.sqrt(x**2 + y**2 + z**2)
+    I = np.ones((3,3))
+    
+    I[0,0] = np.sum(r**2 - x*x)
+    I[1,1] = np.sum(r**2 - y*y)
+    I[2,2] = np.sum(r**2 - z*z)
+    
+    I[0,1] = -np.sum(x*y)
+    I[1,0] = I[0,1]
+    
+    I[0,2] = -np.sum(x*z)
+    I[2,0] = I[0,2]
+    
+    I[1,2] = -np.sum(y*z)
+    I[2,1] = I[1,2]
+    
+    values, vectors = np.linalg.eig(I)
+    ii = np.argsort(-values)
+    
+    sqrt_values = values[ii]
+    #vectors_final = vectors[:,ii]
+
+    values[values < 0] = 0  # O usa np.clip
+
+    a, b, c = np.sqrt(values[ii])
+
+    df_fof['A'] = a
+    df_fof['B'] = b
+    df_fof['C'] = c
+    
+    return df_fof 
+
 n_zones = 20
 n_rand = 100
-web_type = 'knot'
+web_type = 'filament'
 data_type = 'data'
 tracer_type = 'LRG'
 limit_classification_r = 0.9
@@ -142,27 +191,34 @@ limit_classification_r = 0.9
 for i in range(n_zones):
 
     start_zone = time.time()
+    print(f'Zone {i}')
     dfs_groups = []
     
     for j in range(n_rand):
         #data_zone = data_zone[['TRACERTYPE','TARGETID','RANDITER','X_CART', 'Y_CART', 'Z_CART']]
         data_zone_raw = open_raw(zone = i, randiter = j,tracer_type = tracer_type)
-        
+
         #data_class = data_class[['TARGETID','NDATA', 'NRAND']]
         data_webtype = open_webtype(data_zone_raw, zone = i, randiter = j )
-        print(data_webtype)
         
         #List of id according to the webtype
         ids_classified = ids_webtype(data_webtype,limit=limit_classification_r,webtype = web_type)
-        print(ids_classified[:50])
 
-        #df_connected_by_webtype = df_connected_by_webtype[['TRACERTYPE','TARGETID','GROUPID','RANDITER']]
+        #df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART','YCART','ZCART','WEBTYPE]]
         groups = identify_fof_groups(data_zone_raw,ids_classified,data_type,
                                      tracer_type,webtype=web_type,linking_length=20, randiter = j)
-        
-        dfs_groups.append(groups)
-    
-    table = Table.from_pandas(groups)
+
+        #groups with ['XCM','YCM','ZCM','A','B','C']
+        df_result = (
+                groups.groupby('GROUPID', group_keys=False)
+            .apply(inertia_tensor)
+            .reset_index(drop=True)
+            )
+
+        df_inertia = df_result[['TRACERTYPE','TARGETID','GROUPID','RANDITER','WEBTYPE',
+                                'XCM','YCM','ZCM','A','B','C']]
+
+        dfs_groups.append(df_inertia)
 
     df_final = pd.concat(dfs_groups, ignore_index=True)
     
