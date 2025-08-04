@@ -86,13 +86,14 @@ def classification(data_class,limit):
     return data_class
 
 def identify_fof_groups(df_raw, ids_webtype, type_data, tracer_type, webtype, linking_length=50,randiter=1):
-
+    
     df_webtype = df_raw[df_raw['TARGETID'].isin(ids_webtype)].copy()
 
     if type_data == 'data':
         df_fof = df_webtype[df_webtype['TRACERTYPE']==f'{tracer_type}_DATA']
     if type_data == 'rand':
         df_fof = df_webtype[df_webtype['TRACERTYPE']==f'{tracer_type}_RAND']
+    
 
     #Aplicar Friends-of-Friends (FoF) con KDTree
     positions = df_fof[['XCART', 'YCART', 'ZCART']].values
@@ -122,9 +123,10 @@ def identify_fof_groups(df_raw, ids_webtype, type_data, tracer_type, webtype, li
     _, group_ids = np.unique(group_ids, return_inverse=True)
     df_fof['GROUPID'] = group_ids
 
-    df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART', 'YCART', 'ZCART','ISDATA']]
+    df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART', 'YCART', 'ZCART']]
 
     df_fof['WEBTYPE'] = webtype
+    df_fof['RANDITER'] = randiter
 
     return df_fof
 
@@ -177,63 +179,64 @@ def inertia_tensor(df_fof):
     
     return df_fof 
 
-n_zones = 1
-n_rand = 1
-web_type = 'void'
-data_type = 'rand'
-tracer_type = 'LRG'
+n_zones = 4
+n_rand = 10
+web_type = ['knot','filament','void']
+data_type = ['data','data','rand']
+tracer_type = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
+linking_length = [20,20,20,70]
 limit_classification_r = 0.9
 
-for i in range(n_zones):
+for wtype, dtype in zip(web_type, data_type):
+    for i in range(n_zones):
 
-    start_zone = time.time()
-    print(f'Zone {i}')
-    dfs_groups = []
-    
-    for j in range(n_rand):
-        #data_zone = data_zone[['TRACERTYPE','TARGETID','RANDITER','X_CART', 'Y_CART', 'Z_CART']]
-        data_zone_raw = open_raw(zone = i, randiter = j,tracer_type = tracer_type)
+        start_zone = time.time()
+        print(f'Webtype: {wtype}, Zone: {i}')
+        
+        dfs_groups = []
 
-        #data_class = data_class[['TARGETID','NDATA', 'NRAND','ISDATA']]
-        data_webtype = open_webtype(data_zone_raw, zone = i, randiter = j )
-        print(data_webtype)
-      
-        #List of id according to the webtype
-        ids_classified = ids_webtype(data_webtype,limit=limit_classification_r,webtype = web_type)
+        for tracer,length in zip(tracer_type,linking_length):
+            print(f'Tracer: {tracer}')
+            for j in range(n_rand):
+                data_zone_raw = open_raw(zone=i, randiter=j, tracer_type=tracer)
+                #print(data_zone_raw)
+                data_webtype = open_webtype(data_zone_raw, zone=i, randiter=j)
+                #print(data_webtype)
+                ids_classified = ids_webtype(data_webtype, limit=limit_classification_r, webtype=wtype)
+                #print(ids_classified)
+                groups = identify_fof_groups(data_zone_raw, ids_classified, dtype,
+                                             tracer, webtype=wtype, linking_length=length, randiter=j)
 
-        #df_fof = df_fof[['TRACERTYPE','TARGETID','GROUPID','RANDITER','XCART','YCART','ZCART','WEBTYPE]]
-        groups = identify_fof_groups(data_zone_raw,ids_classified,data_type,
-                                     tracer_type,webtype=web_type,linking_length=20, randiter = j)
-        print(groups)
-'''        #groups with ['XCM','YCM','ZCM','A','B','C']
-        df_result = (
-                groups.groupby('GROUPID', group_keys=False)
-            .apply(inertia_tensor)
-            .reset_index(drop=True)
-            )
+                df_result = (
+                    groups.groupby('GROUPID', group_keys=False)
+                    .apply(inertia_tensor)
+                    .reset_index(drop=True)
+                )
+                print(df_result)
 
-        df_inertia = df_result[['TRACERTYPE','TARGETID','GROUPID','RANDITER','WEBTYPE',
-                                'XCM','YCM','ZCM','A','B','C']]
+                if df_result.empty:
+                    print("DataFrame vacío. Continuando...")
+                else: 
+                    df_inertia = df_result[['TRACERTYPE', 'TARGETID', 'GROUPID', 'RANDITER', 'WEBTYPE',
+                                        'XCM', 'YCM', 'ZCM', 'A', 'B', 'C']]
 
-        dfs_groups.append(df_inertia)
+                dfs_groups.append(df_inertia)
+        if dfs_groups:
+            df_final = pd.concat(dfs_groups, ignore_index=True)
+            table_connection = Table.from_pandas(df_final)
 
-    df_final = pd.concat(dfs_groups, ignore_index=True)
-    
-    table_connection = Table.from_pandas(df_final)
+            uncompressed_file = f"03_groups/zone_{i:02d}_groups_fof_{wtype}.fits"
+            compressed_file = uncompressed_file + ".gz"
+            table_connection.write(uncompressed_file, format='fits', overwrite=True)
 
-    uncompressed_file = f"03_groups/zone_{i:02d}_groups_fof_{web_type}.fits"
-    compressed_file = uncompressed_file + ".gz"
-    table_connection.write(uncompressed_file, format='fits', overwrite=True)
+            with open(uncompressed_file, 'rb') as f_in:
+                with gzip.open(compressed_file, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
 
-    with open(uncompressed_file, 'rb') as f_in:
-        with gzip.open(compressed_file, 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
+            os.remove(uncompressed_file)
 
-    os.remove(uncompressed_file)
-
-    elapsed_zone = (time.time() - start_zone)/60
-    print(f'Zona {i}: {elapsed_zone:.2f} minutes')
+        elapsed_zone = (time.time() - start_zone)/60
+        print(f'Zona {i}: {elapsed_zone:.2f} minutes')
 
 total_elapsed = (time.time() - start_total)/60
 print(f'Total time:{total_elapsed:.2f} minutes')
-'''
