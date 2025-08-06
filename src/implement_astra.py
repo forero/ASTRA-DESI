@@ -77,6 +77,7 @@ def process_delaunay(pts, tids, is_data, iteration):
     class_rows = []
     r_updates = defaultdict(list)
 
+    # valid = np.nonzero(is_data & (total_count>0))[0]
     valid = np.nonzero(is_data & (total_count>0))[0]
     r_vals = (data_count[valid] - (total_count[valid] - data_count[valid])) / total_count[valid]
     for i,r in zip(valid, r_vals):

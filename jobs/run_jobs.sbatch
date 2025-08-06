@@ -3,7 +3,7 @@
 #SBATCH --account=desi
 #SBATCH --partition=regular_milan_ss11
 #SBATCH --time=00:30:00
-#SBATCH --mem=20G
+#SBATCH --mem=16G
 #SBATCH --array=START-END%5
 #SBATCH -C cpu
 #SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/logs/zone_%a.out
@@ -24,8 +24,6 @@ LOGDIR="${SCRATCH_BASE}/edr/logs"
 mkdir -p "${RAW_OUT}" "${CLASS_OUT}" "${LOGDIR}"
 
 ZONE="${SLURM_ARRAY_TASK_ID}"
-echo "[$(date +%H:%M:%S)] Procesando zona ${ZONE}"
-
 srun /usr/bin/time -f \
     $'%E elapsed\n%U user CPU\n%S sys CPU\n%P CPU%%\n%M KB max RSS\n' \
     -o "${LOGDIR}/zone_${ZONE}.time" \

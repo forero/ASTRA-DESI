@@ -16,6 +16,7 @@ NORTH_ROSETTES = {3, 6, 7, 11, 12, 13, 14, 15, 18, 19}
 REAL_COLUMNS = ["TARGETID", "ROSETTE_NUMBER", "RA", "DEC", "Z"]
 RANDOM_COLUMNS = REAL_COLUMNS
 
+#! TODO  - clustering, fof? implementation
 
 def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_columns, random_columns, n_random_files):
     """

@@ -1,404 +1,487 @@
+#!/usr/bin/env python3
 import os, argparse
-from astropy.table import Table, join
+import numpy as np, seaborn as sns
 import matplotlib.pyplot as plt
-import numpy as np
-from astropy.cosmology import Planck18
 
-import seaborn as sns
-import matplotlib.pyplot as plt
+from astropy.table import Table
+from astropy.cosmology import Planck18
+from matplotlib.lines import Line2D
 plt.rcParams.update({'font.family': 'serif', 'font.size': 12, 'axes.labelsize': 12,
                      'xtick.labelsize': 10,'ytick.labelsize': 10, 'legend.fontsize': 10,})
 
+CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
+CLASS_ZORDER = {'void':0, 'sheet':1, 'filament':2, 'knot':3}
+
+#! TODO  - clustering, fof? plots
 
 def get_zone_paths(raw_dir, class_dir, zone):
     """
-    Construct file paths for raw and class tables for a given zone.
-    Pads single-digit zones with a leading zero.
+    Get file paths for a given zone number.
+
     Args:
-        raw_dir: Directory with raw zone FITS files.
-        class_dir: Directory with class zone FITS files.
-        zone: Zone number (int).
+        raw_dir (str): Directory containing raw data files.
+        class_dir (str): Directory containing classification files.
+        zone (int): Zone number.
     Returns:
-        Tuple of (raw_file_path, class_file_path)
+        tuple: Paths to the raw data file and classification file for the zone.
     """
-    zone_str = f"{zone:02d}"
-    raw_file = os.path.join(raw_dir, f"zone_{zone_str}.fits.gz")
-    class_file = os.path.join(class_dir, f"zone_{zone_str}_class.fits.gz")
-    return raw_file, class_file
+    z2 = f"{zone:02d}"
+    return (os.path.join(raw_dir, f"zone_{z2}.fits.gz"),
+            os.path.join(class_dir, f"zone_{z2}_class.fits.gz"),)
 
 
-def load_zone_tables(raw_path, class_path):
+def get_prob_path(raw_dir, class_dir, zone):
     """
-    Load raw and class tables from disk.
+    Get the probability file path for a given zone number.
+
     Args:
-        raw_path: Path to the raw zone FITS file.
-        class_path: Path to the class zone FITS file.
+        raw_dir (str): Directory containing raw data files.
+        class_dir (str): Directory containing classification files.
+        zone (int): Zone number.
     Returns:
-        Tuple of (raw_table, class_table)
+        str: Path to the probability file for the zone.
     """
-    return Table.read(raw_path), Table.read(class_path, memmap=True)
+    z2 = f"{zone:02d}"
+    return os.path.join(class_dir, f"zone_{z2}_probability.fits.gz")
 
 
-def merge_tables(raw_tbl, class_tbl):
+def infer_zones(raw_dir, provided):
     """
-    Join raw and class tables on TARGETID to add ISDATA flag.
-    """
-    return join(raw_tbl, class_tbl['TARGETID', 'ISDATA'], keys='TARGETID', join_type='left')
+    Infer available zones from raw directory if not provided.
 
-
-def extract_z_values(joined_tbl):
-    """
-    From joined table, return arrays of Z for data and random.
     Args:
-        joined_tbl: Table with ISDATA and Z columns.
+        raw_dir (str): Directory containing raw data files.
+        provided (list or None): List of zone numbers if provided.
     Returns:
-        Tuple of (z_data, z_rand)
+        list: List of zone numbers.
     """
-    is_data = joined_tbl['ISDATA']
-    z = joined_tbl['Z']
-    return z[is_data], z[~is_data]
+    if provided: 
+        return provided
+    files = os.listdir(raw_dir)
+    zones = sorted(int(f.split('_')[1].split('.')[0]) for f in files
+                   if f.startswith('zone_') and f.endswith('.fits.gz'))
+    return zones
 
 
-def infer_zones(raw_dir, provided_zones):
+def make_output_dirs(base):
     """
-    Determine zones list from raw_dir if not provided.
+    Create output directories for plots.
     
     Args:
-        raw_dir: Directory with raw zone FITS files.
-        provided_zones: List of zones to process, if any.
+        base (str): Base output directory.
     Returns:
-        List of zone numbers to process.
+        dict: Dictionary with paths for different plot types.
     """
-    if provided_zones is not None:
-        return provided_zones
-    files = [f for f in os.listdir(raw_dir)
-             if f.startswith('zone_') and f.endswith('.fits.gz')]
-    return sorted(int(f.split('_')[1].split('.')[0]) for f in files)
-
-
-def make_output_dirs(base_output):
-    """
-    Create subdirectories for each plot type.
-    
-    Args:
-        base_output: Base output directory for plots.
-    Returns:
-        Dictionary with directories for z histograms, radial plots, and cdf plots.
-    """
-    dirs = {'z': os.path.join(base_output, 'z_histograms'),
-            'radial': os.path.join(base_output, 'radial'),
-            'cdf': os.path.join(base_output, 'cdf')}
-    for d in dirs.values():
+    out = {'z': os.path.join(base, 'z_histograms'),
+           'radial': os.path.join(base, 'radial'),
+           'cdf': os.path.join(base, 'cdf')}
+    for d in out.values():
         os.makedirs(d, exist_ok=True)
-    return dirs
+    return out
 
 
-def load_zone_dataframe(raw_dir, zone):
+def load_raw_df(path):
     """
-    Load a zone FITS file into a pandas DataFrame, decoding bytes.
+    Load raw data from FITS file into a pandas DataFrame.
 
     Args:
-        raw_dir: Directory with raw zone FITS files.
-        zone: Zone number to load.
+        path (str): Path to the FITS file.
     Returns:
-        DataFrame with columns from the FITS file.
+        pd.DataFrame: DataFrame containing the raw data.
     """
-    path = os.path.join(raw_dir, f"zone_{zone:02d}.fits.gz")
-    df = Table.read(path).to_pandas()
-    df['TRACERTYPE'] = df['TRACERTYPE'].apply(lambda x: x.decode('utf-8') if
-                                              isinstance(x, (bytes, bytearray)) else x)
+    tbl = Table.read(path)
+    df = tbl.to_pandas()
+    df['TRACERTYPE'] = df['TRACERTYPE'].apply(
+                lambda x: x.decode('utf-8') if isinstance(x, (bytes, bytearray)) else x)
+    df['BASE'] = df['TRACERTYPE'].str.replace(r'_(DATA|RAND)$','', regex=True)
+    df['ISDATA'] = df['TRACERTYPE'].str.endswith('_DATA')
     return df
 
 
-def compute_r_df(raw_dir, class_dir, zone):
+def load_class_df(path):
     """
-    Compute r = (NDATA - NRAND)/(NDATA + NRAND) and attach TRACERTYPE.
+    Load classification data from FITS file into a pandas DataFrame.
 
     Args:
-        raw_dir: Directory with raw zone FITS files.
-        class_dir: Directory with class zone FITS files.
-        zone: Zone number to process.
+        path (str): Path to the FITS file.
     Returns:
-        DataFrame with TARGETID, TRACERTYPE, NDATA, NRAND, and
+        pd.DataFrame: DataFrame containing the classification data.
     """
-    raw_path, class_path = get_zone_paths(raw_dir, class_dir, zone)
-    raw_tbl = Table.read(raw_path).to_pandas()
-    class_tbl = Table.read(class_path).to_pandas()
-    df = class_tbl.merge(raw_tbl[['TARGETID','TRACERTYPE']], on='TARGETID', how='left')
-    
-    df['TRACERTYPE'] = df['TRACERTYPE'].apply(lambda x: x.decode('utf-8') if 
-                                              isinstance(x, (bytes, bytearray)) else x)
-    df['r'] = (df['NDATA'] - df['NRAND']) / (df['NDATA'] + df['NRAND']).replace(0, np.nan)
-    return df
-    
+    tbl = Table.read(path, memmap=True)
+    df = tbl.to_pandas()
+    return df[['TARGETID','NDATA','NRAND','ISDATA']]
 
-def plot_histogram(z_data, z_rand, zone, bins, output_dir):
+
+def load_prob_df(path):
     """
-    Plot and save histogram for one zone
+    Load probability data from FITS file into a pandas DataFrame.
+    
+    Args:
+        path (str): Path to the FITS file.
+    Returns:
+        pd.DataFrame: DataFrame containing the probability data with assigned classes.
+    """
+    tbl = Table.read(path)
+    df = tbl.to_pandas()
+    prob_cols = [c for c in ['PVOID','PSHEET','PFILAMENT','PKNOT'] if c in df]
+    df['CLASS'] = df[prob_cols].idxmax(axis=1).str[1:].str.lower()
+    return df[['TARGETID','CLASS']]
+
+
+def compute_r(df):
+    """
+    Compute the r for each entry in the DataFrame.
 
     Args:
-        z_data: Array of Z values for data.
-        z_rand: Array of Z values for random.
-        zone: Zone number for the plot title.
-        bins: Number of bins for the histogram.
-        output_dir: Directory to save the histogram plot.
+        df (pd.DataFrame): DataFrame containing 'NDATA' and 'NRAND' columns.
+    Returns:
+        pd.DataFrame: DataFrame with an additional 'r' column.
     """
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.hist(z_data, bins=bins, alpha=0.7, label='Data', zorder=10)
-    ax.hist(z_rand, bins=bins, alpha=0.7, label='Random')
-    ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
-    ax.set(xlabel='Z', ylabel='Count', title=f'Z Distribution for Zone {zone}')
+    df = df.copy()
+    denom = (df['NDATA'] + df['NRAND']).replace(0, np.nan)
+    df['r'] = (df['NDATA'] - df['NRAND']) / denom
+    return df
+
+
+def plot_z_histogram(df, zone, bins, out_dir):
+    """
+    Plot histogram of Z values for real and random data.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing 'Z' and 'ISDATA' columns.
+        zone (int): Zone number for title and filename.
+        bins (int): Number of bins for the histogram.
+        out_dir (str): Output directory to save the plot.
+    """
+    real, rand = df[df['ISDATA']]['Z'], df[~df['ISDATA']]['Z']
+
+    fig, ax = plt.subplots()
+    ax.grid(linewidth=0.7)
+    ax.hist([real, rand], bins=bins, label=['Data','Random'], alpha=0.7)
+    ax.set(xlabel='Z', ylabel='Count', title=f'Zone {zone}')
     ax.legend()
 
-    out_file = os.path.join(output_dir, f'z_hist_zone_{zone}.png')
-    fig.savefig(out_file, dpi=360)
-    plt.close(fig)
+    path = os.path.join(out_dir, f'z_hist_zone_{zone}.png')
+    fig.savefig(path, dpi=360); plt.close(fig)
 
 
-def plot_z_histograms(raw_dir, class_dir, zones, output_dir, bins=50):
+def plot_radial_distribution(raw_df, zone, tracers, out_dir, bins):
     """
-    Plot Z histograms for specified zones.
+    Plot radial distribution histograms for specified tracers.
 
     Args:
-        raw_dir: Directory with raw zone FITS files.
-        class_dir: Directory with class zone FITS files.
-        zones: List of zone numbers to process.
-        output_dir: Directory to save the histogram plots.
-        bins: Number of bins for the histogram.
+        raw_df (pd.DataFrame): DataFrame containing raw data with 'XCART', 
+                    'YCART', 'ZCART', 'TRACERTYPE', and 'RANDITER' columns.
+        zone (int): Zone number for title and filename.
+        tracers (list): List of tracer types to plot.
+        out_dir (str): Output directory to save the plots.
     """
-    os.makedirs(output_dir, exist_ok=True)
-    for zone in zones:
-        raw_path, class_path = get_zone_paths(raw_dir, class_dir, zone)
-        raw_tbl, class_tbl = load_zone_tables(raw_path, class_path)
-        joined = merge_tables(raw_tbl, class_tbl)
-        z_data, z_rand = extract_z_values(joined)
-        plot_histogram(z_data, z_rand, zone, bins, output_dir)
+    fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers),4))
+
+    for ax, tracer in zip(axes, tracers):
+        if tracer=='BGS_ANY':
+            tracer = 'BGS'
+        sub = raw_df[raw_df['TRACERTYPE'].str.startswith(tracer)]
+        real = sub[sub['RANDITER']==-1]
+        rand = sub[sub['RANDITER']!=-1].sample(len(real), random_state=0)
+
+        r_real = np.linalg.norm(real[['XCART','YCART','ZCART']], axis=1)
+        r_rand = np.linalg.norm(rand[['XCART','YCART','ZCART']], axis=1)
+
+        ax.grid(linewidth=0.7)
+        ax.hist([r_real, r_rand], bins, label=['Real','Random'], alpha=0.7)
+        ax.set(title=tracer, xlabel=r'$r$', ylabel='Count')
+        ax.legend(fontsize=6)
+
+    fig.suptitle(f'Radial Zone {zone}')
+    fig.tight_layout()
+    path = os.path.join(out_dir, f'radial_zone_{zone}.png')
+    fig.savefig(path, dpi=360); plt.close(fig)
 
 
-def plot_radial_by_zone(raw_dir, zones, tracers, output_dir=None):
+def plot_cdf(df_r, zone, tracers, out_dir):
     """
-    Plot radial distributions for each tracer in each zone.
+    Plot CDF of r values for specified tracers.
 
     Args:
-        raw_dir: Directory with raw zone FITS files.
-        zones: List of zone numbers to process.
-        tracers: List of tracer types to plot.
-        output_dir: Directory to save the radial distribution plots.
+        df_r (pd.DataFrame): DataFrame containing 'r', 'TRACERTYPE', and 'ISDATA' columns.
+        zone (int): Zone number for title and filename.
+        tracers (list): List of tracer types to plot.
+        out_dir (str): Output directory to save the plot.
     """
-    for zone in zones:
-        df = load_zone_dataframe(raw_dir, zone)
-        fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers), 4))
+    cmap = {'BGS_ANY':'blue','ELG':'red','LRG':'green','QSO':'purple'}
+    fig, ax = plt.subplots()
+    ax.grid(linewidth=0.7)
 
-        for ax, tracer in zip(axes, tracers):
-            sub = df[df['TRACERTYPE'].str.startswith(tracer)]
-            real = sub[sub['RANDITER'] == -1]
-            rand = sub[sub['RANDITER'] != -1].sample(n=len(real), random_state=0)
-            d_real = np.linalg.norm(real[['XCART','YCART','ZCART']].values, axis=1)
-            d_rand = np.linalg.norm(rand[['XCART','YCART','ZCART']].values, axis=1)
+    for tr in tracers:
+        sub = df_r[df_r['TRACERTYPE'].str.startswith(tr)]
+        sns.ecdfplot(sub[sub['ISDATA']]['r'], ax=ax, label=f'{tr} real',
+                     color=cmap[tr], linewidth=1)
+        sns.ecdfplot(sub[~sub['ISDATA']]['r'], ax=ax, label=f'{tr} rand',
+                     color=cmap[tr], linestyle='--', linewidth=1)
 
-            ax.hist(d_real, bins=30, alpha=0.7, label='Real', zorder=10)
-            ax.hist(d_rand, bins=30, alpha=0.7, label='Random')
-            ax.set_title(tracer)
-            ax.set_xlabel(r'$r = \sqrt{x^2 + y^2 + z^2}$')
-            ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
-            ax.legend(loc='upper left', fontsize=6)
+    ax.set(xlabel='r', ylabel='CDF', title=f'CDF Zone {zone}')
+    ax.legend(fontsize=6)
+    path = os.path.join(out_dir, f'cdf_zone_{zone}.png')
+    fig.savefig(path, dpi=360); plt.close(fig)
+
+
+def plot_wedges(raw_df, prob_df, zone, output_dir,
+                z_max=0.4, n_ra=15, n_z=10):
+    """
+    Plot complete wedges for specified tracers.
     
-        axes[0].set_ylabel('Count')
-        fig.suptitle(f'Radial Distribution Zone {zone}')
-        plt.tight_layout()
-
-        os.makedirs(output_dir, exist_ok=True)
-        fig.savefig(os.path.join(output_dir, f'radial_zone_{zone}.png'), dpi=360)
-        plt.close(fig)
-
-
-def plot_cdf_by_zone(raw_dir, class_dir, zones, tracers, output_dir=None):
-    """
-    Plot CDF of r values for each tracer in each zone.
-
     Args:
-        raw_dir: Directory with raw zone FITS files.
-        class_dir: Directory with class zone FITS files.
-        zones: List of zone numbers to process.
-        tracers: List of tracer types to plot.
-        output_dir: Directory to save the CDF plots.
+        raw_df (pd.DataFrame): DataFrame containing raw data with 'RA', 'DEC', 'Z', 
+                    'TRACERTYPE', and 'ISDATA' columns.
+        prob_df (pd.DataFrame): DataFrame containing classification data with 'TARGETID'
+                                and 'CLASS' columns.
+        zone (int): Zone number for title and filename.
+        output_dir (str): Output directory to save the plots.
+        z_max (float): Maximum z value for the plot.
+        n_ra (int): Number of RA ticks.
+        n_z (int): Number of Z ticks.
     """
-    color_map = {'BGS_ANY': 'blue', 'ELG': 'red', 'LRG': 'green', 'QSO': 'purple'}
+    out_dir = os.path.join(output_dir, "wedges/complete")
+    os.makedirs(out_dir, exist_ok=True)
 
-    fig, axes = plt.subplots(1, len(zones), figsize=(5*len(zones), 5), sharey=True)
-    if len(zones) == 1:
-        axes = [axes]
+    tracers = ["BGS_ANY", "LRG", "ELG", "QSO"]
+    df = raw_df.merge(prob_df, on='TARGETID', how='left')
+    real = df[df['ISDATA']]
 
-    for ax, zone in zip(axes, zones):
-        df = compute_r_df(raw_dir, class_dir, zone)
+    zs = np.linspace(0, z_max, 300)
 
-        for tracer in tracers:
-            sub = df[df['TRACERTYPE'].str.startswith(tracer)]
-            is_data = sub['ISDATA']
-            color = color_map.get(tracer, 'black')
+    fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers), 20),
+                             sharey=False, gridspec_kw={'wspace': 0.5})
+    axes = axes.flatten()
 
-            sns.ecdfplot(sub.loc[is_data, 'r'], ax=ax, label=f'{tracer} real',
-                         color=color, linewidth=1)
-            sns.ecdfplot(sub.loc[~is_data, 'r'], ax=ax, label=f'{tracer} rand',
-                         color=color, linestyle='--', linewidth=1)
-        ax.set_xlabel('r')
-        ax.set_title(f'Zone {zone}')
-        ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
-        ax.legend(loc='upper left', fontsize=6)
-    axes[0].set_ylabel('CDF')
-    plt.tight_layout()
-
-    os.makedirs(output_dir, exist_ok=True)
-    fig.savefig(os.path.join(output_dir, 'cdf_zones.png'), dpi=360)
-    plt.close(fig)
-
-#! ---------------------------------------------------------
-def make_merged(zone, raw_dir, prob_dir):
-    """
-    Merge raw and classification tables for a given zone into a single DataFrame.
-    Adds columns: RA, DEC, Z, XCART, YCART, ZCART from raw, and ISDATA, NDATA, NRAND, r, CLASS from classification.
-    Args:
-        zone (int): Zone number to merge.
-        raw_dir (str): Directory with raw FITS files.
-        prob_dir (str): Directory with classification FITS files.
-    Returns:
-        pandas.DataFrame: Merged data containing all necessary columns.
-    """
-    # Load raw and classification
-    raw_path = os.path.join(raw_dir, f"zone_{zone:02d}.fits.gz")
-    class_path = os.path.join(prob_dir, f"zone_{zone:02d}_class.fits.gz")
-    raw_df = Table.read(raw_path).to_pandas()
-    class_df = Table.read(class_path).to_pandas()
-    # Decode tracer types
-    raw_df['TRACERTYPE'] = raw_df['TRACERTYPE'].apply(
-        lambda x: x.decode('utf-8') if isinstance(x, (bytes, bytearray)) else x
-    )
-    # Merge on TARGETID
-    df = raw_df.merge(
-        class_df[['TARGETID', 'ISDATA', 'NDATA', 'NRAND']],
-        on='TARGETID', how='left'
-    )
-    # Compute r and CLASS
-    df['r'] = (df['NDATA'] - df['NRAND']) / (df['NDATA'] + df['NRAND']).replace(0, np.nan)
-    # CLASS labels based on r
-    def classify_type(r):
-        if -1.0 <= r <= -0.9: return 'void'
-        elif -0.9 < r <= 0.0: return 'sheet'
-        elif 0.0 < r <= 0.9: return 'filament'
-        elif 0.9 < r <= 1.0: return 'knot'
-        else: return 'undefined'
-    df['CLASS'] = df['r'].apply(classify_type)
-    return df
-
-
-def plot_colored_wedges(raw_dir, prob_dir, zone, output_dir,
-                        tracers=['BGS_ANY','ELG','LRG','QSO'],
-                        z_max=0.213, n_ra=20, n_z=20):
-    """
-    Plot wedge diagrams for a given zone in a 2xN grid (data on top row, random on bottom).
-    Args:
-        raw_dir (str): Directory with raw FITS files.
-        prob_dir (str): Directory with classification FITS files.
-        zone (int): Zone number to plot.
-        output_dir (str): Directory to save the output plot.
-        tracers (list): List of tracer prefixes to include.
-        z_max (float): Maximum redshift to plot.
-        n_ra (int): Number of RA grid lines.
-        n_z (int): Number of Z grid lines.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    COLORS = {'data': 'red', 'random': 'red'}  # solid and dashed will differentiate
-    df = make_merged(zone, raw_dir, prob_dir)
-    ra_min, ra_max = df['RA'].min(), df['RA'].max()
-    ra_ctr = 0.5 * (ra_min + ra_max)
-    dec_ctr = 0.5 * (df['DEC'].min() + df['DEC'].max())
-    Dc_max = Planck18.comoving_distance(z_max).value
-    half_w = Dc_max * np.deg2rad(ra_max - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
-    z_ticks = np.linspace(0, z_max, n_z)
-    ra_ticks = np.linspace(ra_min, ra_max, n_ra)
-    zs = np.linspace(0, z_max, 200)
-    fig, axes = plt.subplots(2, len(tracers),
-                             figsize=(4*len(tracers), 8),
-                             sharex=True, sharey=True)
-
-    # Draw grid
-    for ax_row in axes:
-        for ax in ax_row:
-            for z0 in z_ticks:
-                w0 = half_w * (z0 / z_max)
-                ax.hlines(z0, -w0, w0, color='gray', lw=0.5, alpha=0.5)
-            for rt in ra_ticks[::max(1, n_ra//4)]:
-                dx = Dc_max * np.deg2rad(rt - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
-                ax.plot(dx/z_max * zs, zs, color='gray', lw=0.5, alpha=0.5)
-            ax.set_frame_on(False)
-            ax.set_xlim(-half_w, half_w)
-            ax.set_ylim(0, z_max)
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-    # Compute positions
-    Dc = Planck18.comoving_distance(df['Z'].values).value
-    x = Dc * np.deg2rad(df['RA'] - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
-
-    # Plot data and random per tracer
     for i, tracer in enumerate(tracers):
-        sub = df[df['TRACERTYPE'].str.startswith(tracer)]
-        for row, (label, mask) in enumerate([('data', sub['RANDITER']==-1),
-                                              ('random', sub['RANDITER']!=-1)]):
-            ax = axes[row, i]
-            grp = sub[mask]
-            Dc_grp = Planck18.comoving_distance(grp['Z'].values).value
-            x_grp = Dc_grp * np.deg2rad(grp['RA'] - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
-            ax.scatter(x_grp, grp['Z'], s=1,
-                       color=COLORS[label],
-                       alpha=0.6,
-                       label=label,
-                       linestyle='-' if label=='data' else '--')
-            if row == 0:
-                ax.set_title(tracer)
+        ax = axes[i]
+        sub = real[real['BASE'] == tracer]
 
-    # Legend
-    handles, labels = axes[0,0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower right', fontsize=6)
-    plt.tight_layout()
-    out_file = os.path.join(output_dir, f'wedges_zone_{zone:02d}.png')
-    fig.savefig(out_file, dpi=360)
+        title = tracer.split('_')[0] if tracer=='BGS_ANY' else tracer
+        ax.set_title(f"{title}", fontsize=16, y=1.05)
+
+        ax.set_frame_on(False)
+        ax.yaxis.tick_right()
+        ax.tick_params(left=False, right=True,
+                       labelleft=False, labelright=True)
+        ax.set_xticks([])
+
+        z_sub_max = max(z_max, sub['Z'].max() * 1.02)
+        ra_min, ra_max = sub['RA'].min(), sub['RA'].max()
+        ra_ctr = 0.5*(ra_min + ra_max)
+        dec_ctr = 0.5*(sub['DEC'].min() + sub['DEC'].max())
+        Dc_sub = Planck18.comoving_distance(z_sub_max).value
+        half_w = Dc_sub * np.deg2rad(ra_max - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
+
+        z_ticks = np.linspace(0, z_sub_max, n_z)
+        ra_ticks = np.linspace(ra_min, ra_max, n_ra)
+
+        for z0 in z_ticks:
+            w0 = half_w * (z0 / z_sub_max)
+            ax.hlines(z0, -w0, w0, color='gray', lw=0.5, alpha=0.5)
+        for rt in ra_ticks[::4]:
+            dx = Dc_sub * np.deg2rad(rt - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
+            ax.plot(dx / z_sub_max * zs, zs, color='gray', lw=0.5, alpha=0.5)
+
+        for cls in ['void','sheet','filament','knot']:
+            df_cls = sub[sub['CLASS'] == cls]
+            if df_cls.empty: continue 
+            Dc_vals = Planck18.comoving_distance(df_cls['Z']).value
+            x_vals = Dc_vals * np.deg2rad(df_cls['RA'] - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
+            y_vals = df_cls['Z'].values
+
+            size = 10 if cls in ('void','knot') else 4
+            ax.scatter(x_vals, y_vals, s=size, c=CLASS_COLORS[cls], zorder=CLASS_ZORDER[cls])
+
+        ax.plot([-half_w, 0], [z_sub_max, 0], 'k-', lw=1.5, zorder=CLASS_ZORDER['knot']+1)
+        ax.plot([half_w, 0], [z_sub_max, 0], 'k-', lw=1.5, zorder=CLASS_ZORDER['knot']+1)
+
+        ax.set_xlim(-half_w, half_w)
+        ax.set_ylim(0, z_sub_max)
+        ax.set_yticks(z_ticks)
+        ax.set_yticklabels([f"{zt:.1f}" for zt in z_ticks], fontsize=13)
+        if i == 0:
+            ax.set_ylabel('z', fontsize=20)
+
+        def x2ra(xv):
+            return ra_ctr + np.rad2deg(xv / (Dc_sub * np.cos(np.deg2rad(dec_ctr))))
+        def ra2x(rv):
+            return Dc_sub * np.deg2rad(rv - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
+        sec = ax.secondary_xaxis('top', functions=(x2ra, ra2x))
+        sec.set_xticks(ra_ticks[::4])
+        sec.set_xticklabels([f"{rt:.0f}" for rt in ra_ticks[::4]], fontsize=13)
+        sec.set_xlabel('RA [deg]', fontsize=14, labelpad=13)
+
+    handles = [Line2D([], [], marker='o', color=CLASS_COLORS[c], linestyle='', markersize=8,
+                      label=c) for c in CLASS_COLORS]
+    fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5, 0.965),
+               loc='upper center', ncol=len(CLASS_COLORS), fontsize=14)
+    plt.suptitle(f"Zone {zone}", fontsize=18)
+
+    path = os.path.join(out_dir, f"wedge_zone_{zone:02d}.png")
+    fig.savefig(path, dpi=360)
     plt.close(fig)
+    # print(f"Saved {path}")
 
-#! ---------------------------------------------------------
 
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--raw-dir', required=True, help='Directory with raw zone FITS files')
-    parser.add_argument('--class-dir', required=True, help='Directory with class zone FITS files')
-    parser.add_argument('--zones', nargs='+', type=int, default=None,
-                        help='List of zones to process (default: all in raw-dir)')
+def plot_wedges_slice(raw_df, prob_df, zone, output_dir,
+                        n_ra=15, n_z=10, offset=0.3):
+    """
+    Plot wedge slices for specified tracers.
+    
+    Args:
+        raw_df (pd.DataFrame): DataFrame containing raw data with 'RA', 'DEC', 'Z', 
+                    'TRACERTYPE', and 'ISDATA' columns.
+        prob_df (pd.DataFrame): DataFrame containing classification data with 'TARGETID'
+                                and 'CLASS' columns.
+        zone (int): Zone number for title and filename.
+        output_dir (str): Output directory to save the plots.
+        n_ra (int): Number of RA ticks.
+        n_z (int): Number of Z ticks.
+        offset (float): Offset to apply when determining z range.
+    """
+    out_dir = os.path.join(output_dir, "wedges/slice")
+    os.makedirs(out_dir, exist_ok=True)
 
-    parser.add_argument('--output', required=True, help='Base output directory for plots')
-    parser.add_argument('--bins', type=int, default=50, help='Number of histogram bins')
-    parser.add_argument('--tracers', nargs='+', default=['BGS_ANY','ELG','LRG','QSO'],
-                        help='List of tracers for radial and cdf plots')
+    tracers = ["BGS_ANY","LRG","ELG","QSO"]
+    df = raw_df.merge(prob_df, on='TARGETID', how='left')
+    real = df[df['ISDATA']]
 
-    parser.add_argument('--plot-z', default=True, action='store_true', help='Plot Z histograms')
-    parser.add_argument('--plot-radial', default=True, action='store_true', help='Plot radial distributions')
-    parser.add_argument('--plot-cdf', default=True, action='store_true', help='Plot cdf of r values')
-    parser.add_argument('--plot-wedges', default=True, action='store_true', help='Plot colored wedges')
-    return parser.parse_args()
+    mins, maxs = [], []
+    for tr in tracers:
+        zs = real.loc[real['BASE'] == tr, 'Z']
+        mins.append(zs.min()); maxs.append(zs.max())
+    z_lo = max(mins) - offset
+    z_hi = min(maxs) + offset
+    if z_hi <= z_lo:
+        raise RuntimeError(f"Empty z-range [{z_lo}, {z_hi}]")
+
+    ra_min_g, ra_max_g = real['RA'].min(), real['RA'].max()
+    ra_ctr_g = 0.5*(ra_min_g + ra_max_g)
+    dec_ctr_g = 0.5*(real['DEC'].min() + real['DEC'].max())
+
+    ra_ticks = np.linspace(ra_min_g, ra_max_g, n_ra)
+    Dc_hi = Planck18.comoving_distance(z_hi).value
+    half_w_g = Dc_hi * np.deg2rad(ra_max_g - ra_ctr_g) * np.cos(np.deg2rad(dec_ctr_g))
+
+    zs = np.linspace(z_lo, z_hi, 300)
+    z_ticks = np.linspace(z_lo, z_hi, n_z)
+
+    fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers), 20),
+                             sharex=True, sharey=True, gridspec_kw={'wspace': 0.5})
+    axes = axes.flatten()
+
+    for i, tr in enumerate(tracers):
+        ax = axes[i]
+        sub = real[real['BASE'] == tr]
+
+        ax.set_title(f"{tr.replace('_ANY','')}", fontsize=16, y=1.05)
+        ax.set_frame_on(False)
+        ax.yaxis.tick_right()
+        ax.tick_params(left=False, right=True,
+                       labelleft=False, labelright=True)
+        ax.set_xticks([])
+
+        for z0 in z_ticks:
+            w0 = half_w_g * ((z0 - z_lo) / (z_hi - z_lo))
+            ax.hlines(z0, -w0, w0, color='gray', lw=0.5, alpha=0.5)
+        for rt in ra_ticks[::4]:
+            dx = Planck18.comoving_distance(zs).value * \
+                 np.deg2rad(rt - ra_ctr_g) * np.cos(np.deg2rad(dec_ctr_g))
+            ax.plot(dx, zs, color='gray', lw=0.5, alpha=0.5)
+
+        for cls in ['void','sheet','filament','knot']:
+            df_cls = sub[sub['CLASS'] == cls]
+            if df_cls.empty: continue
+
+            Dc_vals = Planck18.comoving_distance(df_cls['Z']).value
+            x_vals = Dc_vals * np.deg2rad(df_cls['RA'] - ra_ctr_g) * np.cos(np.deg2rad(dec_ctr_g))
+            y_vals = df_cls['Z']
+            size = 10 if cls in ('void','knot') else 4
+            ax.scatter(x_vals, y_vals, s=size, c=CLASS_COLORS[cls],
+                       zorder=CLASS_ZORDER[cls])
+
+        for ra_edge in (real['RA'].min(), real['RA'].max()):
+            x_edge = Planck18.comoving_distance(zs).value * \
+                     np.deg2rad(ra_edge - ra_ctr_g) * np.cos(np.deg2rad(dec_ctr_g))
+            ax.plot(x_edge, zs, 'k-', lw=2)
+
+        ax.set_xlim(-half_w_g, half_w_g)
+        ax.set_ylim(z_lo, z_hi)
+        ax.set_yticks(z_ticks)
+        ax.set_yticklabels([f"{zt:.1f}" for zt in z_ticks], fontsize=13)
+        if i == 0:
+            ax.set_ylabel('z', fontsize=20)
+
+        def x2ra(xv):
+            return ra_ctr_g + np.rad2deg(xv / (Dc_hi * np.cos(np.deg2rad(dec_ctr_g))))
+        def ra2x(rv):
+            return Dc_hi * np.deg2rad(rv - ra_ctr_g) * np.cos(np.deg2rad(dec_ctr_g))
+        sec = ax.secondary_xaxis('top', functions=(x2ra, ra2x))
+        sec.set_xticks(ra_ticks[::4])
+        sec.set_xticklabels([f"{rt:.0f}" for rt in ra_ticks[::4]], fontsize=13)
+        sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
+
+    handles = [Line2D([], [], marker='o', color=CLASS_COLORS[c], linestyle='',
+                      markersize=8, label=c) for c in CLASS_COLORS]
+    fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5, 0.965),
+               loc='upper center', ncol=len(CLASS_COLORS), fontsize=14)
+    plt.suptitle(f"Zone {zone}", fontsize=18)
+
+    path = os.path.join(out_dir, f"wedge_zone_{zone:02d}.png")
+    fig.savefig(path, dpi=360)
+    plt.close(fig)
+    # print(f"Saved {path}")
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument('--raw-dir', required=True)
+    p.add_argument('--class-dir', required=True)
+    p.add_argument('--zones', nargs='+', type=int, default=None)
+    p.add_argument('--output', required=True)
+    p.add_argument('--bins', type=int, default=10)
+    p.add_argument('--tracers', nargs='+',
+                   default=['BGS_ANY','ELG','LRG','QSO'])
+    p.add_argument('--plot-z', action='store_true', default=True)
+    p.add_argument('--plot-radial', action='store_true', default=True)
+    p.add_argument('--plot-cdf', action='store_true', default=True)
+    p.add_argument('--plot-wedges', action='store_true', default=True)
+    return p.parse_args()
 
 
 def main():
-    args = parse_arguments()
+    args = parse_args()
     zones = infer_zones(args.raw_dir, args.zones)
-    out_dirs = make_output_dirs(args.output)
+    outdirs = make_output_dirs(args.output)
 
-    # if args.plot_z:
-    #     plot_z_histograms(args.raw_dir, args.class_dir, zones, out_dirs['z'], args.bins)
-    # if args.plot_radial:
-    #     plot_radial_by_zone(args.raw_dir, zones, args.tracers, out_dirs['radial'])
-    # if args.plot_cdf:
-    #     plot_cdf_by_zone(args.raw_dir, args.class_dir, zones, args.tracers, out_dirs['cdf'])
-    if args.plot_wedges:
-        plot_colored_wedges(args.raw_dir, args.class_dir, zones[0], args.output)
+    raw_cache, class_cache, prob_cache = {}, {}, {}
+
+    for zone in zones:
+        raw_path, cls_path = get_zone_paths(args.raw_dir, args.class_dir, zone)
+        prob_path = get_prob_path(args.raw_dir, args.class_dir, zone)
+
+        raw_df = raw_cache.setdefault(zone, load_raw_df(raw_path))
+        cls_df = class_cache.setdefault(zone, load_class_df(cls_path))
+        cls_df = cls_df[cls_df['ISDATA'] == True]
+        # cls_df = cls_df.drop_duplicates(subset='TARGETID')
+        merged = raw_df.merge(cls_df[['TARGETID','NDATA','NRAND']], on='TARGETID', how='left')
+        r_df = compute_r(merged)
+
+        if args.plot_z:
+            plot_z_histogram(merged, zone, args.bins, outdirs['z'])
+        if args.plot_cdf:
+            plot_cdf(r_df, zone, args.tracers, outdirs['cdf'])
+        if args.plot_radial:
+            plot_radial_distribution(raw_df, zone, args.tracers, outdirs['radial'], args.bins)
+        if args.plot_wedges:
+            prob_df = prob_cache.setdefault(zone, load_prob_df(prob_path))
+            plot_wedges(raw_df, prob_df, zone, args.output)
+            plot_wedges_slice(raw_df, prob_df, zone, args.output)
+
 
 if __name__ == '__main__':
     main()
+#python plot_add.py --raw-dir /pscratch/sd/v/vtorresg/cosmic-web/edr/raw --class-dir /pscratch/sd/v/vtorresg/cosmic-web/edr/class --output ../plots
