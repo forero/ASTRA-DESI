@@ -17,44 +17,39 @@ REAL_COLUMNS = ["TARGETID", "ROSETTE_NUMBER", "RA", "DEC", "Z"]
 RANDOM_COLUMNS = REAL_COLUMNS
 
 
-def preload_real_tables(base_dir):
+def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_columns, random_columns, n_random_files):
     """
-    Preload real data tables for all tracers and hemispheres.
-    
+    Preload all real and random tables for the specified tracers.
     Args:
-      base_dir: Base directory containing the real data files.
+        base_dir (str): Base directory containing the data files.
+        tracers (list): List of tracer types to process.
+        real_suffix (dict): Dictionary with suffixes for real data files.
+        random_suffix (dict): Dictionary with suffixes for random data files.
+        real_columns (list): List of columns to load from real data files.
+        random_columns (list): List of columns to load from random data files.
+        n_random_files (int): Number of random files per tracer.
     Returns:
-      A dictionary with tracer names as keys and another dictionary as values,
-      where the inner dictionary has hemispheres ('N' or 'S') as keys and
-      Astropy Tables as values.
+        tuple: Two dictionaries containing preloaded real and random tables.
+    Raises:
+        RuntimeError: If any table fails to load.
     """
-    real = {t:{} for t in TRACERS}
-    for tr in TRACERS:
-        for hemi in ("N","S"):
-            path = os.path.join(base_dir, tr + REAL_SUFFIX[hemi])
-            real[tr][hemi] = load_table(path, REAL_COLUMNS)
-    return real
+    try:
+        real_tables = {t: {} for t in tracers}
+        rand_tables = {t: {'N': {}, 'S': {}} for t in tracers}
 
+        for tr in tracers:
+            for hemi in ('N', 'S'):
+                real_path = os.path.join(base_dir, tr + real_suffix[hemi])
+                real_tables[tr][hemi] = load_table(real_path, real_columns)
 
-def preload_random_tables(base_dir):
-    """
-    Preload random data tables for all tracers and hemispheres.
+                for i in range(n_random_files):
+                    fname = random_suffix[hemi].format(i=i)
+                    path = os.path.join(base_dir, tr + fname)
+                    rand_tables[tr][hemi][i] = load_table(path, random_columns)
 
-    Args:
-      base_dir: Base directory containing the random data files.
-    Returns:
-      A dictionary with tracer names as keys and another dictionary as values,
-      where the inner dictionary has hemispheres ('N' or 'S') as keys and
-      a dictionary of random iterations as keys and Astropy Tables as values.
-    """
-    rand = {t:{"N":{}, "S":{}} for t in TRACERS}
-    for tr in TRACERS:
-        for hemi in ("N","S"):
-            for i in range(N_RANDOM_FILES):
-                fname = RANDOM_SUFFIX[hemi].format(i=i)
-                path = os.path.join(base_dir, tr + fname)
-                rand[tr][hemi][i] = load_table(path, RANDOM_COLUMNS)
-    return rand
+        return real_tables, rand_tables
+    except Exception as e:
+        raise RuntimeError(f"Error preloading tables: {e}") from e
 
 
 def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
@@ -69,18 +64,23 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
         n_random (int): Number of randoms per real object.
     Returns:
         Astropy Table: Combined table with real and random data for the specified zone.
+    Raises:
+        RuntimeError: If building or saving the raw table fails.
     """
-    parts = []
-    for tr in TRACERS:
-        rt = process_real(real_tables, tr, zone, NORTH_ROSETTES)
-        parts.append(rt)
-        count = len(rt)
-        rpt = generate_randoms(random_tables, tr, zone, NORTH_ROSETTES, n_random, count)
-        parts.append(rpt)
-    tbl = vstack(parts)
-    out = os.path.join(output_raw, f"zone_{zone:02d}.fits.gz")
-    tbl.write(out, format="fits", overwrite=True)#, compression="gzip")
-    return tbl
+    try:
+        parts = []
+        for tr in TRACERS:
+            rt = process_real(real_tables, tr, zone, NORTH_ROSETTES)
+            parts.append(rt)
+            count = len(rt)
+            rpt = generate_randoms(random_tables, tr, zone, NORTH_ROSETTES, n_random, count)
+            parts.append(rpt)
+        tbl = vstack(parts)
+        out = os.path.join(output_raw, f"zone_{zone:02d}.fits.gz")
+        tbl.write(out, format="fits", overwrite=True)#, compression="gzip")
+        return tbl
+    except Exception as e:
+        raise RuntimeError(f"Error building raw table for zone {zone}: {e}") from e
 
 
 def classify_zone(zone, tbl, output_class, n_random):
@@ -93,37 +93,48 @@ def classify_zone(zone, tbl, output_class, n_random):
         tbl (Astropy Table): Input table with real and random data.
         output_class (str): Output directory for classification files.
         n_random (int): Number of randoms per real object.
+    Raises:
+        RuntimeError: If classification or saving files fails.
     """
-    base = f"zone_{zone:02d}"
-    pr, cr, rdict = generate_pairs(tbl, n_random)
-    save_pairs_fits(pr, os.path.join(output_class, f"{base}_pairs.fits.gz"))
-    save_classification_fits(cr, os.path.join(output_class, f"{base}_class.fits.gz"))
-    save_probability_fits(rdict, os.path.join(output_class, f"{base}_probability.fits.gz"))
+    try:
+        base = f"zone_{zone:02d}"
+        pr, cr, rdict = generate_pairs(tbl, n_random)
+        save_pairs_fits(pr, os.path.join(output_class, f"{base}_pairs.fits.gz"))
+        save_classification_fits(cr, os.path.join(output_class, f"{base}_class.fits.gz"))
+        save_probability_fits(rdict, os.path.join(output_class, f"{base}_probability.fits.gz"))
+    except Exception as e:
+        raise RuntimeError(f"Error classifying zone {zone}: {e}") from e
+
 
 def main():
     """
     Main function to parse arguments and run the classification process for specified zones.
+    Raises:
+        RuntimeError: If any step in the main workflow fails.
     """
-    p = argparse.ArgumentParser()
-    p.add_argument("--base-dir", required=True, help="DESI base dir")
-    p.add_argument("--raw-out", required=True, help="Raw output folder")
-    p.add_argument("--class-out", required=True, help="Classification output folder")
-    p.add_argument("--n-random", type=int, default=10, help="Number of randoms per real object")
-    p.add_argument("--zone", type=int, default=1, help="Single zone to run (0...19)")
-    args = p.parse_args()
+    try:
+        p = argparse.ArgumentParser()
+        p.add_argument("--base-dir", required=True, help="DESI base dir")
+        p.add_argument("--raw-out", required=True, help="Raw output folder")
+        p.add_argument("--class-out", required=True, help="Classification output folder")
+        p.add_argument("--n-random", type=int, default=100, help="Number of randoms per real object")
+        p.add_argument("--zone", type=int, default=1, help="Single zone to run (0...19)")
+        args = p.parse_args()
 
-    os.makedirs(args.raw_out, exist_ok=True)
-    os.makedirs(args.class_out, exist_ok=True)
+        os.makedirs(args.raw_out, exist_ok=True)
+        os.makedirs(args.class_out, exist_ok=True)
 
-    real_tables = preload_real_tables(args.base_dir)
-    random_tables = preload_random_tables(args.base_dir)
+        real_tables, random_tables = preload_all_tables(args.base_dir, TRACERS,
+                                                        REAL_SUFFIX, RANDOM_SUFFIX,
+                                                        REAL_COLUMNS, RANDOM_COLUMNS,
+                                                        N_RANDOM_FILES)
 
-    zones = [args.zone] if args.zone is not None else range(N_ZONES)
-    for z in zones:
-        print(f"[Zone {z}] building raw table")
-        tbl = build_raw_table(z, real_tables, random_tables, args.raw_out, args.n_random)
-        print(f"[Zone {z}] classifying")
-        classify_zone(z, tbl, args.class_out, args.n_random)
+        zones = [args.zone] if args.zone is not None else range(N_ZONES)
+        for z in zones:
+            tbl = build_raw_table(z, real_tables, random_tables, args.raw_out, args.n_random)
+            classify_zone(z, tbl, args.class_out, args.n_random)
+    except Exception as e:
+        raise RuntimeError(f"Pipeline execution failed: {e}") from e
 
 if __name__=="__main__":
     main()

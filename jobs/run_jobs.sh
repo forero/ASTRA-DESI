@@ -22,7 +22,8 @@ run_zone(){
   local ts=$(date +%Y%m%d_%H%M%S)
   echo "[$(date +%H:%M:%S)] -> Zone $zone"
 
-  local tlog="$LOGDIR/zone_${zone}_${ts}.time"
+  local tlog="$LOGDIR/zone_${zone}.time"
+
   # elapsed, user CPU, sys CPU, CPU%, max RSS in KB
   local fmt=$'%E elapsed\n%U user CPU\n%S sys CPU\n%P CPU%%\n%M KB max RSS\n'
 
@@ -33,7 +34,7 @@ run_zone(){
       --raw-out   "$RAW_OUT" \
       --class-out "$CLASS_OUT" \
       # 1>>"$LOGDIR/zone_${zone}_${ts}.out" \
-      2>>"$LOGDIR/zone_${zone}_${ts}.err"
+      2>>"$LOGDIR/zone_${zone}.err"
 
   local kb=$(awk '/KB max RSS/ {print $1}' "$tlog")
   local gb=$(awk "BEGIN {printf \"%.2f\", $kb/1024/1024}")

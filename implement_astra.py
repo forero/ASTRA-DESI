@@ -25,8 +25,6 @@ def extract_tracer_blocks(tbl):
     					  'coords': coords_all[idxs], 'is_data': randiters[idxs] == -1}
     return blocks
 
-
-
 def compute_delaunay_pairs(pts):
     """
     Computes unique pairs of points from a set of 3D coordinates using Delaunay triangulation.
@@ -46,7 +44,6 @@ def compute_delaunay_pairs(pts):
     pairs = np.unique(edges, axis=0)
     gc.collect()
     return pairs
-
 
 def process_delaunay(pts, tids, is_data, iteration):
     """ Processes 3D coordinates to compute pairs, counts, and classification for a given iteration.
@@ -88,7 +85,6 @@ def process_delaunay(pts, tids, is_data, iteration):
 
     return pair_rows, class_rows, r_updates
 
-
 def generate_pairs(tbl, n_random):
 	"""
 	Generates pairs of target IDs and classification data from the input table.
@@ -121,21 +117,10 @@ def generate_pairs(tbl, n_random):
 
 	return pair_rows, class_rows, r_by_tid
 
-
 def build_pairs_table(rows):
-    """
-    Builds a pairs table from the provided rows.
-	Args:
-		rows (list): List of tuples containing pairs data.
-	Returns:
-		Table: Astropy Table containing pairs data with columns:
-			- TARGETID1: First target ID in the pair
-			- TARGETID2: Second target ID in the pair
-			- RANDITER: Random iteration number
-    """
-    return Table(rows=rows, names=('TARGETID1','TARGETID2','RANDITER'),
+	  return Table(rows=rows,
+				 names=('TARGETID1','TARGETID2','RANDITER'),
 				 dtype=('i8','i8','i4'))
-   
 
 def save_pairs_fits(rows, output_path):
 	"""
@@ -146,7 +131,7 @@ def save_pairs_fits(rows, output_path):
 	"""
 	tbl = build_pairs_table(rows)
 	tbl.write(output_path, format='fits', overwrite=True)
-   
+
 def build_class_table(rows):
 	  """
 	  Builds a classification table from the provided rows.
@@ -160,21 +145,13 @@ def build_class_table(rows):
 	  		- NDATA: Number of real data points
 	  		- NRAND: Number of random points
 	  """
-	  return Table(rows=rows, names=('TARGETID','RANDITER','ISDATA','NDATA','NRAND'),
-				   dtype=('i8','i4','bool','i4','i4'))
-   
+	  return Table(rows=rows,
+				 names=('TARGETID','RANDITER','ISDATA','NDATA','NRAND'),
+				 dtype=('i8','i4','bool','i4','i4'))
 
 def save_classification_fits(rows, output_path):
-    """
-    Saves the classification table to a FITS file.
-	Args:
-		rows (list): List of tuples containing classification data.
-		output_path (str): Path to save the FITS file.
-	"""
-    tbl = build_class_table(rows)
-    tbl.write(output_path, format='fits', overwrite=True)
-    
-
+	  tbl = build_class_table(rows)
+	  tbl.write(output_path, format='fits', overwrite=True)
 
 def build_probability_table(r_by_tid):
 	  """
@@ -185,9 +162,8 @@ def build_probability_table(r_by_tid):
 	  	Table: Astropy Table containing target IDs and their corresponding probabilities.
 	  """
 	  n = len(r_by_tid)
-	  dtype = [('TARGETID','i8'), ('PVOID','f4'),
-               ('PSHEET','f4'), ('PFILAMENT','f4'),
-               ('PKNOT','f4')]
+	  dtype = [('TARGETID','i8'),('PVOID','f4'),
+	  		 ('PSHEET','f4'),('PFILAMENT','f4'),('PKNOT','f4')]
 	  data = np.zeros(n, dtype=dtype)
 	  bins = np.array([-0.9, 0.0, 0.9], dtype=np.float32)
 
@@ -195,22 +171,21 @@ def build_probability_table(r_by_tid):
 	  	  arr = np.asarray(rlist, dtype=np.float32)
 	  	  if arr.size:
 	  	  	  classes = np.digitize(arr, bins)
-	  	  	  counts = np.bincount(classes, minlength=4)
-	  	  	  total = arr.size
-	  	  	  probs = counts / total
+	  	  	  counts  = np.bincount(classes, minlength=4)
+	  	  	  total   = arr.size
+	  	  	  probs   = counts / total
 	  	  else:
 	  	  	  probs = np.zeros(4, dtype=np.float32)
 	  	  data[i] = (tid, *probs.tolist())
 
 	  return Table(data)
 
-
 def save_probability_fits(r_by_tid, output_path):
-	"""
-	Saves the probability table to a FITS file.
-	Args:
-	r_by_tid (defaultdict): Dictionary mapping target IDs to lists of random values.
-	output_path (str): Path to save the FITS file.
-	"""
-	tbl = build_probability_table(r_by_tid)
-	tbl.write(output_path, format='fits', overwrite=True)
+	  """
+	  Saves the probability table to a FITS file.
+	  Args:
+	  	r_by_tid (defaultdict): Dictionary mapping target IDs to lists of random values.
+	  	output_path (str): Path to save the FITS file.
+	  """
+	  tbl = build_probability_table(r_by_tid)
+	  tbl.write(output_path, format='fits', overwrite=True)
