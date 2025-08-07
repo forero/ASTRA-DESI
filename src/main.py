@@ -21,6 +21,7 @@ RANDOM_COLUMNS = REAL_COLUMNS
 def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_columns, random_columns, n_random_files):
     """
     Preload all real and random tables for the specified tracers.
+
     Args:
         base_dir (str): Base directory containing the data files.
         tracers (list): List of tracer types to process.
@@ -110,6 +111,7 @@ def classify_zone(zone, tbl, output_class, n_random):
 def main():
     """
     Main function to parse arguments and run the classification process for specified zones.
+
     Raises:
         RuntimeError: If any step in the main workflow fails.
     """

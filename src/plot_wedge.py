@@ -22,7 +22,7 @@ OUTPUT = "../plots"
 
 def _save_real_data(real, tracer_name, zone, output_dir):
     """
-    Saves the real data for a specific tracer and zone to a pickle file.
+    Saves the real data for a specific tracer and zone to a parquet file.
     The file is stored in a subdirectory named after the tracer within the output directory.
 
     Args:
@@ -33,8 +33,8 @@ def _save_real_data(real, tracer_name, zone, output_dir):
     """
     data_zone_dir = os.path.join(output_dir, 'data', tracer_name)
     os.makedirs(data_zone_dir, exist_ok=True)
-    fname = f"{tracer_name}_zone_{zone:02d}.pkl"
-    real.to_pickle(os.path.join(data_zone_dir, fname))
+    fname = f"{tracer_name}_zone_{zone:02d}.parquet"
+    real.to_parquet(os.path.join(data_zone_dir, fname), index=False)
 
 
 def _compute_zone_params(real, z_lim):
@@ -222,7 +222,7 @@ def plot_tracer_wedges_by_zones(raw_df, prob_df, zones, tracer, output_dir, n_ra
         df = df_z.merge(df_p, on='TARGETID', how='left')
         real = df[(df['ISDATA']) & (df['BASE'] == tracer)]
 
-        # _save_real_data(real, tracer_name, zone, output_dir)
+        _save_real_data(real, tracer_name, zone, output_dir)
         _init_ax(ax, f"Zone {zone}")
 
         if real.empty:
@@ -279,8 +279,8 @@ def main():
 
     data_dir = os.path.join(args.output, 'data', 'full')
     os.makedirs(data_dir, exist_ok=True)
-    # raw_all.to_pickle(os.path.join(data_dir, 'raw_all.pkl'))
-    # prob_all.to_pickle(os.path.join(data_dir, 'prob_all.pkl'))
+    raw_all.to_parquet(os.path.join(data_dir, 'raw_all.parquet'), index=False)
+    prob_all.to_parquet(os.path.join(data_dir, 'prob_all.parquet'), index=False)
 
     for tracer in args.tracers[:1]:
         print(f"Plotting: {tracer}")
