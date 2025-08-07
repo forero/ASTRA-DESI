@@ -13,6 +13,7 @@ CLASS_ZORDER = {'void':0, 'sheet':1, 'filament':2, 'knot':3}
 
 #! TODO  - clustering, fof? plots
 
+
 def get_zone_paths(raw_dir, class_dir, zone):
     """
     Get file paths for a given zone number.
@@ -54,7 +55,7 @@ def infer_zones(raw_dir, provided):
     Returns:
         list: List of zone numbers.
     """
-    if provided: 
+    if provided:
         return provided
     files = os.listdir(raw_dir)
     zones = sorted(int(f.split('_')[1].split('.')[0]) for f in files
@@ -65,7 +66,7 @@ def infer_zones(raw_dir, provided):
 def make_output_dirs(base):
     """
     Create output directories for plots.
-    
+
     Args:
         base (str): Base output directory.
     Returns:
@@ -114,7 +115,7 @@ def load_class_df(path):
 def load_prob_df(path):
     """
     Load probability data from FITS file into a pandas DataFrame.
-    
+
     Args:
         path (str): Path to the FITS file.
     Returns:
@@ -145,7 +146,7 @@ def compute_r(df):
 def plot_z_histogram(df, zone, bins, out_dir):
     """
     Plot histogram of Z values for real and random data.
-    
+
     Args:
         df (pd.DataFrame): DataFrame containing 'Z' and 'ISDATA' columns.
         zone (int): Zone number for title and filename.
@@ -231,7 +232,7 @@ def plot_cdf(df_r, zone, tracers, out_dir):
 def _prepare_real(raw_df, prob_df):
     """
     Merge raw and prob DataFrames, filter to real data only.
-    
+
     Args:
         raw_df (pd.DataFrame): Raw data DataFrame.
         prob_df (pd.DataFrame): Probability data DataFrame.
@@ -245,7 +246,7 @@ def _prepare_real(raw_df, prob_df):
 def _compute_bounds(sub, z_lo=None, z_hi=None, offset=0):
     """
     Compute RA/DEC center, z limits, and half-width for wedge plotting.
-    
+
     Args:
         sub (pd.DataFrame): Subset DataFrame for a specific tracer.
         z_lo (float or None): Lower z limit. If None, computed from data.
@@ -275,7 +276,7 @@ def _compute_bounds(sub, z_lo=None, z_hi=None, offset=0):
 def _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z):
     """
     Draw grid lines for constant z and RA on the wedge plot.
-    
+
     Args:
         ax (matplotlib.axes.Axes): Axes to draw on.
         ra_ctr (float): Central RA in degrees.
@@ -309,7 +310,7 @@ def _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z):
 def _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w):
     """
     Plot points colored by CLASS on the wedge plot.
-    
+
     Args:
         ax (matplotlib.axes.Axes): Axes to draw on.
         sub (pd.DataFrame): Subset DataFrame for a specific tracer.
@@ -335,7 +336,7 @@ def _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w):
 def _draw_border(ax, half_w, z_lo, z_hi):
     """
     Draw border lines of the wedge plot.
-    
+
     Args:
         ax (matplotlib.axes.Axes): Axes to draw on.
         half_w (float): Half-width of the wedge at z_hi.
@@ -349,7 +350,7 @@ def _draw_border(ax, half_w, z_lo, z_hi):
 def _configure_axes(ax, side='right'):
     """
     Configure the axes for the wedge plot.
-    
+
     Args:
         ax (matplotlib.axes.Axes): Axes to configure.
         side (str): Side for y-axis ticks ('left' or 'right').
@@ -369,7 +370,7 @@ def _configure_axes(ax, side='right'):
 def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
     """
     Plot and save wedges for all tracers in a given zone.
-    
+
     Args:
         raw_df (pd.DataFrame): Raw data DataFrame.
         prob_df (pd.DataFrame): Probability data DataFrame.
@@ -422,7 +423,7 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
 def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset=0.3):
     """
     Plot and save wedges for all tracers in a given zone, slicing z by BASE type.
-    
+
     Args:
         raw_df (pd.DataFrame): Raw data DataFrame.
         prob_df (pd.DataFrame): Probability data DataFrame.

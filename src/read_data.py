@@ -46,7 +46,7 @@ def load_table(path, columns):
 def compute_cartesian(tbl):
     """
     Compute Cartesian coordinates (XCART, YCART, ZCART) from RA, DEC, and Z.
-    
+
     Args:
         tbl (Table): Astropy Table with 'RA', 'DEC', and 'Z' columns.
     Returns:
@@ -126,7 +126,7 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
         - Prefilter each random table by zone and validate size.
         - In a single loop, pick a table via random.Random(j) (seeded),
         then sample rows via np.random.default_rng(j).
-        
+
     Args:
         random_tables (dict): Dictionary of preloaded random data tables.
         tracer (str): Tracer type (e.g., 'BGS_ANY', 'ELG', 'LRG', 'QSO').

@@ -4,6 +4,7 @@ from scipy.spatial import Delaunay
 from collections import defaultdict
 import gc
 
+
 def extract_tracer_blocks(tbl):
     """
     Extracts blocks of data for each tracer type from the table.
@@ -27,7 +28,6 @@ def extract_tracer_blocks(tbl):
     return blocks
 
 
-
 def compute_delaunay_pairs(pts):
     """
     Computes unique pairs of points from a set of 3D coordinates using Delaunay triangulation.
@@ -40,7 +40,7 @@ def compute_delaunay_pairs(pts):
     tri = Delaunay(pts)
     simps = tri.simplices
     del tri
-    
+
     comb = np.array([(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)], dtype=np.int64)
     edges = simps[:, comb]
     edges = edges.reshape(-1,2)
@@ -53,7 +53,7 @@ def compute_delaunay_pairs(pts):
 def process_delaunay(pts, tids, is_data, iteration):
     """
     Processes 3D coordinates to compute pairs, counts, and classification for a given iteration.
-    
+
     Args:
     	pts (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
     	tids (np.ndarray): Array of target IDs corresponding to the points.
@@ -85,11 +85,11 @@ def process_delaunay(pts, tids, is_data, iteration):
     valid = np.nonzero(is_data & (total_count>0))[0]
     r_vals = (data_count[valid] - (total_count[valid] - data_count[valid])) / total_count[valid]
     for i,r in zip(valid, r_vals):
-      r_updates[int(tids[i])].append(float(r))
+    	r_updates[int(tids[i])].append(float(r))
 
     for i in range(n):
-      class_rows.append(( int(tids[i]), iteration, bool(is_data[i]),
-                int(data_count[i]), int(total_count[i] - data_count[i])))
+    	class_rows.append(( int(tids[i]), iteration, bool(is_data[i]),
+                        int(data_count[i]), int(total_count[i] - data_count[i])))
 
     return pair_rows, class_rows, r_updates
 
@@ -131,7 +131,7 @@ def generate_pairs(tbl, n_random):
 def build_pairs_table(rows):
     """
     Builds a pairs table from the provided rows.
-    
+
 	Args:
 		rows (list): List of tuples containing pairs data.
 	Returns:
@@ -142,7 +142,7 @@ def build_pairs_table(rows):
     """
     return Table(rows=rows, names=('TARGETID1','TARGETID2','RANDITER'),
 				 dtype=('i8','i8','i4'))
-   
+
 
 def save_pairs_fits(rows, output_path):
 	"""
@@ -154,7 +154,8 @@ def save_pairs_fits(rows, output_path):
 	"""
 	tbl = build_pairs_table(rows)
 	tbl.write(output_path, format='fits', overwrite=True)
-   
+
+
 def build_class_table(rows):
 	"""
 	Builds a classification table from the provided rows.
@@ -170,8 +171,8 @@ def build_class_table(rows):
 			- NRAND: Number of random points
 	"""
 	return Table(rows=rows, names=('TARGETID','RANDITER','ISDATA','NDATA','NRAND'),
-				   dtype=('i8','i4','bool','i4','i4'))
-   
+                 dtype=('i8','i4','bool','i4','i4'))
+
 
 def save_classification_fits(rows, output_path):
     """
@@ -183,7 +184,6 @@ def save_classification_fits(rows, output_path):
 	"""
     tbl = build_class_table(rows)
     tbl.write(output_path, format='fits', overwrite=True)
-    
 
 
 def build_probability_table(r_by_tid):
@@ -203,15 +203,15 @@ def build_probability_table(r_by_tid):
 	bins = np.array([-0.9, 0.0, 0.9], dtype=np.float32)
 
 	for i,(tid, rlist) in enumerate(r_by_tid.items()):
-		  arr = np.asarray(rlist, dtype=np.float32)
-		  if arr.size:
-		  	  classes = np.digitize(arr, bins)
-		  	  counts = np.bincount(classes, minlength=4)
-		  	  total = arr.size
-		  	  probs = counts / total
-		  else:
-		  	  probs = np.zeros(4, dtype=np.float32)
-		  data[i] = (tid, *probs.tolist())
+		arr = np.asarray(rlist, dtype=np.float32)
+		if arr.size:
+		  	classes = np.digitize(arr, bins)
+		  	counts = np.bincount(classes, minlength=4)
+		  	total = arr.size
+		  	probs = counts / total
+		else:
+			probs = np.zeros(4, dtype=np.float32)
+			data[i] = (tid, *probs.tolist())
 	return Table(data)
 
 

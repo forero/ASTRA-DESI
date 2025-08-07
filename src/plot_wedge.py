@@ -40,7 +40,7 @@ def _save_real_data(real, tracer_name, zone, output_dir):
 def _compute_zone_params(real, z_lim):
     """
     Computes parameters for the wedge plot based on the real data for a specific zone.
-    
+
     Args:
         real (DataFrame): The DataFrame containing the real data for the zone.
         z_lim (float): The maximum redshift limit for the plot.
@@ -61,7 +61,7 @@ def _compute_zone_params(real, z_lim):
 def _init_ax(ax, title):
     """
     Initializes the axis for the wedge plot with a title and removes spines and ticks.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis to initialize.
         title (str): The title for the plot.
@@ -75,7 +75,7 @@ def _init_ax(ax, title):
 def _draw_grid(ax, ra_min, ra_max, ra_ctr, dec_ctr, Dc, half_w, zmax, n_ra, n_z):
     """
     Draws a grid of horizontal and vertical lines on the wedge plot to represent redshift and RA ticks.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to draw the grid.
         ra_min (float): Minimum RA value.
@@ -107,7 +107,7 @@ def _draw_grid(ax, ra_min, ra_max, ra_ctr, dec_ctr, Dc, half_w, zmax, n_ra, n_z)
 def _plot_classes(ax, real, tracer, ra_ctr, dec_ctr, Dc, half_w, zmax):
     """
     Plots the different classes of objects in the wedge plot based on their RA and redshift values.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to plot the classes.
         real (DataFrame): The DataFrame containing the real data for the zone.
@@ -134,7 +134,7 @@ def _plot_classes(ax, real, tracer, ra_ctr, dec_ctr, Dc, half_w, zmax):
 def _draw_borders(ax, half_w, zmax):
     """
     Draws the borders of the wedge plot, including the top and sides.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to draw the borders.
         half_w (float): Half width of the wedge at the maximum redshift.
@@ -150,7 +150,7 @@ def _draw_borders(ax, half_w, zmax):
 def _annotate_ra_top(ax, ra_ticks, ra_ctr, dec_ctr, Dc, zmax):
     """
     Annotates the top of the wedge plot with RA tick labels.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to annotate the RA ticks.
         ra_ticks (array-like): The RA tick values.
@@ -169,7 +169,7 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, dec_ctr, Dc, zmax):
 def _annotate_z_side(ax, z_ticks, half_w, zmax, idx):
     """
     Annotates the side of the wedge plot with redshift tick labels.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to annotate the redshift ticks.
         z_ticks (array-like): The redshift tick values.
@@ -193,7 +193,7 @@ def plot_tracer_wedges_by_zones(raw_df, prob_df, zones, tracer, output_dir, n_ra
     Plots wedge diagrams for a specific tracer across multiple zones.
     Each zone's data is processed to create a wedge plot showing the distribution of objects
     classified by their RA and redshift values.
-    
+
     Args:
         raw_df (DataFrame): DataFrame containing raw data for the tracer.
         prob_df (DataFrame): DataFrame containing probability data for the tracer.
