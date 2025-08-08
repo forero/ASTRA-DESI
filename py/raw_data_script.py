@@ -41,7 +41,7 @@ def load_fits_file_from_url(url, columns):
             break
         except Exception as e:
             wait = random.uniform(5, 10)
-            print(f"❌ Error downloading {url}: {e}\nRetrying...\n")
+            print(f"Error downloading {url}: {e}\nRetrying...\n")
             time.sleep(wait)
 
     cols_to_select = [col for col in columns if col in table.colnames]
@@ -152,6 +152,7 @@ for zone in tqdm(range(n_zones), desc="Zones"):
     output_path = os.path.join(output_dir, f"zone_{zone:02d}.fits.gz")
     fits.writeto(output_path, combined.to_records(index=False), overwrite=True)
     print(f"✅ Saved: {output_path}")
+
 
 
 
