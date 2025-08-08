@@ -151,7 +151,8 @@ for zone in tqdm(range(n_zones), desc="Zones"):
 
     output_path = os.path.join(output_dir, f"zone_{zone:02d}.fits.gz")
     fits.writeto(output_path, combined.to_records(index=False), overwrite=True)
-    print(f"✅ Saved: {output_path}")
+    print(f"Saved: {output_path}")
+
 
 
 
