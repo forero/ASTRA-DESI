@@ -43,7 +43,7 @@ def load_table(path, columns):
         raise RuntimeError(f"Error processing table columns for {path}: {e}") from e
 
 
-def compute_cartesian(tbl):
+def _compute_cartesian(tbl):
     """
     Compute Cartesian coordinates (XCART, YCART, ZCART) from RA, DEC, and Z.
 
@@ -108,7 +108,7 @@ def process_real(real_tables, tracer, zone, north_rosettes):
         sel = tbl[tbl['ZONE'] == zone]
         if len(sel) == 0:
             raise ValueError(f"No entries for zone {zone} in tracer '{tracer}' ({hemi})")
-        sel = compute_cartesian(sel)
+        sel = _compute_cartesian(sel)
         sel['TRACERTYPE'] = f"{tracer}_DATA"
         sel['RANDITER'] = -1
         return sel
@@ -161,7 +161,7 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
             used.add(idx)
             sel = zone_tables[idx]
             rows = np.random.default_rng(j).choice(len(sel), real_count, replace=False)
-            samp = compute_cartesian(sel[rows])
+            samp = _compute_cartesian(sel[rows])
             samp["TRACERTYPE"] = f"{tracer}_RAND"
             samp["RANDITER"] = j
             samples.append(samp)

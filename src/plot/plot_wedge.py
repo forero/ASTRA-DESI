@@ -2,9 +2,9 @@ import os, argparse
 import numpy as np, pandas as pd
 from astropy.cosmology import Planck18
 from matplotlib.lines import Line2D
+from astropy.table import Table
 
-from plot_extra import get_zone_paths, get_prob_path, infer_zones, make_output_dirs, \
-                        load_raw_df, load_class_df, load_prob_df, compute_r
+from plot_extra import *
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -22,7 +22,7 @@ OUTPUT = "../plots"
 
 def _save_real_data(real, tracer_name, zone, output_dir):
     """
-    Saves the real data for a specific tracer and zone to a parquet file.
+    Saves the real data for a specific tracer and zone to a FITS file (.fits.gz).
     The file is stored in a subdirectory named after the tracer within the output directory.
 
     Args:
@@ -33,8 +33,9 @@ def _save_real_data(real, tracer_name, zone, output_dir):
     """
     data_zone_dir = os.path.join(output_dir, 'data', tracer_name)
     os.makedirs(data_zone_dir, exist_ok=True)
-    fname = f"{tracer_name}_zone_{zone:02d}.parquet"
-    real.to_parquet(os.path.join(data_zone_dir, fname), index=False)
+    fname = f"{tracer_name}_zone_{zone:02d}.fits.gz"
+    Table.from_pandas(real).write(os.path.join(data_zone_dir, fname),
+                                  overwrite=True)
 
 
 def _compute_zone_params(real, z_lim):
@@ -269,8 +270,8 @@ def main():
     for zone in zones:
         raw_p, _ = get_zone_paths(args.raw_dir, args.class_dir, zone)
         prob_p = get_prob_path(args.raw_dir, args.class_dir, zone)
-        df_raw = load_raw_df(raw_p);   df_raw['ZONE'] = zone
-        df_prob = load_prob_df(prob_p);  df_prob['ZONE'] = zone
+        df_raw = load_raw_df(raw_p); df_raw['ZONE'] = zone
+        df_prob = load_prob_df(prob_p); df_prob['ZONE'] = zone
         raw_cache[zone] = df_raw
         prob_cache[zone] = df_prob
 
@@ -279,10 +280,12 @@ def main():
 
     data_dir = os.path.join(args.output, 'data', 'full')
     os.makedirs(data_dir, exist_ok=True)
-    raw_all.to_parquet(os.path.join(data_dir, 'raw_all.parquet'), index=False)
-    prob_all.to_parquet(os.path.join(data_dir, 'prob_all.parquet'), index=False)
+    Table.from_pandas(raw_all).write(os.path.join(data_dir, 'raw_all.fits.gz'),
+                                     overwrite=True)
+    Table.from_pandas(prob_all).write(os.path.join(data_dir, 'prob_all.fits.gz'),
+                                      overwrite=True)
 
-    for tracer in args.tracers[:1]:
+    for tracer in args.tracers:
         print(f"Plotting: {tracer}")
         plot_tracer_wedges_by_zones(raw_all, prob_all, zones, tracer, args.output,
                                     n_ra=args.bins, n_z=args.bins)

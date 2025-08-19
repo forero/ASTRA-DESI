@@ -1,10 +1,13 @@
-import os, argparse
-from astropy.table import vstack
-from read_data import load_table, process_real, generate_randoms
-from implement_astra import (generate_pairs,
-                             save_pairs_fits,
-                             save_classification_fits,
-                             save_probability_fits)
+import os, argparse, json, numpy as np
+from astropy.table import vstack, join
+
+from desiproc.read_data import load_table, process_real, generate_randoms
+from desiproc.implement_astra import (generate_pairs, save_pairs_fits,
+                                      save_classification_fits,
+                                      save_probability_fits,)
+from plot.plot_groups import (read_groups, read_raw_min, mask_source,
+                              tracer_prefixes, pick_tracers, plot_wedges)
+from desiproc.gen_groups import process_zone
 
 
 TRACERS = ["BGS_ANY", "ELG", "LRG", "QSO"]
@@ -16,7 +19,6 @@ NORTH_ROSETTES = {3, 6, 7, 11, 12, 13, 14, 15, 18, 19}
 REAL_COLUMNS = ["TARGETID", "ROSETTE_NUMBER", "RA", "DEC", "Z"]
 RANDOM_COLUMNS = REAL_COLUMNS
 
-#! TODO  - clustering, fof? implementation
 
 def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_columns, random_columns, n_random_files):
     """
@@ -120,12 +122,28 @@ def main():
         p.add_argument("--base-dir", required=True, help="DESI base dir")
         p.add_argument("--raw-out", required=True, help="Raw output folder")
         p.add_argument("--class-out", required=True, help="Classification output folder")
+        p.add_argument("--groups-out", required=True, help="Groups output folder")
         p.add_argument("--n-random", type=int, default=100, help="Number of randoms per real object")
+
+        p.add_argument("--webtype", choices=["void","sheet","filament","knot"], default="filament", help="Webtype to group")
+        p.add_argument("--source", choices=["data","rand","both"], default="data", help="Use data, randoms, or both for FoF")
+        p.add_argument("--r-limit", type=float, default=0.9, help="r threshold to classify webtype")
+        p.add_argument("--linking", type=str, default='{"BGS_ANY":20,"ELG":20,"LRG":20,"QSO":70,"default":30}', help="JSON-type dict of linking lengths per tracer")
+
         p.add_argument("--zone", type=int, default=1, help="Single zone to run (0...19)")
+        p.add_argument("--plot", action="store_true", help="Generate wedge plots after grouping")
+        p.add_argument("--plot-output", default=None, help="Directory to save plots (defaults to --groups-out)")
+        p.add_argument("--plot-tracers", nargs='*', default=None, help="Subset of tracer prefixes to plot (e.g., BGS_ANY ELG)")
+        p.add_argument("--plot-smin", type=int, default=1, help="Minimum marker size for scatter")
+        p.add_argument("--plot-max-z", type=float, default=None, help="Max redshift to include in plot")
         args = p.parse_args()
 
         os.makedirs(args.raw_out, exist_ok=True)
         os.makedirs(args.class_out, exist_ok=True)
+        os.makedirs(args.groups_out, exist_ok=True)
+
+        plot_dir = args.plot_output or args.groups_out
+        os.makedirs(plot_dir, exist_ok=True)
 
         real_tables, random_tables = preload_all_tables(args.base_dir, TRACERS,
                                                         REAL_SUFFIX, RANDOM_SUFFIX,
@@ -134,10 +152,36 @@ def main():
 
         zones = [args.zone] if args.zone is not None else range(N_ZONES)
         for z in zones:
-            tbl = build_raw_table(z, real_tables, random_tables, args.raw_out, args.n_random)
-            classify_zone(z, tbl, args.class_out, args.n_random)
+            # tbl = build_raw_table(z, real_tables, random_tables, args.raw_out, args.n_random)
+            # classify_zone(z, tbl, args.class_out, args.n_random)
+            linklen_map = json.loads(args.linking)
+            out_groups = process_zone(z, args.raw_out, args.class_out,
+                                      args.groups_out,args.webtype, args.source,
+                                      linklen_map, args.r_limit,)
+            if out_groups is not None:
+                print(f"[groups] zone {z:02d} in -> {out_groups}")
+
+                if args.plot:
+                    groups = read_groups(args.groups_out, z, args.webtype)
+                    gm = mask_source(np.asarray(groups['RANDITER']), args.source)
+                    groups = groups[gm]
+
+                    raw = read_raw_min(args.raw_out, args.class_out, z)
+                    rm = mask_source(np.asarray(raw['RANDITER']), args.source)
+                    raw = raw[rm]
+
+                    jtbl = join(groups, raw, keys=['TARGETID','TRACERTYPE','RANDITER'], join_type='inner')
+
+                    available = tracer_prefixes(np.asarray(jtbl['TRACERTYPE']).astype(str))
+                    tracers = pick_tracers(available, args.plot_tracers)
+
+                    out_png = os.path.join(plot_dir, f'groups_wedges_zone_{z:02d}_{args.webtype}.png')
+                    plot_wedges(jtbl, tracers, z, args.webtype, out_png, args.plot_smin, args.plot_max_z)
+                    print(f"[plot] Saved {out_png}")
+            else:
+                print(f"[groups] zone {z:02d}: no objects with WEBTYPE={args.webtype} for '{args.source}' source")
     except Exception as e:
-        raise RuntimeError(f"Pipeline execution failed: {e}") from e
+        raise RuntimeError(f"Pipeline failed: {e}") from e
 
 if __name__=="__main__":
     main()
