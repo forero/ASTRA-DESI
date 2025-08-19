@@ -12,6 +12,8 @@ plt.rcParams.update({'font.family': 'serif', 'font.size': 12, 'axes.labelsize': 
 
 CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
 CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
+ORDERED_TRACERS = ["BGS", "LRG", "ELG", "QSO"]
+TRACER_ZLIMS = {'BGS': 0.45, 'LRG': 1.0, 'ELG': 1.4, 'QSO': 2.2}
 
 RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS']
@@ -234,11 +236,9 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
         ax.text(x0r + offset, z0, f"{z0:.2f}", ha='left', va='center', rotation=angle + 180, fontsize=10)
     if idx == 0:
         ax.set_ylabel(ylabel, fontsize=20, labelpad=15)
-        ax.set_yticks(z_ticks)
-        ax.set_yticklabels([f"{zt:.2f}" for zt in z_ticks], fontsize=10)
 
 
-def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z'):
+def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z', connect_lines=True, line_min_npts=2):
     """
     Plots the wedge diagrams for the given tracers and zone.
 
@@ -249,11 +249,16 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
         webtype (str): The type of web to plot.
         out_png (str): Output file path for the plot.
         smin (float): Minimum marker size.
-        max_z (float): Maximum redshift to consider.
+        max_z (float): Global maximum redshift cap. Per-tracer limits (TRACER_ZLIMS) are applied and this value acts as an additional upper bound.
         n_ra (int): Number of RA ticks to draw.
         n_z (int): Number of redshift ticks to draw.
         coord (str): Coordinate system being used ('z' or 'dc').
+        connect_lines (bool): Whether to connect points in the same group with lines.
+        line_min_npts (int): Minimum number of points in a group to draw connecting lines.
     """
+    tracers = [str(t).split('_', 1)[0].upper() for t in tracers]
+    tracers = [t for t in ORDERED_TRACERS if t in tracers]
+
     tr_types = np.asarray(joined['TRACERTYPE']).astype(str)
     ravec = np.asarray(joined['RA'], float)
     zvec = np.asarray(joined['Z'], float)
@@ -262,43 +267,64 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
 
     tr_pref = tracer_prefixes(tr_types)
 
-    if coord == 'dc':
-        y_all = Planck18.comoving_distance(zvec).value
-    else:
-        y_all = zvec
-
-    ra_min, ra_max, ra_ctr, Dc_maxz, half_w, zmax = _compute_zone_params(ravec, zvec, max_z)
-    y_max = Planck18.comoving_distance(zmax).value if coord == 'dc' else zmax
-
-    nrows, ncols = subplot_grid(tracers.size)
+    nrows, ncols = subplot_grid(len(tracers))
     fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 25*nrows), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
+    plt.suptitle(f'{webtype.capitalize()}s in zone {zone:02d}', fontsize=16, y=1.01)
 
     for i, tr in enumerate(tracers):
+        tr = str(tr)
         ax = axes[i]
-        _init_ax(ax, f'{tr} — {webtype} — zone {zone:02d}')
+        _init_ax(ax, tr)
 
         m = (tr_pref == tr)
+        tr_key = str(tr).split('_', 1)[0].upper()
+        z_cap = TRACER_ZLIMS.get(tr_key, None)
         if max_z is not None:
-            m &= (zvec <= max_z)
+            z_cap = min(z_cap, max_z) if z_cap is not None else max_z
+        if z_cap is not None:
+            m &= (zvec <= z_cap)
 
         if not np.any(m):
             ax.set_xlim(-half_w, half_w)
             ax.set_ylim(0, y_max)
             continue
 
+        ra_min, ra_max, ra_ctr, Dc_maxz, half_w, zmax = _compute_zone_params(ravec[m], zvec[m], z_cap)
+        y_max = Planck18.comoving_distance(zmax).value if coord == 'dc' else zmax
+
         ra = ravec[m]
-        yvals = y_all[m]
+        yvals = zvec[m] if coord == 'z' else Planck18.comoving_distance(zvec[m]).value
         gid = gids[m]
 
         z_ticks, ra_ticks = _draw_grid(ax, ra_min, ra_max, ra_ctr, Dc_maxz, half_w, y_max, n_ra, n_z, coord)
 
         _, color_idx = np.unique(gid, return_inverse=True)
+        cmap = plt.get_cmap('tab20')
+        idx_mod = color_idx % cmap.N
+        palette = np.asarray(cmap.colors)
 
-        Dc_each = yvals if coord == 'dc' else Planck18.comoving_distance(yvals).value
-        x = (Dc_each / y_max) * (Dc_maxz * np.deg2rad(ra - ra_ctr))
+        scale = yvals / y_max
+        x = scale * (Dc_maxz * np.deg2rad(ra - ra_ctr))
+        w_at_y = half_w * scale
+        mclip = np.abs(x) <= w_at_y
 
-        ax.scatter(x, yvals, s=max(smin, 6), c=color_idx, cmap='tab20', alpha=0.65)
+        if connect_lines:
+            ci_sub = idx_mod[mclip]
+            gid_sub = gid[mclip]
+            x_sub  = x[mclip]
+            y_sub  = yvals[mclip]
+
+            for g in np.unique(gid_sub):
+                selg = (gid_sub == g)
+                if np.count_nonzero(selg) < line_min_npts:
+                    continue
+                order = np.argsort(y_sub[selg])
+                xs = x_sub[selg][order]
+                ys = y_sub[selg][order]
+                ax.plot(xs, ys, lw=0.5, alpha=0.9, color=palette[int(ci_sub[selg][0])], zorder=0)
+
+        ax.scatter(x[mclip], yvals[mclip], s=max(smin, 8), c=palette[idx_mod[mclip]], alpha=0.75)
 
         _draw_borders(ax, half_w, y_max)
         _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc_maxz, y_max)
@@ -328,6 +354,8 @@ def parse_args():
     p.add_argument('--max-z', type=float, default=None)
     p.add_argument('--coord', choices=['z','dc'], default='z', help='Y-axis coordinate: redshift z (default) or comoving distance Dc')
     p.add_argument('--bins', type=int, default=10, help='Number of grid bins for RA and z/Dc')
+    p.add_argument('--connect-lines', action='store_true', help='Connect points that belong to the same group with a line')
+    p.add_argument('--line-min-npts', type=int, default=2, help='Minimum number of points in a group to draw its connecting line')
     return p.parse_args()
 
 
@@ -345,10 +373,20 @@ def main():
     joined = join(groups, raw, keys=['TARGETID','TRACERTYPE','RANDITER'], join_type='inner')
 
     available = tracer_prefixes(np.asarray(joined['TRACERTYPE']).astype(str))
-    tracers = pick_tracers(available, args.tracers)
+    avail_set = set(map(str, available))
+
+    if args.tracers:
+        tokens = []
+        for t in args.tracers:
+            tokens.extend(str(t).replace(',', ' ').split())
+        req_pref = [tok.split('_', 1)[0].upper() for tok in tokens]
+        req_set  = set(req_pref)
+        tracers = [t for t in ORDERED_TRACERS if (t in req_set) and (t in avail_set)]
+    else:
+        tracers = [t for t in ORDERED_TRACERS if t in avail_set]
 
     out_png = os.path.join(args.output, f'groups_wedges_zone_{args.zone:02d}_{args.webtype}_{args.coord}.png')
-    path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z, n_ra=args.bins, n_z=args.bins, coord=args.coord)
+    path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z, n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines, line_min_npts=args.line_min_npts)
 
 
 if __name__ == '__main__':
