@@ -34,12 +34,12 @@ common_args = [
 ]
 
 def run_zone(zone):
-    print(f"==> Zona {zone}")
+    print(f'--> Zone {zone}')
     subprocess.run(common_args + ["--zone", str(zone)], check=True)
 
 if __name__ == "__main__":
-    max_workers = 5 #cpu_count()
+    max_workers = cpu_count()
 
-    ls = [0, 2, 5, 6, 19]
+    ls = [0, 2, 5, 6, 17, 19]
     with ProcessPoolExecutor(max_workers=max_workers) as ex:
         ex.map(run_zone, ls)
