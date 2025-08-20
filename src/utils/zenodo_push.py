@@ -3,16 +3,13 @@ import json
 import argparse
 from typing import List, Dict
 
-from utils.zenodo_uploader import (
-    ensure_pscratch_copy,
-    push_to_zenodo,
-)
+from zenodo_upl import (ensure_pscratch_copy, push_to_zenodo,)
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--paths", nargs="+", required=True,
                    help="Paths of files or folders to upload (they will be copied first to /pscratch).")
-    p.add_argument("--pscratch-dwir", required=True,
+    p.add_argument("--pscratch-dir", required=True,
                    help="Base directory in /pscratch where the files will be copied.")
     p.add_argument("--keep-tree", action="store_true",
                    help="Preserve relative tree from repo root when copying to /pscratch.")
@@ -73,3 +70,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+#export ZENODO_TOKEN=LuJ15tBnQfwEOvUQW6WKULA1iBhNruzyg2VZORLIFHRTJna1mod3zxzYG0Z5

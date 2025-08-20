@@ -339,6 +339,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
+    # fig.savefig('plots.png')
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close(fig)
     return out_png

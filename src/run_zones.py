@@ -19,19 +19,11 @@ os.makedirs(CLASS_OUT, exist_ok=True)
 os.makedirs(GROUPS_OUT, exist_ok=True)
 os.makedirs(FIGS_OUT, exist_ok=True)
 
-common_args = [
-    "python", MAIN_SCRIPT,
-    "--base-dir", CLUSTER_DIR,
-    "--raw-out", RAW_OUT,
-    "--class-out", CLASS_OUT,
-    "--groups-out", GROUPS_OUT,
-    "--webtype", "filament",
-    "--source", "data",
-    "--n-random", "100",
-    "--plot",
-    "--plot-output", FIGS_OUT,
-    # "--only-plot",
-]
+common_args = ["python", MAIN_SCRIPT, "--base-dir", CLUSTER_DIR,
+               "--raw-out", RAW_OUT, "--class-out", CLASS_OUT,
+               "--groups-out", GROUPS_OUT, "--webtype", "filament",
+               "--source", "data", "--n-random", "100", "--plot",
+               "--plot-output", FIGS_OUT,]# "--only-plot",]
 
 def run_zone(zone):
     print(f'--> Zone {zone}')
@@ -39,7 +31,6 @@ def run_zone(zone):
 
 if __name__ == "__main__":
     max_workers = cpu_count()
-
-    ls = [0, 2, 5, 6, 17, 19]
+    ls = range(20)
     with ProcessPoolExecutor(max_workers=max_workers) as ex:
         ex.map(run_zone, ls)

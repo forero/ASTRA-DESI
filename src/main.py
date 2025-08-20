@@ -150,7 +150,7 @@ def main():
         p.add_argument("--webtype", choices=["void","sheet","filament","knot"], default="filament", help="Webtype to group")
         p.add_argument("--source", choices=["data","rand","both"], default="data", help="Use data, randoms, or both for FoF")
         p.add_argument("--r-limit", type=float, default=0.9, help="r threshold to classify webtype")
-        p.add_argument("--linking", type=str, default='{"BGS_ANY":10,"LRG":17,"ELG":18,"QSO":55,"default":10}', help="JSON-type dict of linking lengths per tracer")
+        p.add_argument("--linking", type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}', help="JSON-type dict of linking lengths per tracer")
 
         p.add_argument("--zone", type=int, default=1, help="Single zone to run (0...19)")
         p.add_argument("--plot", action="store_true", help="Generate wedge plots after grouping")
