@@ -10,13 +10,13 @@ from plot.plot_groups import (read_groups, read_raw_min, mask_source,
 from desiproc.gen_groups import process_zone
 
 
-TRACERS = ["BGS_ANY", "ELG", "LRG", "QSO"]
-REAL_SUFFIX = {"N": "_N_clustering.dat.fits", "S": "_S_clustering.dat.fits"}
-RANDOM_SUFFIX = {"N": "_N_{i}_clustering.ran.fits", "S": "_S_{i}_clustering.ran.fits"}
+TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
+REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
+RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
 N_RANDOM_FILES = 18
 N_ZONES = 20
 NORTH_ROSETTES = {3, 6, 7, 11, 12, 13, 14, 15, 18, 19}
-REAL_COLUMNS = ["TARGETID", "ROSETTE_NUMBER", "RA", "DEC", "Z"]
+REAL_COLUMNS = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
 RANDOM_COLUMNS = REAL_COLUMNS
 
 
@@ -53,7 +53,7 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
 
         return real_tables, rand_tables
     except Exception as e:
-        raise RuntimeError(f"Error preloading tables: {e}") from e
+        raise RuntimeError(f'Error preloading tables: {e}') from e
 
 
 def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
@@ -84,7 +84,7 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
         tbl.write(out, format="fits", overwrite=True)#, compression="gzip")
         return tbl
     except Exception as e:
-        raise RuntimeError(f"Error building raw table for zone {zone}: {e}") from e
+        raise RuntimeError(f'Error building raw table for zone {zone}: {e}') from e
 
 
 def classify_zone(zone, tbl, output_class, n_random):
@@ -101,13 +101,13 @@ def classify_zone(zone, tbl, output_class, n_random):
         RuntimeError: If classification or saving files fails.
     """
     try:
-        base = f"zone_{zone:02d}"
+        base = f'zone_{zone:02d}'
         pr, cr, rdict = generate_pairs(tbl, n_random)
-        save_pairs_fits(pr, os.path.join(output_class, f"{base}_pairs.fits.gz"))
-        save_classification_fits(cr, os.path.join(output_class, f"{base}_class.fits.gz"))
-        save_probability_fits(rdict, os.path.join(output_class, f"{base}_probability.fits.gz"))
+        save_pairs_fits(pr, os.path.join(output_class, f'{base}_pairs.fits.gz'))
+        save_classification_fits(cr, os.path.join(output_class, f'{base}_class.fits.gz'))
+        save_probability_fits(rdict, os.path.join(output_class, f'{base}_probability.fits.gz'))
     except Exception as e:
-        raise RuntimeError(f"Error classifying zone {zone}: {e}") from e
+        raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
     
 
 def plot_zone_wedges_for_args(z, args, plot_dir):
@@ -134,20 +134,14 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
     tracers = pick_tracers(available, args.plot_tracers)
 
     out_png = os.path.join(plot_dir, f'groups_wedges_zone_{z:02d}_{args.webtype}.png')
-    plot_wedges(jtbl, tracers, z, args.webtype, out_png, args.plot_smin, args.plot_max_z)
-    print(f"[plot] Saved {out_png}")
+    plot_wedges(jtbl, tracers, z, args.webtype, out_png, args.plot_smin, args.plot_max_z, connect_lines=args.connect_lines)
+    print(f'----- [plot] Saved {out_png}')
 
 
 def main():
-    """
-    Main function to parse arguments and run the classification process for specified zones.
-
-    Raises:
-        RuntimeError: If any step in the main workflow fails.
-    """
     try:
         p = argparse.ArgumentParser()
-        p.add_argument("--base-dir", required=True, help="DESI base dir")
+        p.add_argument("--base-dir", required=False, help="DESI base dir (required unless --only-plot)")
         p.add_argument("--raw-out", required=True, help="Raw output folder")
         p.add_argument("--class-out", required=True, help="Classification output folder")
         p.add_argument("--groups-out", required=True, help="Groups output folder")
@@ -156,7 +150,7 @@ def main():
         p.add_argument("--webtype", choices=["void","sheet","filament","knot"], default="filament", help="Webtype to group")
         p.add_argument("--source", choices=["data","rand","both"], default="data", help="Use data, randoms, or both for FoF")
         p.add_argument("--r-limit", type=float, default=0.9, help="r threshold to classify webtype")
-        p.add_argument("--linking", type=str, default='{"BGS_ANY":15,"LRG":20,"ELG":20,"QSO":60,"default":10}', help="JSON-type dict of linking lengths per tracer")
+        p.add_argument("--linking", type=str, default='{"BGS_ANY":10,"LRG":17,"ELG":18,"QSO":55,"default":10}', help="JSON-type dict of linking lengths per tracer")
 
         p.add_argument("--zone", type=int, default=1, help="Single zone to run (0...19)")
         p.add_argument("--plot", action="store_true", help="Generate wedge plots after grouping")
@@ -165,8 +159,13 @@ def main():
         p.add_argument("--plot-smin", type=int, default=1, help="Minimum marker size for scatter")
         p.add_argument("--plot-max-z", type=float, default=None, help="Max redshift to include in plot")
         p.add_argument('--connect-lines', action='store_true', help='Connect points in groups plot')
+        p.add_argument("--only-plot", action="store_true",
+                       help="Skip preproc and only plot")
 
         args = p.parse_args()
+
+        if not args.only_plot and not args.base_dir:
+            raise RuntimeError('--base-dir is required unless --only-plot is specified')
 
         os.makedirs(args.raw_out, exist_ok=True)
         os.makedirs(args.class_out, exist_ok=True)
@@ -176,12 +175,20 @@ def main():
         os.makedirs(plot_dir, exist_ok=True)
 
         i_t = time.time()
+
+        zones = [args.zone] if args.zone is not None else range(N_ZONES)
+
+        if args.only_plot:
+            for z in zones:
+                plot_zone_wedges_for_args(z, args, plot_dir)
+            print(f'[pipeline] only-plot elapsed t {time.time()-i_t:.2f} s')
+            return
+
         real_tables, random_tables = preload_all_tables(args.base_dir, TRACERS,
                                                         REAL_SUFFIX, RANDOM_SUFFIX,
                                                         REAL_COLUMNS, RANDOM_COLUMNS,
                                                         N_RANDOM_FILES)
 
-        zones = [args.zone] if args.zone is not None else range(N_ZONES)
         for z in zones:
             tbl = build_raw_table(z, real_tables, random_tables, args.raw_out, args.n_random)
             classify_zone(z, tbl, args.class_out, args.n_random)
@@ -191,15 +198,15 @@ def main():
                                       args.groups_out, args.webtype, args.source,
                                       linklen_map, args.r_limit)
             if out_groups is not None:
-                print(f"[groups] zone {z:02d} in -> {out_groups}")
+                print(f'[groups] zone {z:02d} in -> {out_groups}')
                 if args.plot:
                     plot_zone_wedges_for_args(z, args, plot_dir)
             else:
-                print(f"[groups] zone {z:02d}: no objects with WEBTYPE={args.webtype} for '{args.source}' source")
+                print(f'[groups] zone {z:02d}: no objects with WEBTYPE={args.webtype} for {args.source} source')
     except Exception as e:
-        raise RuntimeError(f"Pipeline failed with: {e}") from e
+        raise RuntimeError(f'Pipeline failed with: {e}') from e
 
-    print(f"[pipeline] zone {z:02d} elapsed t {time.time()-i_t:.2f} s")
+    print(f'[pipeline] zone {z:02d} elapsed t {time.time()-i_t:.2f} s')
 
 
 if __name__=="__main__":

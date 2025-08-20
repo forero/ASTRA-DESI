@@ -6,9 +6,10 @@ from astropy.cosmology import Planck18
 from matplotlib.lines import Line2D
 
 from plot.plot_extra import get_zone_paths
+plt.style.use('dark_background')
 
-plt.rcParams.update({'font.family': 'serif', 'font.size': 12, 'axes.labelsize': 12,
-                     'xtick.labelsize': 10,'ytick.labelsize': 10, 'legend.fontsize': 10,})
+plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
+                     'xtick.labelsize': 20,'ytick.labelsize': 20, 'legend.fontsize': 10,})
 
 CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
 CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
@@ -17,6 +18,8 @@ TRACER_ZLIMS = {'BGS': 0.45, 'LRG': 1.0, 'ELG': 1.4, 'QSO': 2.2}
 
 RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS']
+# main_color, sec_color = 'black', 'gray'
+main_color, sec_color = 'white', 'gainsboro' #dark back
 
 
 def read_groups(groups_dir, zone, webtype):
@@ -123,7 +126,7 @@ def _init_ax(ax, title):
         ax (matplotlib.axes.Axes): The axis to initialize.
         title (str): The title for the plot.
     """
-    ax.set_title(title, fontsize=14, y=1.05)
+    ax.set_title(title, fontsize=24, y=1.05)
     for sp in ax.spines.values():
         sp.set_visible(False)
     ax.set_xticks([]); ax.set_yticks([])
@@ -176,12 +179,13 @@ def _draw_grid(ax, ra_min, ra_max, ra_ctr, Dc, half_w, y_max, n_ra, n_z, coord):
     ra_ticks = np.linspace(ra_min, ra_max, n_ra)
     for z0 in z_ticks:
         w0 = half_w * (z0 / y_max) if y_max > 0 else 0
-        ax.hlines(z0, -w0, w0, color='gray', lw=0.5, alpha=0.5)
+        ax.hlines(z0, -w0, w0, color=sec_color, lw=0.5, alpha=0.5)
     step = max(1, n_ra // 4)
     for rt in ra_ticks[::step]:
         dx = Dc * np.deg2rad(rt - ra_ctr)
-        ax.plot((dx / y_max) * zs if y_max > 0 else np.zeros_like(zs), zs, color='gray', lw=0.5, alpha=0.5)
+        ax.plot((dx / y_max) * zs if y_max > 0 else np.zeros_like(zs), zs, color=sec_color, lw=0.5, alpha=0.5)
     return z_ticks, ra_ticks
+
 
 def _draw_borders(ax, half_w, y_max):
     """
@@ -192,9 +196,9 @@ def _draw_borders(ax, half_w, y_max):
         half_w (float): Half width of the wedge at the maximum redshift.
         y_max (float): Maximum y value for the plot.
     """
-    ax.plot([-half_w, 0], [y_max, 0], 'k-', lw=1.5)
-    ax.plot([ half_w, 0], [y_max, 0], 'k-', lw=1.5)
-    ax.plot([-half_w, half_w], [y_max, y_max], 'k-', lw=1.5)
+    ax.plot([-half_w, 0], [y_max, 0], lw=1.5, c=main_color)
+    ax.plot([ half_w, 0], [y_max, 0], lw=1.5, c=main_color)
+    ax.plot([-half_w, half_w], [y_max, y_max], lw=1.5, c=main_color)
     ax.set_xlim(-half_w, half_w)
     ax.set_ylim(0, y_max)
 
@@ -213,8 +217,8 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc, y_max):
     top4 = np.linspace(ra_ticks.min(), ra_ticks.max(), 4)
     x_top = Dc * np.deg2rad(top4 - ra_ctr)
     for xt, rt in zip(x_top, top4):
-        ax.text(xt, y_max + 0.01*y_max, f"{rt:.0f}", ha='center', va='bottom', fontsize=10)
-    ax.text(0, y_max + 0.03*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=11)
+        ax.text(xt, y_max + 0.01*y_max, f"{rt:.0f}", ha='center', va='bottom', fontsize=20)
+    ax.text(0, y_max + 0.03*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=20)
 
 
 def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
@@ -233,12 +237,12 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
         x0r = half_w * (z0 / y_max) if y_max > 0 else 0
         angle = np.degrees(np.arctan2(-z0, -x0r)) if y_max > 0 else 0
         offset = np.sign(x0r) * half_w * 0.11
-        ax.text(x0r + offset, z0, f"{z0:.2f}", ha='left', va='center', rotation=angle + 180, fontsize=10)
+        ax.text(x0r + offset, z0, f"{z0:.2f}", ha='left', va='center', rotation=angle + 180, fontsize=20)
     if idx == 0:
-        ax.set_ylabel(ylabel, fontsize=20, labelpad=15)
+        ax.set_ylabel(ylabel, fontsize=25, labelpad=15)
 
 
-def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z', connect_lines=True, line_min_npts=2):
+def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z', connect_lines=False, line_min_npts=2):
     """
     Plots the wedge diagrams for the given tracers and zone.
 
@@ -268,9 +272,9 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     tr_pref = tracer_prefixes(tr_types)
 
     nrows, ncols = subplot_grid(len(tracers))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 25*nrows), sharex=False, sharey=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 30*nrows), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
-    plt.suptitle(f'{webtype.capitalize()}s in zone {zone:02d}', fontsize=16, y=1.01)
+    plt.suptitle(f'{webtype.capitalize()}s in zone {zone:02d}', fontsize=27, y=1.01)
 
     for i, tr in enumerate(tracers):
         tr = str(tr)
@@ -312,8 +316,8 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
         if connect_lines:
             ci_sub = idx_mod[mclip]
             gid_sub = gid[mclip]
-            x_sub  = x[mclip]
-            y_sub  = yvals[mclip]
+            x_sub = x[mclip]
+            y_sub = yvals[mclip]
 
             for g in np.unique(gid_sub):
                 selg = (gid_sub == g)
@@ -380,7 +384,7 @@ def main():
         for t in args.tracers:
             tokens.extend(str(t).replace(',', ' ').split())
         req_pref = [tok.split('_', 1)[0].upper() for tok in tokens]
-        req_set  = set(req_pref)
+        req_set = set(req_pref)
         tracers = [t for t in ORDERED_TRACERS if (t in req_set) and (t in avail_set)]
     else:
         tracers = [t for t in ORDERED_TRACERS if t in avail_set]

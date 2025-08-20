@@ -37,9 +37,9 @@ def _get_zone_paths(raw_dir, class_dir, zone):
     Returns:
         tuple: Paths to the raw data file and classification file for the zone.
     """
-    z2 = f"{zone:02d}"
-    return (os.path.join(raw_dir, f"zone_{z2}.fits.gz"),
-            os.path.join(class_dir, f"zone_{z2}_class.fits.gz"),)
+    z2 = f'{zone:02d}'
+    return (os.path.join(raw_dir, f'zone_{z2}.fits.gz'),
+            os.path.join(class_dir, f'zone_{z2}_class.fits.gz'),)
 
 
 def _read_zone_tables(raw_path, class_path):

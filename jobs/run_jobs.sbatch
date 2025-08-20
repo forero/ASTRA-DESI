@@ -31,4 +31,5 @@ srun /usr/bin/time -f \
       --zone      "${ZONE}" \
       --base-dir  "${CLUSTER_DIR}" \
       --raw-out   "${RAW_OUT}" \
-      --class-out "${CLASS_OUT}"
+      --class-out "${CLASS_OUT}" \
+      # --only-plot

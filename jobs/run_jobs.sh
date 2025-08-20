@@ -33,6 +33,7 @@ run_zone(){
       --base-dir  "$CLUSTER_DIR" \
       --raw-out   "$RAW_OUT" \
       --class-out "$CLASS_OUT" \
+      --only-plot \
       # 1>>"$LOGDIR/zone_${zone}_${ts}.out" \
       2>>"$LOGDIR/zone_${zone}.err"
 

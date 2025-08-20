@@ -28,19 +28,19 @@ def load_table(path, columns):
     try:
         tbl = Table.read(path)
     except Exception as e:
-        raise IOError(f"Error reading {path}: {e}") from e
+        raise IOError(f'Error reading {path}: {e}') from e
 
     missing = set(columns) - set(tbl.colnames)
     if missing:
-        raise KeyError(f"Missing columns {missing} in file {path}")
+        raise KeyError(f'Missing columns {missing} in file {path}')
 
     try:
         tbl = tbl[columns]
-        if "ROSETTE_NUMBER" in tbl.colnames:
-            tbl.rename_column("ROSETTE_NUMBER", "ZONE")
+        if 'ROSETTE_NUMBER' in tbl.colnames:
+            tbl.rename_column('ROSETTE_NUMBER', 'ZONE')
         return tbl
     except Exception as e:
-        raise RuntimeError(f"Error processing table columns for {path}: {e}") from e
+        raise RuntimeError(f'Error processing table columns for {path}: {e}') from e
 
 
 def _compute_cartesian(tbl):
@@ -55,16 +55,16 @@ def _compute_cartesian(tbl):
         RuntimeError: If coordinate conversion fails.
     """
     try:
-        dist = Planck18.comoving_distance(np.asarray(tbl["Z"], float))
-        ra = np.asarray(tbl["RA"], dtype=float) * u.deg
-        dec = np.asarray(tbl["DEC"], dtype=float) * u.deg
+        dist = Planck18.comoving_distance(np.asarray(tbl['Z'], float))
+        ra = np.asarray(tbl['RA'], dtype=float) * u.deg
+        dec = np.asarray(tbl['DEC'], dtype=float) * u.deg
         sc = SkyCoord(ra=ra, dec=dec, distance=dist)
-        tbl["XCART"] = sc.cartesian.x.value
-        tbl["YCART"] = sc.cartesian.y.value
-        tbl["ZCART"] = sc.cartesian.z.value
+        tbl['XCART'] = sc.cartesian.x.value
+        tbl['YCART'] = sc.cartesian.y.value
+        tbl['ZCART'] = sc.cartesian.z.value
         return tbl
     except Exception as e:
-        raise RuntimeError(f"Error computing Cartesian coordinates: {e}") from e
+        raise RuntimeError(f'Error computing Cartesian coordinates: {e}') from e
 
 
 def get_hemisphere(zone, north_rosettes):
@@ -83,7 +83,7 @@ def get_hemisphere(zone, north_rosettes):
     try:
         return ('S','N')[zone in north_rosettes]
     except Exception as e:
-        raise RuntimeError(f"Error determining hemisphere for zone {zone}: {e}") from e
+        raise RuntimeError(f'Error determining hemisphere for zone {zone}: {e}') from e
 
 
 def process_real(real_tables, tracer, zone, north_rosettes):
@@ -107,9 +107,9 @@ def process_real(real_tables, tracer, zone, north_rosettes):
         tbl = real_tables[tracer][hemi]
         sel = tbl[tbl['ZONE'] == zone]
         if len(sel) == 0:
-            raise ValueError(f"No entries for zone {zone} in tracer '{tracer}' ({hemi})")
+            raise ValueError(f'No entries for zone {zone} in tracer {tracer} ({hemi})')
         sel = _compute_cartesian(sel)
-        sel['TRACERTYPE'] = f"{tracer}_DATA"
+        sel['TRACERTYPE'] = f'{tracer}_DATA'
         sel['RANDITER'] = -1
         return sel
     except KeyError:
@@ -117,7 +117,7 @@ def process_real(real_tables, tracer, zone, north_rosettes):
     except ValueError:
         raise
     except Exception as e:
-        raise RuntimeError(f"Error processing real data for tracer '{tracer}', zone {zone}: {e}") from e
+        raise RuntimeError(f'Error processing real data for tracer {tracer}, zone {zone}: {e}') from e
 
 
 def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real_count):
@@ -146,9 +146,9 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
         tables = random_tables[tracer][hemi].values()
         zone_tables = []
         for tbl in tables:
-            sel = tbl[tbl["ZONE"] == zone]
+            sel = tbl[tbl['ZONE'] == zone]
             if len(sel) < real_count:
-                raise ValueError(f"Zone {zone} has only {len(sel)} random points (< {real_count})")
+                raise ValueError(f'Zone {zone} has only {len(sel)} random points (< {real_count})')
             zone_tables.append(sel)
         n_files = len(zone_tables)
 
@@ -162,8 +162,8 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
             sel = zone_tables[idx]
             rows = np.random.default_rng(j).choice(len(sel), real_count, replace=False)
             samp = _compute_cartesian(sel[rows])
-            samp["TRACERTYPE"] = f"{tracer}_RAND"
-            samp["RANDITER"] = j
+            samp['TRACERTYPE'] = f'{tracer}_RAND'
+            samp['RANDITER'] = j
             samples.append(samp)
 
         return vstack(samples)
@@ -172,4 +172,4 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
     except ValueError:
         raise
     except Exception as e:
-        raise RuntimeError(f"Error generating randoms for tracer '{tracer}', zone {zone}: {e}") from e
+        raise RuntimeError(f"Error generating randoms for tracer {tracer}, zone {zone}: {e}") from e

@@ -25,9 +25,9 @@ def get_zone_paths(raw_dir, class_dir, zone):
     Returns:
         tuple: Paths to the raw data file and classification file for the zone.
     """
-    z2 = f"{zone:02d}"
-    return (os.path.join(raw_dir, f"zone_{z2}.fits.gz"),
-            os.path.join(class_dir, f"zone_{z2}_class.fits.gz"),)
+    z2 = f'{zone:02d}'
+    return (os.path.join(raw_dir, f'zone_{z2}.fits.gz'),
+            os.path.join(class_dir, f'zone_{z2}_class.fits.gz'),)
 
 
 def get_prob_path(raw_dir, class_dir, zone):
@@ -41,8 +41,8 @@ def get_prob_path(raw_dir, class_dir, zone):
     Returns:
         str: Path to the probability file for the zone.
     """
-    z2 = f"{zone:02d}"
-    return os.path.join(class_dir, f"zone_{z2}_probability.fits.gz")
+    z2 = f'{zone:02d}'
+    return os.path.join(class_dir, f'zone_{z2}_probability.fits.gz')
 
 
 def infer_zones(raw_dir, provided):
@@ -380,7 +380,7 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
         n_z (int): Number of z ticks.
     """
     real = _prepare_real(raw_df, prob_df)
-    tracers = ["BGS_ANY", "LRG", "ELG", "QSO"]
+    tracers = ['BGS_ANY', 'LRG', 'ELG', 'QSO']
     fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers), 20), gridspec_kw={'wspace': 0.5})
     axes = axes.flatten()
 
@@ -390,7 +390,7 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
         ax.set_title(tracer.replace('_ANY',''), fontsize=16, y=1.05)
 
         if sub.empty:
-            raise ValueError(f"No data for tracer {tracer} in zone {zone}")
+            raise ValueError(f'No data for tracer {tracer} in zone {zone}')
 
         ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(sub)
         z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
@@ -401,22 +401,22 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
             functions=(lambda x: ra_ctr + np.rad2deg(x / (Planck18.comoving_distance(z_hi).value * np.cos(np.deg2rad(dec_ctr)))),
                        lambda r: Planck18.comoving_distance(z_hi).value * np.deg2rad(r - ra_ctr) * np.cos(np.deg2rad(dec_ctr))))
         sec.set_xticks(ra_ticks[::4])
-        sec.set_xticklabels([f"{rt:.0f}" for rt in ra_ticks[::4]], fontsize=13)
+        sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
         sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
 
         if ax is axes[0]:
             ax.set_ylabel('z', fontsize=20, labelpad=15)
             ax.set_yticks(z_ticks)
-            ax.set_yticklabels([f"{zt:.1f}" for zt in z_ticks], fontsize=13)
+            ax.set_yticklabels([f'{zt:.1f}' for zt in z_ticks], fontsize=13)
 
     handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
                for k,c in CLASS_COLORS.items()]
     fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
                ncol=len(CLASS_COLORS), fontsize=14)
 
-    plt.suptitle(f"Zone {zone}", fontsize=18)
-    os.makedirs(os.path.join(output_dir, "wedges/complete"), exist_ok=True)
-    fig.savefig(os.path.join(output_dir, f"wedges/complete/wedge_zone_{zone:02d}.png"), dpi=360)
+    plt.suptitle(f'Zone {zone}', fontsize=18)
+    os.makedirs(os.path.join(output_dir, 'wedges/complete'), exist_ok=True)
+    fig.savefig(os.path.join(output_dir, f'wedges/complete/wedge_zone_{zone:02d}.png'), dpi=360)
     plt.close(fig)
 
 
@@ -457,22 +457,22 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
             functions=(lambda x: ra_ctr + np.rad2deg(x / (Planck18.comoving_distance(z_hi).value * np.cos(np.deg2rad(dec_ctr)))),
                        lambda r: Planck18.comoving_distance(z_hi).value * np.deg2rad(r - ra_ctr) * np.cos(np.deg2rad(dec_ctr))))
         sec.set_xticks(ra_ticks[::4])
-        sec.set_xticklabels([f"{rt:.0f}" for rt in ra_ticks[::4]], fontsize=13)
+        sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
         sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
 
         if ax is axes[0]:
             ax.set_ylabel('z', fontsize=20, labelpad=15)
             ax.set_yticks(z_ticks)
-            ax.set_yticklabels([f"{zt:.1f}" for zt in z_ticks], fontsize=13)
+            ax.set_yticklabels([f'{zt:.1f}' for zt in z_ticks], fontsize=13)
 
     handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
                for k,c in CLASS_COLORS.items()]
     fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
                ncol=len(CLASS_COLORS), fontsize=14)
 
-    plt.suptitle(f"Zone {zone}", fontsize=18)
-    os.makedirs(os.path.join(output_dir, "wedges/slice"), exist_ok=True)
-    fig.savefig(os.path.join(output_dir, f"wedges/slice/wedge_slice_zone_{zone:02d}.png"), dpi=360)
+    plt.suptitle(f'Zone {zone}', fontsize=18)
+    os.makedirs(os.path.join(output_dir, 'wedges/slice'), exist_ok=True)
+    fig.savefig(os.path.join(output_dir, f'wedges/slice/wedge_slice_zone_{zone:02d}.png'), dpi=360)
     plt.close(fig)
 
 

@@ -115,7 +115,7 @@ def generate_pairs(tbl, n_random):
 		tids, rand_sub, coords, is_data = (data['tids'], data['rand'], data['coords'], data['is_data'])
 
 		for j in range(n_random):
-			print(f'---- iteration {j} inside generate_pairs')
+			# print(f'---- iteration {j} inside generate_pairs')
 			mask = is_data | (rand_sub == j)
 			if not mask.any():
 				continue

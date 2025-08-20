@@ -15,9 +15,9 @@ plt.rcParams.update({'font.family': 'serif', 'font.size': 12, 'axes.labelsize': 
 CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
 CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
 
-RAW_DIR = "/pscratch/sd/v/vtorresg/cosmic-web/edr/raw"
-CLASS_DIR = "/pscratch/sd/v/vtorresg/cosmic-web/edr/class"
-OUTPUT = "../plots"
+RAW_DIR = '/pscratch/sd/v/vtorresg/cosmic-web/edr/raw'
+CLASS_DIR = '/pscratch/sd/v/vtorresg/cosmic-web/edr/class'
+OUTPUT = '../plots'
 
 
 def _save_real_data(real, tracer_name, zone, output_dir):
@@ -33,7 +33,7 @@ def _save_real_data(real, tracer_name, zone, output_dir):
     """
     data_zone_dir = os.path.join(output_dir, 'data', tracer_name)
     os.makedirs(data_zone_dir, exist_ok=True)
-    fname = f"{tracer_name}_zone_{zone:02d}.fits.gz"
+    fname = f'{tracer_name}_zone_{zone:02d}.fits.gz'
     Table.from_pandas(real).write(os.path.join(data_zone_dir, fname),
                                   overwrite=True)
 
@@ -163,7 +163,7 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, dec_ctr, Dc, zmax):
     top4 = np.linspace(ra_ticks.min(), ra_ticks.max(), 4)
     x_top = Dc * np.deg2rad(top4 - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
     for xt, rt in zip(x_top, top4):
-        ax.text(xt, zmax + 0.01*zmax, f"{rt:.0f}", ha='center', va='bottom', fontsize=10)
+        ax.text(xt, zmax + 0.01*zmax, f'{rt:.0f}', ha='center', va='bottom', fontsize=10)
     ax.text(0, zmax + 0.03*zmax, 'RA (deg)', ha='center', va='bottom', fontsize=11)
 
 
@@ -182,11 +182,11 @@ def _annotate_z_side(ax, z_ticks, half_w, zmax, idx):
         x0r = half_w * (z0 / zmax)
         angle = np.degrees(np.arctan2(-z0, -x0r))
         offset = np.sign(x0r) * half_w * 0.11
-        ax.text(x0r + offset, z0, f"{z0:.2f}", ha='left', va='center', rotation=angle + 180, fontsize=10)
+        ax.text(x0r + offset, z0, f'{z0:.2f}', ha='left', va='center', rotation=angle + 180, fontsize=10)
     if idx == 0:
         ax.set_ylabel('z', fontsize=20, labelpad=15)
         ax.set_yticks(z_ticks)
-        ax.set_yticklabels([f"{zt:.2f}" for zt in z_ticks], fontsize=10)
+        ax.set_yticklabels([f'{zt:.2f}' for zt in z_ticks], fontsize=10)
 
 
 def plot_tracer_wedges_by_zones(raw_df, prob_df, zones, tracer, output_dir, n_ra=15, n_z=10, z_lim=0.2):
@@ -206,7 +206,7 @@ def plot_tracer_wedges_by_zones(raw_df, prob_df, zones, tracer, output_dir, n_ra
         z_lim (float): Maximum redshift limit for the plot. If None, uses the maximum redshift in the data.
     """
     tracer_name = tracer.replace('_ANY', '').lower()
-    out_dir = os.path.join(output_dir, f"tracer_zone/{tracer_name}")
+    out_dir = os.path.join(output_dir, f'tracer_zone/{tracer_name}')
     os.makedirs(out_dir, exist_ok=True)
 
     num = len(zones)
@@ -224,7 +224,7 @@ def plot_tracer_wedges_by_zones(raw_df, prob_df, zones, tracer, output_dir, n_ra
         real = df[(df['ISDATA']) & (df['BASE'] == tracer)]
 
         _save_real_data(real, tracer_name, zone, output_dir)
-        _init_ax(ax, f"Zone {zone}")
+        _init_ax(ax, f'Zone {zone}')
 
         if real.empty:
             ax.set_xlim(0, 1); ax.set_ylim(0, 1)
@@ -244,7 +244,7 @@ def plot_tracer_wedges_by_zones(raw_df, prob_df, zones, tracer, output_dir, n_ra
                ncol=len(CLASS_COLORS))
     plt.suptitle(tracer.replace('_ANY', ''), fontsize=18)
 
-    fname = f"{tracer_name}_zones_{'_'.join(f'{z:02d}' for z in zones)}.png"
+    fname = f'{tracer_name}_zones_{"_".join(f"{z:02d}" for z in zones)}.png'
     fig.savefig(os.path.join(out_dir, fname), dpi=360, bbox_inches='tight')
     plt.close(fig)
 
@@ -286,7 +286,7 @@ def main():
                                       overwrite=True)
 
     for tracer in args.tracers:
-        print(f"Plotting: {tracer}")
+        print(f'Plotting: {tracer}')
         plot_tracer_wedges_by_zones(raw_all, prob_all, zones, tracer, args.output,
                                     n_ra=args.bins, n_z=args.bins)
 
