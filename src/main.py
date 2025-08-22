@@ -11,9 +11,17 @@ from desiproc.gen_groups import process_zone
 
 
 def _zone_tag(z):
-    """Return '00'..'19' if z is numeric; otherwise return the string label (e.g., 'NGC1')."""
+    """
+    Convert a zone number to a zero-padded string.
+
+    Args:
+        z (int or str): Zone number (0-99) or label (e.g., 'NGC1').
+
+    Returns:
+        str: Zero-padded zone number as a string.
+    """
     try:
-        return f"{int(z):02d}"
+        return f'{int(z):02d}'
     except Exception:
         return str(z)
 
@@ -33,7 +41,6 @@ def _read_raw_min_compat(raw_dir, class_dir, zone):
     tag = _zone_tag(zone)
     raw_path = os.path.join(raw_dir, f'zone_{tag}.fits.gz')
     raw = Table.read(raw_path)
-    # Keep minimal columns required downstream
     cols = ['TARGETID','TRACERTYPE','RANDITER','RA','DEC','Z']
     present = [c for c in cols if c in raw.colnames]
     return raw[present]
@@ -87,7 +94,7 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
             try:
                 rt = process_real_region(real_tables, tr, region, cuts, zone_value=zone_value)
             except ValueError as e:
-                print(f"[warn] {tr} empty after cuts in region {region}: {e}")
+                print(f'[warn] {tr} empty after cuts in region {region}: {e}')
                 skipped.append(tr)
                 continue
             parts.append(rt)
@@ -96,13 +103,13 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
             parts.append(rpt)
 
         if not parts:
-            raise ValueError(f"No data in region {region} for cuts {cuts} (tracers tried: {tracers})")
+            raise ValueError(f'No data in region {region} for cuts {cuts} (tracers tried: {tracers})')
 
         tbl = vstack(parts)
-        out = os.path.join(output_raw, f"zone_{zone_label}.fits.gz")
-        tbl.write(out, format="fits", overwrite=True)
+        out = os.path.join(output_raw, f'zone_{zone_label}.fits.gz')
+        tbl.write(out, format='fits', overwrite=True)
         if skipped:
-            print(f"[info] In {zone_label} skipped tracers (empty): {', '.join(skipped)}")
+            print(f'[info] In {zone_label} skipped tracers (empty): {", ".join(skipped)}')
         return tbl
     except Exception as e:
         raise RuntimeError(f'Error building raw table for region {zone_label}: {e}') from e
@@ -132,8 +139,8 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
             rpt = generate_randoms(random_tables, tr, zone, NORTH_ROSETTES, n_random, count)
             parts.append(rpt)
         tbl = vstack(parts)
-        out = os.path.join(output_raw, f"zone_{zone:02d}.fits.gz")
-        tbl.write(out, format="fits", overwrite=True)#, compression="gzip")
+        out = os.path.join(output_raw, f'zone_{zone:02d}.fits.gz')
+        tbl.write(out, format='fits', overwrite=True)
         return tbl
     except Exception as e:
         raise RuntimeError(f'Error building raw table for zone {zone}: {e}') from e
@@ -176,15 +183,13 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
     try:
         groups = _read_groups_compat(args.groups_out, z, args.webtype)
     except Exception as e:
-        print(f"[plot] skip zone {tag}: cannot read groups ({e}). "
-              f"Run gen_groups first for this zone.")
+        print(f'[plot] skip zone {tag}: cannot read groups ({e})')
         return
 
     try:
         raw = _read_raw_min_compat(args.raw_out, args.class_out, z)
     except Exception as e:
-        print(f"[plot] skip zone {tag}: cannot read raw/class ({e}). "
-              f"Ensure zone_{tag}.fits.gz and zone_{tag}_class.fits.gz exist.")
+        print(f'[plot] skip zone {tag}: cannot read raw/class ({e})')
         return
 
     gm = mask_source(np.asarray(groups['RANDITER']), args.source)
@@ -234,7 +239,7 @@ def main():
 
         args = p.parse_args()
 
-        if args.release.upper() == "EDR":
+        if args.release.upper() == 'EDR':
             TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
             REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
             RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
@@ -253,12 +258,9 @@ def main():
             REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
             RANDOM_COLUMNS = REAL_COLUMNS
 
-            DEFAULT_CUTS = {
-                "NGC1": {"RA_min":110, "RA_max":300, "DEC_min":-80, "DEC_max":48,  "Z_min":0.1, "Z_max":0.9},
-                "NGC2": {"RA_min":180, "RA_max":260, "DEC_min":30,  "DEC_max":40, "Z_min":0.1, "Z_max":0.9},
-            }
-            # Load external config if prov
-            if args.config:
+            DEFAULT_CUTS = {'NGC1': {'RA_min':110, 'RA_max':300, 'DEC_min':-80, 'DEC_max':48, 'Z_min':0.1, 'Z_max':0.9},
+                            'NGC2': {'RA_min':180, 'RA_max':260, 'DEC_min':30, 'DEC_max':40, 'Z_min':0.1, 'Z_max':0.9},}
+            if args.config: # load external config json if prov
                 with open(args.config, 'r') as f:
                     user_cuts = json.load(f)
                 DEFAULT_CUTS.update(user_cuts)
@@ -275,15 +277,15 @@ def main():
 
         i_t = time.time()
 
-        if args.release.upper() == "EDR":
+        if args.release.upper() == 'EDR':
             zones = [args.zone] if args.zone is not None else range(N_ZONES)
         else:
-            zones = args.zones if args.zones is not None else ["NGC1","NGC2"]
+            zones = args.zones if args.zones is not None else ['NGC1', 'NGC2']
 
         if args.only_plot:
             for z in zones:
                 plot_zone_wedges_for_args(z, args, plot_dir)
-            print(f'[pipeline] only-plot elapsed t {time.time()-i_t:.2f} s')
+            print(f'--- [pipeline] only-plot elapsed t {time.time()-i_t:.2f} s')
             return
 
         real_tables, random_tables = preload_all_tables(args.base_dir, TRACERS,
@@ -292,12 +294,13 @@ def main():
                                                         N_RANDOM_FILES)
 
         for z in zones:
-            if args.release.upper() == "EDR":
+            if args.release.upper() == 'EDR':
                 tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out, args.n_random)
             else:
-                zone_value = {"NGC1": 1001, "NGC2": 1002}.get(str(z), 9999)
+                zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(str(z), 9999)
                 cuts = DEFAULT_CUTS[str(z)]
-                tbl = build_raw_region(str(z), cuts, args.region, TRACERS, real_tables, random_tables, args.raw_out, args.n_random, zone_value)
+                tbl = build_raw_region(str(z), cuts, args.region, TRACERS, real_tables, random_tables,
+                                       args.raw_out, args.n_random, zone_value)
 
             classify_zone(z, tbl, args.class_out, args.n_random)
 
@@ -306,12 +309,12 @@ def main():
                                       args.groups_out, args.webtype, args.source,
                                       linklen_map, args.r_limit)
             if out_groups is not None:
-                tag = f"{z:02d}" if isinstance(z, int) else str(z)
+                tag = f'{z:02d}' if isinstance(z, int) else str(z)
                 print(f'[groups] zone {tag} in -> {out_groups}')
                 if args.plot:
                     plot_zone_wedges_for_args(z, args, plot_dir)
             else:
-                tag = f"{z:02d}" if isinstance(z, int) else str(z)
+                tag = f'{z:02d}' if isinstance(z, int) else str(z)
                 print(f'[groups] zone {tag}: no objects with WEBTYPE={args.webtype} for {args.source} source')
     except Exception as e:
         raise RuntimeError(f'Pipeline failed with: {e}') from e

@@ -81,14 +81,13 @@ def process_delaunay(pts, tids, is_data, iteration):
     class_rows = []
     r_updates = defaultdict(list)
 
-    # valid = np.nonzero(is_data & (total_count>0))[0]
     valid = np.nonzero(is_data & (total_count>0))[0]
     r_vals = (data_count[valid] - (total_count[valid] - data_count[valid])) / total_count[valid]
     for i,r in zip(valid, r_vals):
     	r_updates[int(tids[i])].append(float(r))
 
     for i in range(n):
-    	class_rows.append(( int(tids[i]), iteration, bool(is_data[i]),
+    	class_rows.append((int(tids[i]), iteration, bool(is_data[i]),
                         int(data_count[i]), int(total_count[i] - data_count[i])))
 
     return pair_rows, class_rows, r_updates
@@ -115,7 +114,6 @@ def generate_pairs(tbl, n_random):
 		tids, rand_sub, coords, is_data = (data['tids'], data['rand'], data['coords'], data['is_data'])
 
 		for j in range(n_random):
-			# print(f'---- iteration {j} inside generate_pairs')
 			mask = is_data | (rand_sub == j)
 			if not mask.any():
 				continue

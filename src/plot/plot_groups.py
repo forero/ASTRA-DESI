@@ -11,22 +11,31 @@ plt.style.use('dark_background')
 plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
                      'xtick.labelsize': 20,'ytick.labelsize': 20, 'legend.fontsize': 10,})
 
-def _zone_tag(zone):
-    try:
-        return f"{int(zone):02d}"
-    except Exception:
-        return str(zone)
-
 CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
 CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
-ORDERED_TRACERS = ["BGS", "LRG", "ELG", "QSO"]
+ORDERED_TRACERS = ['BGS', 'LRG', 'ELG', 'QSO']
 TRACER_ZLIMS = {'BGS': 0.45, 'LRG': 1.0, 'ELG': 1.4, 'QSO': 2.2}
 
 RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS']
-# main_color, sec_color = 'black', 'gray'
-main_color, sec_color = 'white', 'gainsboro' #dark back
+main_color, sec_color = 'black', 'gray'
+# main_color, sec_color = 'white', 'gainsboro' #for dark background
 
+
+
+def _zone_tag(zone):
+    """
+    Convert a zone number to a zero-padded string.
+
+    Args:
+        zone (int or str): Zone number (0-99) or label (e.g., 'NGC1').
+    Returns:
+        str: Zero-padded zone number as a string.
+    """
+    try:
+        return f'{int(zone):02d}'
+    except Exception:
+        return str(zone)
 
 def read_groups(groups_dir, zone, webtype):
     """
@@ -224,7 +233,7 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc, y_max):
     top4 = np.linspace(ra_ticks.min(), ra_ticks.max(), 4)
     x_top = Dc * np.deg2rad(top4 - ra_ctr)
     for xt, rt in zip(x_top, top4):
-        ax.text(xt, y_max + 0.01*y_max, f"{rt:.0f}", ha='center', va='bottom', fontsize=20)
+        ax.text(xt, y_max + 0.01*y_max, f'{rt:.0f}', ha='center', va='bottom', fontsize=20)
     ax.text(0, y_max + 0.03*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=20)
 
 
@@ -244,7 +253,7 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
         x0r = half_w * (z0 / y_max) if y_max > 0 else 0
         angle = np.degrees(np.arctan2(-z0, -x0r)) if y_max > 0 else 0
         offset = np.sign(x0r) * half_w * 0.11
-        ax.text(x0r + offset, z0, f"{z0:.2f}", ha='left', va='center', rotation=angle + 180, fontsize=20)
+        ax.text(x0r + offset, z0, f'{z0:.2f}', ha='left', va='center', rotation=angle + 180, fontsize=20)
     if idx == 0:
         ax.set_ylabel(ylabel, fontsize=25, labelpad=15)
 
@@ -281,7 +290,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     nrows, ncols = subplot_grid(len(tracers))
     fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 30*nrows), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
-    plt.suptitle(f"{webtype.capitalize()}s in zone {_zone_tag(zone)}", fontsize=27, y=1.01)
+    plt.suptitle(f'{webtype.capitalize()}s in zone {_zone_tag(zone)}', fontsize=27, y=1.01)
 
     for i, tr in enumerate(tracers):
         tr = str(tr)
@@ -346,7 +355,6 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
-    # fig.savefig('plots.png')
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close(fig)
     return out_png

@@ -30,11 +30,11 @@ def _get_zone_paths(raw_dir, class_dir, zone):
     """
     Get file paths for a given zone number or label.
     """
-    # Accept ints (0-99) with zero-padding, or arbitrary string labels (e.g., "NGC1")
+    # accept ints (0-99) with zero-padding or string labels (like NGC1)
     if isinstance(zone, int):
-        ztag = f"{zone:02d}"
+        ztag = f'{zone:02d}'
     else:
-        # zone may come as str from argparse; keep as-is
+        # zone may come as str from argparse for edr zones (rosettes)
         ztag = str(zone)
     return (os.path.join(raw_dir, f'zone_{ztag}.fits.gz'),
             os.path.join(class_dir, f'zone_{ztag}_class.fits.gz'),)
@@ -91,7 +91,6 @@ def _split_blocks(raw_sub):
     """
     tr = np.asarray(raw_sub['TRACERTYPE']).astype(str)
     ri = np.asarray(raw_sub['RANDITER'])
-    # keys = np.core.defchararray.add(tr, '|') + ri.astype(str)
     keys = np.char.add(np.char.add(tr, '|'), ri.astype(str))
     uniq = np.unique(keys)
     for key in uniq:
@@ -323,7 +322,7 @@ def main():
             print(f'---- zone {z} done: {out}')
         else:
             print(f'---- zone {z} no objects with WEBTYPE={args.webtype} for "{args.source}".')
-    print(f'Elapsed: {(t.time() - init)/60:.2f} min') #~5 min total without enhan
+    print(f'Elapsed: {(t.time() - init)/60:.2f} min')
 
 if __name__ == '__main__':
     main()

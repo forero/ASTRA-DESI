@@ -11,8 +11,6 @@ plt.rcParams.update({'font.family': 'serif', 'font.size': 12, 'axes.labelsize': 
 CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
 CLASS_ZORDER = {'void':0, 'sheet':1, 'filament':2, 'knot':3}
 
-#! TODO  - clustering, fof? plots
-
 
 def get_zone_paths(raw_dir, class_dir, zone):
     """
@@ -434,7 +432,7 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
         offset (float): Offset to apply when slicing by BASE.
     """
     real = _prepare_real(raw_df, prob_df)
-    tracers = ["BGS_ANY", "LRG", "ELG", "QSO"]
+    tracers = ['BGS_ANY', 'LRG', 'ELG', 'QSO']
     fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers), 20), sharex=True, sharey=True,
                              gridspec_kw={'wspace': 0.5})
     axes = axes.flatten()
@@ -507,7 +505,6 @@ def main():
         cls_df = class_cache.setdefault(zone, load_class_df(cls_path))
         cls_df = cls_df[cls_df['ISDATA'] == True]
 
-        # cls_df = cls_df.drop_duplicates(subset='TARGETID')
         merged = raw_df.merge(cls_df[['TARGETID','NDATA','NRAND']], on='TARGETID', how='left')
         r_df = compute_r(merged)
 
@@ -525,4 +522,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-#python plot_add.py --raw-dir /pscratch/sd/v/vtorresg/cosmic-web/edr/raw --class-dir /pscratch/sd/v/vtorresg/cosmic-web/edr/class --output ../plots

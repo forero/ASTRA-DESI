@@ -254,7 +254,7 @@ def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
     except ValueError:
         raise
     except Exception as e:
-        raise RuntimeError(f"Error processing real data for tracer {tracer} in region {region}: {e}") from e
+        raise RuntimeError(f'Error processing real data for tracer {tracer} in region {region}: {e}') from e
 
 
 def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_count, zone_value=9001):
@@ -280,27 +280,22 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
         region = region.upper()
         tables = list(random_tables[tracer][region].values())
         if len(tables) == 0:
-            raise KeyError(f"No random tables for {tracer} in region {region}")
+            raise KeyError(f'No random tables for {tracer} in region {region}')
 
-        # Prefilter each table by the spatial/redshift box and ensure ZONE exists
         zone_tables = []
         for tbl in tables:
-            sel = _filter_by_box(
-                tbl,
-                cuts['RA_min'], cuts['RA_max'],
-                cuts['DEC_min'], cuts['DEC_max'],
-                cuts.get('Z_min', None), cuts.get('Z_max', None)
-            )
+            sel = _filter_by_box(tbl,
+                                 cuts['RA_min'], cuts['RA_max'],
+                                 cuts['DEC_min'], cuts['DEC_max'],
+                                 cuts.get('Z_min', None), cuts.get('Z_max', None))
             if len(sel) < real_count:
-                raise ValueError(
-                    f"Region {region} randoms have only {len(sel)} points after cuts (< {real_count})"
-                )
+                raise ValueError(f'Region {region} randoms have only {len(sel)} points after cuts (< {real_count})')
             sel = _ensure_zone_column(sel, zone_value)
             zone_tables.append(sel)
 
         n_files = len(zone_tables)
         if n_files == 0:
-            raise ValueError(f"No random entries for {tracer} in region {region} after cuts {cuts}")
+            raise ValueError(f'No random entries for {tracer} in region {region} after cuts {cuts}')
 
         samples, used = [], set()
         for j in range(n_random):
@@ -322,4 +317,4 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
     except ValueError:
         raise
     except Exception as e:
-        raise RuntimeError(f"Error generating randoms for tracer {tracer} in region {region}: {e}") from e
+        raise RuntimeError(f'Error generating randoms for tracer {tracer} in region {region}: {e}') from e
