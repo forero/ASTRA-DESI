@@ -1,36 +1,59 @@
-import os
-import subprocess
-from concurrent.futures import ProcessPoolExecutor
+import os, subprocess, sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import cpu_count
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-MAIN_SCRIPT = os.path.join(PROJECT_ROOT, "src", "main.py")
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+MAIN_SCRIPT = os.path.join(PROJECT_ROOT, 'src', 'main.py')
 
-CLUSTER_DIR = "/global/cfs/cdirs/desi/public/edr/vac/edr/lss/v2.0/LSScats/clustering"
-SCRATCH_BASE = "/pscratch/sd/v/vtorresg/cosmic-web"
+CLUSTER_DIR = '/global/cfs/cdirs/desi/public/edr/vac/edr/lss/v2.0/LSScats/clustering'
+SCRATCH_BASE = '/pscratch/sd/v/vtorresg/cosmic-web'
 
-RAW_OUT   = f"{SCRATCH_BASE}/edr/raw"
-CLASS_OUT = f"{SCRATCH_BASE}/edr/class"
-GROUPS_OUT = f"{SCRATCH_BASE}/edr/groups"
-FIGS_OUT  = f"{SCRATCH_BASE}/edr/figs"
+RAW_OUT = f'{SCRATCH_BASE}/edr/raw'
+CLASS_OUT = f'{SCRATCH_BASE}/edr/class'
+GROUPS_OUT = f'{SCRATCH_BASE}/edr/groups'
+FIGS_OUT = f'{SCRATCH_BASE}/edr/figs'
+for d in (RAW_OUT, CLASS_OUT, GROUPS_OUT, FIGS_OUT):
+    os.makedirs(d, exist_ok=True)
 
-os.makedirs(RAW_OUT, exist_ok=True)
-os.makedirs(CLASS_OUT, exist_ok=True)
-os.makedirs(GROUPS_OUT, exist_ok=True)
-os.makedirs(FIGS_OUT, exist_ok=True)
+common_args = [sys.executable, MAIN_SCRIPT, '--base-dir', CLUSTER_DIR, '--raw-out',
+               RAW_OUT, '--class-out', CLASS_OUT, '--groups-out', GROUPS_OUT,
+               '--webtype', 'filament', '--source', 'data', '--n-random', '100',
+               '--plot', '--plot-output', FIGS_OUT,] # '--only-plot',]
 
-common_args = ["python", MAIN_SCRIPT, "--base-dir", CLUSTER_DIR,
-               "--raw-out", RAW_OUT, "--class-out", CLASS_OUT,
-               "--groups-out", GROUPS_OUT, "--webtype", "filament",
-               "--source", "data", "--n-random", "100", "--plot",
-               "--plot-output", FIGS_OUT,]# "--only-plot",]
+ENV = dict(os.environ)
+ENV.update({'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1',
+            'MKL_NUM_THREADS': '1', 'NUMEXPR_NUM_THREADS': '1',})
 
-def run_zone(zone):
-    print(f'--> Zone {zone}')
-    subprocess.run(common_args + ["--zone", str(zone)], check=True)
+def run_zone(zone: int):
+    cmd = common_args + ['--zone', str(zone)]
+    proc = subprocess.run(cmd, check=True, env=ENV,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return zone, proc.stdout, proc.stderr
 
-if __name__ == "__main__":
-    max_workers = cpu_count()
-    ls = range(20)
+if __name__ == '__main__':
+    zones = list(range(20))
+    max_workers = min(4, cpu_count())
+    print(f'Using {max_workers} workers')
+    results = []
+
     with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        ex.map(run_zone, ls)
+        futs = {ex.submit(run_zone, z): z for z in zones}
+        for fut in as_completed(futs):
+            z = futs[fut]
+            try:
+                zone, out, err = fut.result()
+                print(f'[OK] zone {zone:02d}')
+                if err.strip():
+                    print(f'[zone {zone:02d} STDERR]\n{err}')
+                results.append(zone)
+            except subprocess.CalledProcessError as e:
+                print(f'[FAIL] zone {z:02d} exit={e.returncode}')
+                print('STDOUT:\n', e.stdout)
+                print('STDERR:\n', e.stderr)
+            except Exception as e:
+                print(f'[EXC] zone {z:02d}: {e!r}')
+
+    done = sorted(results)
+    missing = sorted(set(zones) - set(done))
+    print(f'Done: {done}')
+    print(f'Missing: {missing}')

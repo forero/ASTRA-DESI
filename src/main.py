@@ -145,14 +145,14 @@ def main():
         p.add_argument("--raw-out", required=True, help="Raw output folder")
         p.add_argument("--class-out", required=True, help="Classification output folder")
         p.add_argument("--groups-out", required=True, help="Groups output folder")
-        p.add_argument("--n-random", type=int, default=5, help="Number of randoms per real object")
+        p.add_argument("--n-random", type=int, default=100, help="Number of randoms per real object")
 
         p.add_argument("--webtype", choices=["void","sheet","filament","knot"], default="filament", help="Webtype to group")
         p.add_argument("--source", choices=["data","rand","both"], default="data", help="Use data, randoms, or both for FoF")
         p.add_argument("--r-limit", type=float, default=0.9, help="r threshold to classify webtype")
         p.add_argument("--linking", type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}', help="JSON-type dict of linking lengths per tracer")
 
-        p.add_argument("--zone", type=int, default=1, help="Single zone to run (0...19)")
+        p.add_argument("--zone", type=int, default=0, help="Single zone to run (0...19)")
         p.add_argument("--plot", action="store_true", help="Generate wedge plots after grouping")
         p.add_argument("--plot-output", default=None, help="Directory to save plots (defaults to --groups-out)")
         p.add_argument("--plot-tracers", nargs='*', default=None, help="Subset of tracer prefixes to plot (e.g., BGS_ANY ELG)")
