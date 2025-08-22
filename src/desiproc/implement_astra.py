@@ -18,10 +18,10 @@ def extract_tracer_blocks(tbl):
     randiters = np.asarray(tbl['RANDITER'], dtype=np.int32)
     targetids = np.asarray(tbl['TARGETID'], dtype=np.int64)
     coords_all = np.vstack((tbl['XCART'], tbl['YCART'], tbl['ZCART'])).T.astype(np.float32)
-    prefixes = {s.split('_',1)[0] for s in tracertypes}
+    prefixes = {s.rsplit('_', 1)[0] for s in tracertypes}
     blocks = {}
     for tracer in prefixes:
-        mask = np.char.startswith(tracertypes, tracer)
+        mask = (np.array([t.rsplit('_', 1)[0] for t in tracertypes], dtype=object) == tracer)
         idxs = np.nonzero(mask)[0]
         blocks[tracer] = {'tids': targetids[idxs], 'rand': randiters[idxs],
     					  'coords': coords_all[idxs], 'is_data': randiters[idxs] == -1}

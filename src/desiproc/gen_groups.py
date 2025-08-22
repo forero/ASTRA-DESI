@@ -28,18 +28,16 @@ def _read_fits_columns(path, cols):
 
 def _get_zone_paths(raw_dir, class_dir, zone):
     """
-    Get file paths for a given zone number.
-
-    Args:
-        raw_dir (str): Directory containing raw data files.
-        class_dir (str): Directory containing classification files.
-        zone (int): Zone number.
-    Returns:
-        tuple: Paths to the raw data file and classification file for the zone.
+    Get file paths for a given zone number or label.
     """
-    z2 = f'{zone:02d}'
-    return (os.path.join(raw_dir, f'zone_{z2}.fits.gz'),
-            os.path.join(class_dir, f'zone_{z2}_class.fits.gz'),)
+    # Accept ints (0-99) with zero-padding, or arbitrary string labels (e.g., "NGC1")
+    if isinstance(zone, int):
+        ztag = f"{zone:02d}"
+    else:
+        # zone may come as str from argparse; keep as-is
+        ztag = str(zone)
+    return (os.path.join(raw_dir, f'zone_{ztag}.fits.gz'),
+            os.path.join(class_dir, f'zone_{ztag}_class.fits.gz'),)
 
 
 def _read_zone_tables(raw_path, class_path):
@@ -235,7 +233,7 @@ def write_fits_gz(tbl, out_dir, zone, webtype):
         str: Path to the compressed FITS file.
     """
     os.makedirs(out_dir, exist_ok=True)
-    uncompressed = os.path.join(out_dir, f'zone_{zone:02d}_groups_fof_{webtype}.fits')
+    uncompressed = os.path.join(out_dir, f'zone_{(f"{zone:02d}" if isinstance(zone,int) else str(zone))}_groups_fof_{webtype}.fits')
     compressed = uncompressed + '.gz'
     tbl.write(uncompressed, overwrite=True)
     with open(uncompressed, 'rb') as fi, gzip.open(compressed, 'wb') as fo:
@@ -300,11 +298,12 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
 
 
 def parse_args():
+    release_default = os.environ.get('RELEASE', 'edr')
     p = argparse.ArgumentParser()
-    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw', help='Raw data dir')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class', help='Classification dir')
-    p.add_argument('--groups-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/groups', help='Output groups dir')
-    p.add_argument('--zones', type=int, nargs='+', default=list(range(20)))
+    p.add_argument('--raw-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'raw'), help='Raw data dir')
+    p.add_argument('--class-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'class'), help='Classification dir')
+    p.add_argument('--groups-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'groups'), help='Output groups dir')
+    p.add_argument('--zones', nargs='+', type=str, default=[f"{i:02d}" for i in range(20)], help='Zone numbers or labels (e.g., 00 01 ... or NGC1 NGC2)')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--source', choices=['data','rand','both'], default='data')
     p.add_argument('--r-limit', type=float, default=0.9)
@@ -321,9 +320,9 @@ def main():
                            source=args.source, linklen_map=linklen_map,
                            r_limit=args.r_limit)
         if out is not None:
-            print(f'---- zone {z:02d} done: {out}')
+            print(f'---- zone {z} done: {out}')
         else:
-            print(f'---- zone {z:02d} no objects with WEBTYPE={args.webtype} for "{args.source}".')
+            print(f'---- zone {z} no objects with WEBTYPE={args.webtype} for "{args.source}".')
     print(f'Elapsed: {(t.time() - init)/60:.2f} min') #~5 min total without enhan
 
 if __name__ == '__main__':

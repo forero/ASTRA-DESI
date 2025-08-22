@@ -1,7 +1,7 @@
 import os, argparse, json, time, numpy as np
-from astropy.table import vstack, join
+from astropy.table import vstack, join, Table
 
-from desiproc.read_data import load_table, process_real, generate_randoms
+from desiproc.read_data import (load_table, process_real, generate_randoms, process_real_region, generate_randoms_region)
 from desiproc.implement_astra import (generate_pairs, save_pairs_fits,
                                       save_classification_fits,
                                       save_probability_fits,)
@@ -10,15 +10,33 @@ from plot.plot_groups import (read_groups, read_raw_min, mask_source,
 from desiproc.gen_groups import process_zone
 
 
-TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
-REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
-RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
-N_RANDOM_FILES = 18
-N_ZONES = 20
-NORTH_ROSETTES = {3, 6, 7, 11, 12, 13, 14, 15, 18, 19}
-REAL_COLUMNS = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
-RANDOM_COLUMNS = REAL_COLUMNS
+def _zone_tag(z):
+    """Return '00'..'19' if z is numeric; otherwise return the string label (e.g., 'NGC1')."""
+    try:
+        return f"{int(z):02d}"
+    except Exception:
+        return str(z)
 
+def _read_groups_compat(groups_dir, zone, webtype):
+    """
+    Read groups FITS using a zone tag that supports numeric or string labels (e.g., 'NGC1').
+    """
+    tag = _zone_tag(zone)
+    path = os.path.join(groups_dir, f'zone_{tag}_groups_fof_{webtype}.fits.gz')
+    return Table.read(path)
+
+def _read_raw_min_compat(raw_dir, class_dir, zone):
+    """
+    Read raw (and optionally class) data with a zone tag that supports numeric or string labels.
+    For plotting we only need TARGETID/TRACERTYPE/RANDITER/RA/DEC/Z from the raw file.
+    """
+    tag = _zone_tag(zone)
+    raw_path = os.path.join(raw_dir, f'zone_{tag}.fits.gz')
+    raw = Table.read(raw_path)
+    # Keep minimal columns required downstream
+    cols = ['TARGETID','TRACERTYPE','RANDITER','RA','DEC','Z']
+    present = [c for c in cols if c in raw.colnames]
+    return raw[present]
 
 def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_columns, random_columns, n_random_files):
     """
@@ -54,6 +72,40 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
         return real_tables, rand_tables
     except Exception as e:
         raise RuntimeError(f'Error preloading tables: {e}') from e
+
+
+def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tables, output_raw, n_random, zone_value):
+    """
+    Build a raw table for a DR1 sub-region (e.g., 'NGC1', 'NGC2') by combining real and random data
+    filtered by RA/DEC/Z cuts. Tracers that yield no rows after cuts are skipped (warning), so the
+    pipeline does not fail if a given tracer is empty in that box.
+    """
+    try:
+        parts = []
+        skipped = []
+        for tr in tracers:
+            try:
+                rt = process_real_region(real_tables, tr, region, cuts, zone_value=zone_value)
+            except ValueError as e:
+                print(f"[warn] {tr} empty after cuts in region {region}: {e}")
+                skipped.append(tr)
+                continue
+            parts.append(rt)
+            count = len(rt)
+            rpt = generate_randoms_region(random_tables, tr, region, cuts, n_random, count, zone_value=zone_value)
+            parts.append(rpt)
+
+        if not parts:
+            raise ValueError(f"No data in region {region} for cuts {cuts} (tracers tried: {tracers})")
+
+        tbl = vstack(parts)
+        out = os.path.join(output_raw, f"zone_{zone_label}.fits.gz")
+        tbl.write(out, format="fits", overwrite=True)
+        if skipped:
+            print(f"[info] In {zone_label} skipped tracers (empty): {', '.join(skipped)}")
+        return tbl
+    except Exception as e:
+        raise RuntimeError(f'Error building raw table for region {zone_label}: {e}') from e
 
 
 def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
@@ -101,7 +153,7 @@ def classify_zone(zone, tbl, output_class, n_random):
         RuntimeError: If classification or saving files fails.
     """
     try:
-        base = f'zone_{zone:02d}'
+        base = f'zone_{(f"{zone:02d}" if isinstance(zone, int) else str(zone))}'
         pr, cr, rdict = generate_pairs(tbl, n_random)
         save_pairs_fits(pr, os.path.join(output_class, f'{base}_pairs.fits.gz'))
         save_classification_fits(cr, os.path.join(output_class, f'{base}_class.fits.gz'))
@@ -116,15 +168,28 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
     Does not return anything; prints the PNG path if generated.
 
     Args:
-        z (int): Zone number.
+        z (int or str): Zone number or label.
         args (argparse.Namespace): Command-line arguments.
         plot_dir (str): Directory to save plots.
     """
-    groups = read_groups(args.groups_out, z, args.webtype)
+    tag = _zone_tag(z)
+    try:
+        groups = _read_groups_compat(args.groups_out, z, args.webtype)
+    except Exception as e:
+        print(f"[plot] skip zone {tag}: cannot read groups ({e}). "
+              f"Run gen_groups first for this zone.")
+        return
+
+    try:
+        raw = _read_raw_min_compat(args.raw_out, args.class_out, z)
+    except Exception as e:
+        print(f"[plot] skip zone {tag}: cannot read raw/class ({e}). "
+              f"Ensure zone_{tag}.fits.gz and zone_{tag}_class.fits.gz exist.")
+        return
+
     gm = mask_source(np.asarray(groups['RANDITER']), args.source)
     groups = groups[gm]
 
-    raw = read_raw_min(args.raw_out, args.class_out, z)
     rm = mask_source(np.asarray(raw['RANDITER']), args.source)
     raw = raw[rm]
 
@@ -133,7 +198,7 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
     available = tracer_prefixes(np.asarray(jtbl['TRACERTYPE']).astype(str))
     tracers = pick_tracers(available, args.plot_tracers)
 
-    out_png = os.path.join(plot_dir, f'groups_wedges_zone_{z:02d}_{args.webtype}.png')
+    out_png = os.path.join(plot_dir, f'groups_wedges_zone_{tag}_{args.webtype}.png')
     plot_wedges(jtbl, tracers, z, args.webtype, out_png, args.plot_smin, args.plot_max_z, connect_lines=args.connect_lines)
     print(f'----- [plot] Saved {out_png}')
 
@@ -152,7 +217,7 @@ def main():
         p.add_argument("--r-limit", type=float, default=0.9, help="r threshold to classify webtype")
         p.add_argument("--linking", type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}', help="JSON-type dict of linking lengths per tracer")
 
-        p.add_argument("--zone", type=int, default=0, help="Single zone to run (0...19)")
+        p.add_argument("--zone", type=int, default=None, help="Single zone to run (0...19)")
         p.add_argument("--plot", action="store_true", help="Generate wedge plots after grouping")
         p.add_argument("--plot-output", default=None, help="Directory to save plots (defaults to --groups-out)")
         p.add_argument("--plot-tracers", nargs='*', default=None, help="Subset of tracer prefixes to plot (e.g., BGS_ANY ELG)")
@@ -162,7 +227,41 @@ def main():
         p.add_argument("--only-plot", action="store_true",
                        help="Skip preproc and only plot")
 
+        p.add_argument("--release", choices=["EDR","DR1"], default="EDR", help="Data release: EDR (by rosette) or DR1 (by NGC/SGC)")
+        p.add_argument("--region", choices=["N","S"], default="N", help="Region for DR1 (N=NGC, S=SGC). Ignored for EDR.")
+        p.add_argument("--zones", nargs='+', type=str, default=None, help="For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.")
+        p.add_argument("--config", type=str, default=None, help="Optional JSON file with cuts per label for DR1 (keys like NGC1/NGC2).")
+
         args = p.parse_args()
+
+        if args.release.upper() == "EDR":
+            TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
+            REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
+            RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
+            N_RANDOM_FILES = 18
+            N_ZONES = 20
+            NORTH_ROSETTES = {3, 6, 7, 11, 12, 13, 14, 15, 18, 19}
+            REAL_COLUMNS = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
+            RANDOM_COLUMNS = REAL_COLUMNS
+        else:
+            # DR1 or DR2
+            TRACERS = ['BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
+            REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
+            RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
+            N_RANDOM_FILES = 18
+
+            REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
+            RANDOM_COLUMNS = REAL_COLUMNS
+
+            DEFAULT_CUTS = {
+                "NGC1": {"RA_min":110, "RA_max":300, "DEC_min":-80, "DEC_max":48,  "Z_min":0.1, "Z_max":0.9},
+                "NGC2": {"RA_min":180, "RA_max":260, "DEC_min":30,  "DEC_max":40, "Z_min":0.1, "Z_max":0.9},
+            }
+            # Load external config if prov
+            if args.config:
+                with open(args.config, 'r') as f:
+                    user_cuts = json.load(f)
+                DEFAULT_CUTS.update(user_cuts)
 
         if not args.only_plot and not args.base_dir:
             raise RuntimeError('--base-dir is required unless --only-plot is specified')
@@ -176,7 +275,10 @@ def main():
 
         i_t = time.time()
 
-        zones = [args.zone] if args.zone is not None else range(N_ZONES)
+        if args.release.upper() == "EDR":
+            zones = [args.zone] if args.zone is not None else range(N_ZONES)
+        else:
+            zones = args.zones if args.zones is not None else ["NGC1","NGC2"]
 
         if args.only_plot:
             for z in zones:
@@ -190,7 +292,13 @@ def main():
                                                         N_RANDOM_FILES)
 
         for z in zones:
-            tbl = build_raw_table(z, real_tables, random_tables, args.raw_out, args.n_random)
+            if args.release.upper() == "EDR":
+                tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out, args.n_random)
+            else:
+                zone_value = {"NGC1": 1001, "NGC2": 1002}.get(str(z), 9999)
+                cuts = DEFAULT_CUTS[str(z)]
+                tbl = build_raw_region(str(z), cuts, args.region, TRACERS, real_tables, random_tables, args.raw_out, args.n_random, zone_value)
+
             classify_zone(z, tbl, args.class_out, args.n_random)
 
             linklen_map = json.loads(args.linking)
@@ -198,15 +306,17 @@ def main():
                                       args.groups_out, args.webtype, args.source,
                                       linklen_map, args.r_limit)
             if out_groups is not None:
-                print(f'[groups] zone {z:02d} in -> {out_groups}')
+                tag = f"{z:02d}" if isinstance(z, int) else str(z)
+                print(f'[groups] zone {tag} in -> {out_groups}')
                 if args.plot:
                     plot_zone_wedges_for_args(z, args, plot_dir)
             else:
-                print(f'[groups] zone {z:02d}: no objects with WEBTYPE={args.webtype} for {args.source} source')
+                tag = f"{z:02d}" if isinstance(z, int) else str(z)
+                print(f'[groups] zone {tag}: no objects with WEBTYPE={args.webtype} for {args.source} source')
     except Exception as e:
         raise RuntimeError(f'Pipeline failed with: {e}') from e
 
-    print(f'[pipeline] zone {z:02d} elapsed t {time.time()-i_t:.2f} s')
+    print(f'[pipeline] zone {z} elapsed t {time.time()-i_t:.2f} s')
 
 
 if __name__=="__main__":

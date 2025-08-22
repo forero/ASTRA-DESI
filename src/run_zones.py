@@ -5,13 +5,17 @@ from multiprocessing import cpu_count
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 MAIN_SCRIPT = os.path.join(PROJECT_ROOT, 'src', 'main.py')
 
-CLUSTER_DIR = '/global/cfs/cdirs/desi/public/edr/vac/edr/lss/v2.0/LSScats/clustering'
+# Default release/version (override via environment)
+RELEASE = os.environ.get("RELEASE", "edr")
+VERSION = os.environ.get("VERSION", "v2.0")
+
+CLUSTER_DIR = f'/global/cfs/cdirs/desi/public/{RELEASE}/vac/{RELEASE}/lss/{VERSION}/LSScats/clustering'
 SCRATCH_BASE = '/pscratch/sd/v/vtorresg/cosmic-web'
 
-RAW_OUT = f'{SCRATCH_BASE}/edr/raw'
-CLASS_OUT = f'{SCRATCH_BASE}/edr/class'
-GROUPS_OUT = f'{SCRATCH_BASE}/edr/groups'
-FIGS_OUT = f'{SCRATCH_BASE}/edr/figs'
+RAW_OUT = f'{SCRATCH_BASE}/{RELEASE}/raw'
+CLASS_OUT = f'{SCRATCH_BASE}/{RELEASE}/class'
+GROUPS_OUT = f'{SCRATCH_BASE}/{RELEASE}/groups'
+FIGS_OUT = f'{SCRATCH_BASE}/{RELEASE}/figs'
 for d in (RAW_OUT, CLASS_OUT, GROUPS_OUT, FIGS_OUT):
     os.makedirs(d, exist_ok=True)
 
@@ -25,13 +29,16 @@ ENV.update({'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1',
             'MKL_NUM_THREADS': '1', 'NUMEXPR_NUM_THREADS': '1',})
 
 def run_zone(zone: int):
-    cmd = common_args + ['--zone', str(zone)]
+    cmd = common_args + (['--zone', str(zone)] if RELEASE.lower()=="edr" else ['--zones', str(zone)])
     proc = subprocess.run(cmd, check=True, env=ENV,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return zone, proc.stdout, proc.stderr
 
 if __name__ == '__main__':
-    zones = list(range(20))
+    if RELEASE.lower() == "edr":
+        zones = list(range(20))
+    else:
+        zones = ["NGC1","NGC2"]
     max_workers = min(4, cpu_count())
     print(f'Using {max_workers} workers')
     results = []

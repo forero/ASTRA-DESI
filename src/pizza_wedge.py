@@ -132,7 +132,7 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     for tr in tracers_final:
-        fig = plt.figure(figsize=(80, 80))
+        fig = plt.figure(figsize=(70, 70))
         ax = plt.subplot(111, projection='polar')
         if args.title:
             fig.suptitle(args.title, y=0.98, fontsize=34)

@@ -11,6 +11,12 @@ plt.style.use('dark_background')
 plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
                      'xtick.labelsize': 20,'ytick.labelsize': 20, 'legend.fontsize': 10,})
 
+def _zone_tag(zone):
+    try:
+        return f"{int(zone):02d}"
+    except Exception:
+        return str(zone)
+
 CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
 CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
 ORDERED_TRACERS = ["BGS", "LRG", "ELG", "QSO"]
@@ -28,12 +34,13 @@ def read_groups(groups_dir, zone, webtype):
     
     Args:
         groups_dir (str): Directory where the groups files are stored.
-        zone (int): Zone number.
+        zone (int): Zone number or label.
         webtype (str): Type of web structure (e.g., 'void', 'sheet', 'filament', 'knot').
     Returns:
         Table: Astropy Table containing the groups data.
     """
-    path = os.path.join(groups_dir, f'zone_{zone:02d}_groups_fof_{webtype}.fits.gz')
+    tag = _zone_tag(zone)
+    path = os.path.join(groups_dir, f'zone_{tag}_groups_fof_{webtype}.fits.gz')
     tbl = Table.read(path)
     return tbl[GROUPS_COLS]
 
@@ -274,7 +281,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     nrows, ncols = subplot_grid(len(tracers))
     fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 30*nrows), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
-    plt.suptitle(f'{webtype.capitalize()}s in zone {zone:02d}', fontsize=27, y=1.01)
+    plt.suptitle(f"{webtype.capitalize()}s in zone {_zone_tag(zone)}", fontsize=27, y=1.01)
 
     for i, tr in enumerate(tracers):
         tr = str(tr)
@@ -390,7 +397,8 @@ def main():
     else:
         tracers = [t for t in ORDERED_TRACERS if t in avail_set]
 
-    out_png = os.path.join(args.output, f'groups_wedges_zone_{args.zone:02d}_{args.webtype}_{args.coord}.png')
+    tag = _zone_tag(args.zone)
+    out_png = os.path.join(args.output, f'groups_wedges_zone_{tag}_{args.webtype}_{args.coord}.png')
     path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z, n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines, line_min_npts=args.line_min_npts)
 
 
