@@ -26,9 +26,9 @@ Visualization tools for:
   - `gen_groups.py` – Group finding (FoF/DBSCAN) and group properties
 - `src/plot/` – Visualization scripts:
   - `plot_extra.py` – Histograms, radial distributions, wedge plots (raw/probability)
-  - `plot_groups.py` – Wedge plots of FoF groups.
+  - `plot_groups.py` – Wedge plots of FoF groups
   - `plot_wedge.py` – Tracer-based wedge plots across multiple zones
-- `src/main.py` – Full pipeline driver (EDR or DR1).
+- `src/main.py` – Full pipeline driver (EDR or DR1)
 - `jobs/` – Example SLURM batch scripts for running the pipeline on NERSC
 
 
