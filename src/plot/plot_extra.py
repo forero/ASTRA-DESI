@@ -284,8 +284,8 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
     per_tracer_rand = {t: [] for t in tracers}
 
     for i, z in enumerate(zones):
-        if progress and (i % 2 == 0):
-            print(f"[cdf-disp] zone {z} ({i+1}/{len(zones)})")
+        # if progress and (i % 2 == 0):
+            # print(f"[cdf-disp] zone {z} ({i+1}/{len(zones)})")
         raw_path, cls_path = get_zone_paths(raw_dir, class_dir, z)
         raw_df = load_raw_df(raw_path)
         cls_df = load_class_df(cls_path)
@@ -339,7 +339,6 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, 'cdf/cdf_dispersion_zones.png')
-    print(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fig.savefig(path, dpi=360)
     plt.close(fig)
@@ -626,27 +625,27 @@ def main():
 
     raw_cache, class_cache, prob_cache = {}, {}, {}
 
-    # for zone in zones:
-    #     raw_path, cls_path = get_zone_paths(args.raw_dir, args.class_dir, zone)
-    #     prob_path = get_prob_path(args.raw_dir, args.class_dir, zone)
+    for zone in zones:
+        raw_path, cls_path = get_zone_paths(args.raw_dir, args.class_dir, zone)
+        prob_path = get_prob_path(args.raw_dir, args.class_dir, zone)
 
-    #     raw_df = raw_cache.setdefault(zone, load_raw_df(raw_path))
-    #     cls_df = class_cache.setdefault(zone, load_class_df(cls_path))
-    #     cls_df = cls_df[cls_df['ISDATA'] == True]
+        raw_df = raw_cache.setdefault(zone, load_raw_df(raw_path))
+        cls_df = class_cache.setdefault(zone, load_class_df(cls_path))
+        cls_df = cls_df[cls_df['ISDATA'] == True]
 
-    #     merged = raw_df.merge(cls_df[['TARGETID','NDATA','NRAND']], on='TARGETID', how='left')
-    #     r_df = compute_r(merged)
+        merged = raw_df.merge(cls_df[['TARGETID','NDATA','NRAND']], on='TARGETID', how='left')
+        r_df = compute_r(merged)
 
-        # if args.plot_z:
-        #     plot_z_histogram(merged, zone, args.bins, outdirs['z'])
-        # if args.plot_cdf:
-        #     plot_cdf(r_df, zone, args.tracers, outdirs['cdf'])
-        # if args.plot_radial:
-        #     plot_radial_distribution(raw_df, zone, args.tracers, outdirs['radial'], args.bins)
-        # if args.plot_wedges:
-        #     prob_df = prob_cache.setdefault(zone, load_prob_df(prob_path))
-        #     plot_wedges(raw_df, prob_df, zone, args.output)
-        #     plot_wedges_slice(raw_df, prob_df, zone, args.output)
+        if args.plot_z:
+            plot_z_histogram(merged, zone, args.bins, outdirs['z'])
+        if args.plot_cdf:
+            plot_cdf(r_df, zone, args.tracers, outdirs['cdf'])
+        if args.plot_radial:
+            plot_radial_distribution(raw_df, zone, args.tracers, outdirs['radial'], args.bins)
+        if args.plot_wedges:
+            prob_df = prob_cache.setdefault(zone, load_prob_df(prob_path))
+            plot_wedges(raw_df, prob_df, zone, args.output)
+            plot_wedges_slice(raw_df, prob_df, zone, args.output)
 
     if args.plot_cdf_dispersion:
         plot_cdf_dispersion(args.raw_dir, args.class_dir, zones, args.output, args.tracers,
