@@ -11,6 +11,7 @@ Full pipeline for:
   - Running ASTRA classification using Delaunay triangulation
   - Generating **pairs**, **classification**, and **probability** tables per zone
   - Group finding with **FoF** in each web environment
+
 Visualization tools for:
   - Redshift and radial histograms
   - Cumulative distribution functions (CDFs)
@@ -72,7 +73,6 @@ python -m src.main \
   --plot-output /path/to/plots
 ```
 
----
 
 ## Outputs
 
