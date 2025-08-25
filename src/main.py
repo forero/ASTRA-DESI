@@ -1,12 +1,9 @@
 import os, argparse, json, time, numpy as np
 from astropy.table import vstack, join, Table
 
-from desiproc.read_data import (load_table, process_real, generate_randoms, process_real_region, generate_randoms_region)
-from desiproc.implement_astra import (generate_pairs, save_pairs_fits,
-                                      save_classification_fits,
-                                      save_probability_fits,)
-from plot.plot_groups import (read_groups, read_raw_min, mask_source,
-                              tracer_prefixes, pick_tracers, plot_wedges)
+from desiproc.read_data import *
+from desiproc.implement_astra import *
+from plot.plot_groups import *
 from desiproc.gen_groups import process_zone
 
 
@@ -31,7 +28,10 @@ def _read_groups_compat(groups_dir, zone, webtype):
     """
     tag = _zone_tag(zone)
     path = os.path.join(groups_dir, f'zone_{tag}_groups_fof_{webtype}.fits.gz')
-    return Table.read(path)
+    try:
+        return Table.read(path, memmap=True)
+    except TypeError:
+        return Table.read(path)
 
 def _read_raw_min_compat(raw_dir, class_dir, zone):
     """
@@ -40,10 +40,14 @@ def _read_raw_min_compat(raw_dir, class_dir, zone):
     """
     tag = _zone_tag(zone)
     raw_path = os.path.join(raw_dir, f'zone_{tag}.fits.gz')
-    raw = Table.read(raw_path)
     cols = ['TARGETID','TRACERTYPE','RANDITER','RA','DEC','Z']
-    present = [c for c in cols if c in raw.colnames]
-    return raw[present]
+    try:
+        raw = Table.read(raw_path, hdu=1, include_names=cols, memmap=True)
+        return raw
+    except Exception:
+        raw = Table.read(raw_path, memmap=True)
+        present = [c for c in cols if c in raw.colnames]
+        return raw[present]
 
 def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_columns, random_columns, n_random_files):
     """
@@ -115,7 +119,7 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
         raise RuntimeError(f'Error building raw table for region {zone_label}: {e}') from e
 
 
-def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
+def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, tracers, north_rosettes):
     """
     Build a raw table for a specific zone by combining real and random data.
 
@@ -125,6 +129,8 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
         random_tables (dict): Preloaded random data tables.
         output_raw (str): Output directory for the raw table.
         n_random (int): Number of randoms per real object.
+        tracers (list): List of tracers to process.
+        north_rosettes (set): Set of north rosette indices.
     Returns:
         Astropy Table: Combined table with real and random data for the specified zone.
     Raises:
@@ -132,11 +138,11 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random):
     """
     try:
         parts = []
-        for tr in TRACERS:
-            rt = process_real(real_tables, tr, zone, NORTH_ROSETTES)
+        for tr in tracers:
+            rt = process_real(real_tables, tr, zone, north_rosettes)
             parts.append(rt)
             count = len(rt)
-            rpt = generate_randoms(random_tables, tr, zone, NORTH_ROSETTES, n_random, count)
+            rpt = generate_randoms(random_tables, tr, zone, north_rosettes, n_random, count)
             parts.append(rpt)
         tbl = vstack(parts)
         out = os.path.join(output_raw, f'zone_{zone:02d}.fits.gz')
@@ -211,31 +217,31 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
 def main():
     try:
         p = argparse.ArgumentParser()
-        p.add_argument("--base-dir", required=False, help="DESI base dir (required unless --only-plot)")
-        p.add_argument("--raw-out", required=True, help="Raw output folder")
-        p.add_argument("--class-out", required=True, help="Classification output folder")
-        p.add_argument("--groups-out", required=True, help="Groups output folder")
-        p.add_argument("--n-random", type=int, default=100, help="Number of randoms per real object")
+        p.add_argument('--base-dir', required=False, help='DESI base dir (required unless --only-plot)')
+        p.add_argument('--raw-out', required=True, help='Raw output folder')
+        p.add_argument('--class-out', required=True, help='Classification output folder')
+        p.add_argument('--groups-out', required=True, help='Groups output folder')
+        p.add_argument('--n-random', type=int, default=100, help='Number of randoms per real object')
 
-        p.add_argument("--webtype", choices=["void","sheet","filament","knot"], default="filament", help="Webtype to group")
-        p.add_argument("--source", choices=["data","rand","both"], default="data", help="Use data, randoms, or both for FoF")
-        p.add_argument("--r-limit", type=float, default=0.9, help="r threshold to classify webtype")
-        p.add_argument("--linking", type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}', help="JSON-type dict of linking lengths per tracer")
+        p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament', help='Webtype to group')
+        p.add_argument('--source', choices=['data','rand','both'], default='data', help='Use data, randoms, or both for FoF')
+        p.add_argument('--r-limit', type=float, default=0.9, help='r threshold to classify webtype')
+        p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}', help='JSON-type dict of linking lengths per tracer')
 
-        p.add_argument("--zone", type=int, default=None, help="Single zone to run (0...19)")
-        p.add_argument("--plot", action="store_true", help="Generate wedge plots after grouping")
-        p.add_argument("--plot-output", default=None, help="Directory to save plots (defaults to --groups-out)")
-        p.add_argument("--plot-tracers", nargs='*', default=None, help="Subset of tracer prefixes to plot (e.g., BGS_ANY ELG)")
-        p.add_argument("--plot-smin", type=int, default=1, help="Minimum marker size for scatter")
-        p.add_argument("--plot-max-z", type=float, default=None, help="Max redshift to include in plot")
+        p.add_argument('--zone', type=int, default=None, help='Single zone to run (0...19)')
+        p.add_argument('--plot', action='store_true', help='Generate wedge plots after grouping')
+        p.add_argument('--plot-output', default=None, help='Directory to save plots (defaults to --groups-out)')
+        p.add_argument('--plot-tracers', nargs='*', default=None, help='Subset of tracer prefixes to plot (e.g., BGS_ANY ELG)')
+        p.add_argument('--plot-smin', type=int, default=1, help='Minimum marker size for scatter')
+        p.add_argument('--plot-max-z', type=float, default=None, help='Max redshift to include in plot')
         p.add_argument('--connect-lines', action='store_true', help='Connect points in groups plot')
-        p.add_argument("--only-plot", action="store_true",
-                       help="Skip preproc and only plot")
+        p.add_argument('--only-plot', action='store_true',
+                       help='Skip preproc and only plot')
 
-        p.add_argument("--release", choices=["EDR","DR1"], default="EDR", help="Data release: EDR (by rosette) or DR1 (by NGC/SGC)")
-        p.add_argument("--region", choices=["N","S"], default="N", help="Region for DR1 (N=NGC, S=SGC). Ignored for EDR.")
-        p.add_argument("--zones", nargs='+', type=str, default=None, help="For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.")
-        p.add_argument("--config", type=str, default=None, help="Optional JSON file with cuts per label for DR1 (keys like NGC1/NGC2).")
+        p.add_argument('--release', choices=['EDR','DR1'], default='EDR', help='Data release: EDR (by rosette) or DR1 (by NGC/SGC)')
+        p.add_argument('--region', choices=['N','S'], default='N', help='Region for DR1 (N=NGC, S=SGC). Ignored for EDR.')
+        p.add_argument('--zones', nargs='+', type=str, default=None, help='For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.')
+        p.add_argument('--config', type=str, default=None, help='Optional JSON file with cuts per label for DR1 (keys like NGC1/NGC2).')
 
         args = p.parse_args()
 
@@ -293,9 +299,11 @@ def main():
                                                         REAL_COLUMNS, RANDOM_COLUMNS,
                                                         N_RANDOM_FILES)
 
+        linklen_map = json.loads(args.linking)
+
         for z in zones:
             if args.release.upper() == 'EDR':
-                tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out, args.n_random)
+                tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out, args.n_random, TRACERS, NORTH_ROSETTES)
             else:
                 zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(str(z), 9999)
                 cuts = DEFAULT_CUTS[str(z)]
@@ -304,7 +312,6 @@ def main():
 
             classify_zone(z, tbl, args.class_out, args.n_random)
 
-            linklen_map = json.loads(args.linking)
             out_groups = process_zone(z, args.raw_out, args.class_out,
                                       args.groups_out, args.webtype, args.source,
                                       linklen_map, args.r_limit)
@@ -319,7 +326,7 @@ def main():
     except Exception as e:
         raise RuntimeError(f'Pipeline failed with: {e}') from e
 
-    print(f'[pipeline] zone {z} elapsed t {time.time()-i_t:.2f} s')
+    print(f'[pipeline] elapsed t {time.time()-i_t:.2f} s')
 
 
 if __name__=="__main__":

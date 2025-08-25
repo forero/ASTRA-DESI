@@ -3,7 +3,6 @@ from astropy.cosmology import Planck18
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 import numpy as np, random
-from itertools import cycle
 
 import warnings
 from astropy.units import UnitsWarning
@@ -26,7 +25,7 @@ def load_table(path, columns):
         RuntimeError: If any other exception occurs during loading.
     """
     try:
-        tbl = Table.read(path)
+        tbl = Table.read(path, memmap=True)
     except Exception as e:
         raise IOError(f'Error reading {path}: {e}') from e
 
@@ -55,7 +54,8 @@ def _compute_cartesian(tbl):
         RuntimeError: If coordinate conversion fails.
     """
     try:
-        dist = Planck18.comoving_distance(np.asarray(tbl['Z'], float))
+        z = np.asarray(tbl['Z'], dtype=float)
+        dist = Planck18.comoving_distance(z)
         ra = np.asarray(tbl['RA'], dtype=float) * u.deg
         dec = np.asarray(tbl['DEC'], dtype=float) * u.deg
         sc = SkyCoord(ra=ra, dec=dec, distance=dist)
@@ -80,7 +80,7 @@ def _ensure_zone_column(tbl, zone_value):
     """
     try:
         if 'ZONE' not in tbl.colnames:
-            tbl.add_column(Column([int(zone_value)] * len(tbl), name='ZONE'))
+            tbl.add_column(Column(np.full(len(tbl), int(zone_value), dtype=int), name='ZONE'))
         return tbl
     except Exception as e:
         raise RuntimeError(f"Error ensuring 'ZONE' column: {e}") from e
@@ -99,13 +99,13 @@ def _filter_by_box(tbl, ra_min, ra_max, dec_min, dec_max, z_min=None, z_max=None
         Table: Filtered view of the input table.
     """
     try:
-        m = (
-            (np.asarray(tbl['RA'], float) > ra_min) & (np.asarray(tbl['RA'], float) < ra_max) &
-            (np.asarray(tbl['DEC'], float) > dec_min) & (np.asarray(tbl['DEC'], float) < dec_max)
-        )
+        ra = np.asarray(tbl['RA'], dtype=float)
+        dec = np.asarray(tbl['DEC'], dtype=float)
+        mask = (ra > ra_min) & (ra < ra_max) & (dec > dec_min) & (dec < dec_max)
         if (z_min is not None) and (z_max is not None) and ('Z' in tbl.colnames):
-            m &= (np.asarray(tbl['Z'], float) > z_min) & (np.asarray(tbl['Z'], float) < z_max)
-        return tbl[m]
+            z = np.asarray(tbl['Z'], dtype=float)
+            mask &= (z > z_min) & (z < z_max)
+        return tbl[mask]
     except Exception as e:
         raise RuntimeError(f"Error filtering by box: {e}") from e
 
@@ -195,6 +195,11 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
             zone_tables.append(sel)
         n_files = len(zone_tables)
 
+        zone_tables_xyz = []
+        for _sel in zone_tables:
+            _sel_xyz = _compute_cartesian(_sel.copy())
+            zone_tables_xyz.append(_sel_xyz)
+
         samples, used = [], set()
         for j in range(n_random):
             if len(used) == n_files:
@@ -202,9 +207,9 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
             choices = [i for i in range(n_files) if i not in used]
             idx = random.Random(j).choice(choices)
             used.add(idx)
-            sel = zone_tables[idx]
+            sel = zone_tables_xyz[idx]
             rows = np.random.default_rng(j).choice(len(sel), real_count, replace=False)
-            samp = _compute_cartesian(sel[rows])
+            samp = sel[rows]
             samp['TRACERTYPE'] = f'{tracer}_RAND'
             samp['RANDITER'] = j
             samples.append(samp)
@@ -297,6 +302,11 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
         if n_files == 0:
             raise ValueError(f'No random entries for {tracer} in region {region} after cuts {cuts}')
 
+        zone_tables_xyz = []
+        for _sel in zone_tables:
+            _sel_xyz = _compute_cartesian(_sel.copy())
+            zone_tables_xyz.append(_sel_xyz)
+
         samples, used = [], set()
         for j in range(n_random):
             if len(used) == n_files:
@@ -304,9 +314,9 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
             choices = [i for i in range(n_files) if i not in used]
             idx = random.Random(j).choice(choices)
             used.add(idx)
-            sel = zone_tables[idx]
+            sel = zone_tables_xyz[idx]
             rows = np.random.default_rng(j).choice(len(sel), real_count, replace=False)
-            samp = _compute_cartesian(sel[rows])
+            samp = sel[rows]
             samp['TRACERTYPE'] = f'{tracer}_RAND'
             samp['RANDITER'] = j
             samples.append(samp)

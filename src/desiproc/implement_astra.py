@@ -17,14 +17,20 @@ def extract_tracer_blocks(tbl):
     tracertypes = tbl['TRACERTYPE'].astype(str)
     randiters = np.asarray(tbl['RANDITER'], dtype=np.int32)
     targetids = np.asarray(tbl['TARGETID'], dtype=np.int64)
-    coords_all = np.vstack((tbl['XCART'], tbl['YCART'], tbl['ZCART'])).T.astype(np.float32)
-    prefixes = {s.rsplit('_', 1)[0] for s in tracertypes}
+    coords_all = np.column_stack((np.asarray(tbl['XCART'], dtype=np.float32),
+                                  np.asarray(tbl['YCART'], dtype=np.float32),
+                                  np.asarray(tbl['ZCART'], dtype=np.float32)))
+
+    base_tracer = np.asarray([t.rsplit('_', 1)[0] for t in tracertypes], dtype=object)
+    prefixes = np.unique(base_tracer)
     blocks = {}
     for tracer in prefixes:
-        mask = (np.array([t.rsplit('_', 1)[0] for t in tracertypes], dtype=object) == tracer)
+        mask = (base_tracer == tracer)
         idxs = np.nonzero(mask)[0]
-        blocks[tracer] = {'tids': targetids[idxs], 'rand': randiters[idxs],
-    					  'coords': coords_all[idxs], 'is_data': randiters[idxs] == -1}
+        blocks[tracer] = {'tids': targetids[idxs],
+                          'rand': randiters[idxs],
+                          'coords': coords_all[idxs],
+                          'is_data': randiters[idxs] == -1}
     return blocks
 
 
@@ -37,13 +43,16 @@ def compute_delaunay_pairs(pts):
     Returns:
     	np.ndarray: Array of unique pairs of indices representing edges in the triangulation.
     """
-    tri = Delaunay(pts)
-    simps = tri.simplices
-    del tri
-
+    try:
+        tri = Delaunay(pts)
+        simps = tri.simplices
+    finally:
+        try:
+            del tri
+        except NameError:
+            pass
     comb = np.array([(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)], dtype=np.int64)
-    edges = simps[:, comb]
-    edges = edges.reshape(-1,2)
+    edges = simps[:, comb].reshape(-1, 2)
     edges.sort(axis=1)
     pairs = np.unique(edges, axis=0)
     gc.collect()
@@ -73,10 +82,10 @@ def process_delaunay(pts, tids, is_data, iteration):
     mask1 = is_data[idx1]
     data_count = (np.bincount(idx0[mask1], minlength=n) + np.bincount(idx1[mask0], minlength=n))
 
-    tid0 = tids[idx0].astype(int)
-    tid1 = tids[idx1].astype(int)
-    iters = [iteration] * len(tid0)
-    pair_rows = list(zip(tid0.tolist(), tid1.tolist(), iters))
+    tid0 = tids[idx0].astype(np.int64, copy=False)
+    tid1 = tids[idx1].astype(np.int64, copy=False)
+    iters = np.full(tid0.shape[0], iteration, dtype=np.int32)
+    pair_rows = list(zip(tid0.tolist(), tid1.tolist(), iters.tolist()))
 
     class_rows = []
     r_updates = defaultdict(list)
@@ -198,18 +207,23 @@ def build_probability_table(r_by_tid):
              ('PSHEET','f4'), ('PFILAMENT','f4'),
              ('PKNOT','f4')]
 	data = np.zeros(n, dtype=dtype)
-	bins = np.array([-0.9, 0.0, 0.9], dtype=np.float32)
 
 	for i,(tid, rlist) in enumerate(r_by_tid.items()):
 		arr = np.asarray(rlist, dtype=np.float32)
 		if arr.size:
-		  	classes = np.digitize(arr, bins)
-		  	counts = np.bincount(classes, minlength=4)
-		  	total = arr.size
-		  	probs = counts / total
+			void_m = (arr <= -0.9)
+			sheet_m = (arr > -0.9) & (arr < 0.0)
+			fila_m = (arr >= 0.0) & (arr < 0.9)
+			knot_m = (arr >= 0.9)
+			counts = np.array([void_m.sum(), sheet_m.sum(), fila_m.sum(), knot_m.sum()], dtype=np.int64)
+			total = counts.sum()
+			if total > 0:
+				probs = counts / total
+			else:
+				probs = np.zeros(4, dtype=np.float32)
 		else:
 			probs = np.zeros(4, dtype=np.float32)
-			data[i] = (tid, *probs.tolist())
+		data[i] = (int(tid), float(probs[0]), float(probs[1]), float(probs[2]), float(probs[3]))
 	return Table(data)
 
 

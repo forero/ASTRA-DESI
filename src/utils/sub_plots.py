@@ -19,8 +19,8 @@ def run_plot_add(script_path, raw_dir, class_dir, output_dir, zones, max_workers
     os.makedirs(output_dir, exist_ok=True)
 
     def _call_zone(z):
-        cmd = ["python3", script_path, "--raw-dir", raw_dir, "--class-dir", class_dir,
-               "--zones", str(z), "--output", output_dir]
+        cmd = ['python3', script_path, '--raw-dir', raw_dir, '--class-dir', class_dir,
+               '--zones', str(z), '--output', output_dir]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         return z, result.returncode, result.stdout, result.stderr
 
@@ -31,23 +31,23 @@ def run_plot_add(script_path, raw_dir, class_dir, output_dir, zones, max_workers
             try:
                 z, code, out, err = future.result()
                 if out:
-                    print(f"[Zone {z:02d}] stdout:\n{out.strip()}")
+                    print(f'[Zone {z:02d}] stdout:\n{out.strip()}')
                 if code == 0:
-                    print(f"[Zone {z:02d}] completed successfully")
+                    print(f'[Zone {z:02d}] completed successfully')
                 else:
-                    print(f"[Zone {z:02d}] ERROR (code={code}):\n{err.strip()}")
+                    print(f'[Zone {z:02d}] ERROR (code={code}):\n{err.strip()}')
             except Exception as e:
-                print(f"[Zone {zone:02d}] raised exception: {e}")
+                print(f'[Zone {zone:02d}] raised exception: {e}')
 
-    print(f"Elapsed: {t.time()-init_t:.2f} s")
+    print(f'Elapsed: {t.time()-init_t:.2f} s')
 
 
-if __name__ == "__main__":
-    SCRIPT = "../src/plot_extra.py"
-    RAW_DIR = "/pscratch/sd/v/vtorresg/cosmic-web/edr/raw"
-    CLASS_DIR = "/pscratch/sd/v/vtorresg/cosmic-web/edr/class"
-    OUTPUT = "../plots"
+if __name__ == '__main__':
+    SCRIPT = '../src/plot_extra.py'
+    RAW_DIR = '/pscratch/sd/v/vtorresg/cosmic-web/edr/raw'
+    CLASS_DIR = '/pscratch/sd/v/vtorresg/cosmic-web/edr/class'
+    OUTPUT = '../plots'
     ZONES = list(range(20))
     max_workers = max(1, os.cpu_count()-1)
-    print(f"- Using {max_workers} workers")
+    print(f'- Using {max_workers} workers')
     run_plot_add(SCRIPT, RAW_DIR, CLASS_DIR, OUTPUT, ZONES, max_workers=max_workers)

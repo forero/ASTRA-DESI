@@ -7,7 +7,6 @@ from astropy.table import Table
 from plot_extra import *
 
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 plt.rcParams.update({'font.family': 'serif', 'font.size': 12, 'axes.labelsize': 12,
                      'xtick.labelsize': 10,'ytick.labelsize': 10, 'legend.fontsize': 10,})
@@ -73,7 +72,7 @@ def _init_ax(ax, title):
     ax.set_xticks([]); ax.set_yticks([])
 
 
-def _draw_grid(ax, ra_min, ra_max, ra_ctr, dec_ctr, Dc, half_w, zmax, n_ra, n_z):
+def _draw_grid(ax, ra_min, ra_max, ra_ctr, cos_dec, Dc, half_w, zmax, n_ra, n_z):
     """
     Draws a grid of horizontal and vertical lines on the wedge plot to represent redshift and RA ticks.
 
@@ -82,7 +81,7 @@ def _draw_grid(ax, ra_min, ra_max, ra_ctr, dec_ctr, Dc, half_w, zmax, n_ra, n_z)
         ra_min (float): Minimum RA value.
         ra_max (float): Maximum RA value.
         ra_ctr (float): Central RA value.
-        dec_ctr (float): Central DEC value.
+        cos_dec (float): Cosine of central DEC value.
         Dc (float): Comoving distance at the maximum redshift.
         half_w (float): Half width of the wedge at the maximum redshift.
         zmax (float): Maximum redshift for the plot.
@@ -94,42 +93,34 @@ def _draw_grid(ax, ra_min, ra_max, ra_ctr, dec_ctr, Dc, half_w, zmax, n_ra, n_z)
     ra_ticks = np.linspace(ra_min, ra_max, n_ra)
 
     for z0 in z_ticks:
-        w0 = half_w * (z0 / zmax)
+        w0 = half_w * (z0 / zmax) if zmax > 0 else 0.0
         ax.hlines(z0, -w0, w0, color='gray', lw=0.5, alpha=0.5)
 
     step = max(1, n_ra // 4)
     for rt in ra_ticks[::step]:
-        dx = Dc * np.deg2rad(rt - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
-        ax.plot(dx / zmax * zs, zs, color='gray', lw=0.5, alpha=0.5)
+        dx = Dc * np.deg2rad(rt - ra_ctr) * cos_dec
+        ax.plot((dx / zmax) * zs if zmax > 0 else np.zeros_like(zs), zs, color='gray', lw=0.5, alpha=0.5)
 
     return z_ticks, ra_ticks
 
 
-def _plot_classes(ax, real, tracer, ra_ctr, dec_ctr, Dc, half_w, zmax):
+def _plot_classes(ax, real, ra_ctr, cos_dec, Dc_all, zmax, half_w):
     """
-    Plots the different classes of objects in the wedge plot based on their RA and redshift values.
-
-    Args:
-        ax (matplotlib.axes.Axes): The axis on which to plot the classes.
-        real (DataFrame): The DataFrame containing the real data for the zone.
-        tracer (str): The tracer type being plotted.
-        ra_ctr (float): Central RA value.
-        dec_ctr (float): Central DEC value.
-        Dc (float): Comoving distance at the maximum redshift.
-        half_w (float): Half width of the wedge at the maximum redshift.
-        zmax (float): Maximum redshift for the plot.
+    Plot classes using precomputed comoving distances (Dc_all) and cached cos(dec).
     """
     for cls, color in CLASS_COLORS.items():
-        sel = real['CLASS'] == cls
+        sel = (real['CLASS'] == cls)
         if not sel.any():
             continue
-        sub = real.loc[sel]
-        Dc_vals = Planck18.comoving_distance(sub['Z']).value
-        x = Dc_vals * np.deg2rad(sub['RA'] - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
-        y = sub['Z'].values
-        mask = np.abs(x) <= half_w * (y / zmax)
-        ax.scatter(x[mask], y[mask], s=(10 if cls == 'void' else 6), c=color, zorder=CLASS_ZORDER[cls],
-                   edgecolor='black', lw=0.08)
+        ra_sel = real.loc[sel, 'RA'].to_numpy()
+        z_sel = real.loc[sel, 'Z'].to_numpy()
+        Dc_sel = Dc_all[sel.to_numpy()]
+        x = Dc_sel * np.deg2rad(ra_sel - ra_ctr) * cos_dec
+        y = z_sel
+        scale = (y / zmax) if zmax > 0 else np.zeros_like(y)
+        mask = np.abs(x) <= (half_w * scale)
+        ax.scatter(x[mask], y[mask], s=(10 if cls == 'void' else 6), c=color,
+                   zorder=CLASS_ZORDER[cls], edgecolor='black', lw=0.08)
 
 
 def _draw_borders(ax, half_w, zmax):
@@ -148,7 +139,7 @@ def _draw_borders(ax, half_w, zmax):
     ax.set_ylim(0, zmax)
 
 
-def _annotate_ra_top(ax, ra_ticks, ra_ctr, dec_ctr, Dc, zmax):
+def _annotate_ra_top(ax, ra_ticks, ra_ctr, cos_dec, Dc, zmax):
     """
     Annotates the top of the wedge plot with RA tick labels.
 
@@ -156,12 +147,12 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, dec_ctr, Dc, zmax):
         ax (matplotlib.axes.Axes): The axis on which to annotate the RA ticks.
         ra_ticks (array-like): The RA tick values.
         ra_ctr (float): Central RA value.
-        dec_ctr (float): Central DEC value.
+        cos_dec (float): Cosine of central DEC value.
         Dc (float): Comoving distance at the maximum redshift.
         zmax (float): Maximum redshift for the plot.
     """
     top4 = np.linspace(ra_ticks.min(), ra_ticks.max(), 4)
-    x_top = Dc * np.deg2rad(top4 - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
+    x_top = Dc * np.deg2rad(top4 - ra_ctr) * cos_dec
     for xt, rt in zip(x_top, top4):
         ax.text(xt, zmax + 0.01*zmax, f'{rt:.0f}', ha='center', va='bottom', fontsize=10)
     ax.text(0, zmax + 0.03*zmax, 'RA (deg)', ha='center', va='bottom', fontsize=11)
@@ -231,11 +222,13 @@ def plot_tracer_wedges_by_zones(raw_df, prob_df, zones, tracer, output_dir, n_ra
             continue
 
         ra_min, ra_max, ra_ctr, dec_ctr, Dc, half_w, zmax = _compute_zone_params(real, z_lim)
+        cos_dec = np.cos(np.deg2rad(dec_ctr))
+        Dc_all = Planck18.comoving_distance(real['Z']).value
 
-        z_ticks, ra_ticks = _draw_grid(ax, ra_min, ra_max, ra_ctr, dec_ctr, Dc, half_w, zmax, n_ra, n_z)
-        _plot_classes(ax, real, tracer, ra_ctr, dec_ctr, Dc, half_w, zmax)
+        z_ticks, ra_ticks = _draw_grid(ax, ra_min, ra_max, ra_ctr, cos_dec, Dc, half_w, zmax, n_ra, n_z)
+        _plot_classes(ax, real, ra_ctr, cos_dec, Dc_all, zmax, half_w)
         _draw_borders(ax, half_w, zmax)
-        _annotate_ra_top(ax, ra_ticks, ra_ctr, dec_ctr, Dc, zmax)
+        _annotate_ra_top(ax, ra_ticks, ra_ctr, cos_dec, Dc, zmax)
         _annotate_z_side(ax, z_ticks, half_w, zmax, idx)
 
     handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=6, label=k)

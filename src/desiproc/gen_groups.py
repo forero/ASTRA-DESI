@@ -34,7 +34,7 @@ def _get_zone_paths(raw_dir, class_dir, zone):
     if isinstance(zone, int):
         ztag = f'{zone:02d}'
     else:
-        # zone may come as str from argparse for edr zones (rosettes)
+        # zone might be str from argparse for edr zones (rosettes)
         ztag = str(zone)
     return (os.path.join(raw_dir, f'zone_{ztag}.fits.gz'),
             os.path.join(class_dir, f'zone_{ztag}_class.fits.gz'),)
@@ -68,13 +68,22 @@ def classify_by_r(klass, r_limit):
     """
     ndata = np.asarray(klass['NDATA'], float)
     nrand = np.asarray(klass['NRAND'], float)
-    r = (ndata - nrand) / (ndata + nrand)
+    denom = ndata + nrand
+    r = np.divide(ndata - nrand, denom, out=np.zeros_like(denom, dtype=float),
+                  where=(denom > 0)) #just in case denom is zero
 
     web = np.empty(r.size, dtype='U8')
-    web[(r >= -1.0) & (r <= -r_limit)] = 'void'
-    web[(r > -r_limit) & (r <= 0.0)] = 'sheet'
-    web[(r > 0.0) & (r <= r_limit)] = 'filament'
-    web[(r > r_limit) & (r <= 1.0)] = 'knot'
+    web[:] = ''
+    void_m = (r <= -r_limit)
+    sheet_m = (r > -r_limit) & (r < 0.0)
+    fil_m  = (r >= 0.0) & (r < r_limit)
+    knot_m = (r >= r_limit)
+
+    web[void_m] = 'void'
+    web[sheet_m] = 'sheet'
+    web[fil_m]  = 'filament'
+    web[knot_m] = 'knot'
+
     klass['WEBTYPE'] = web
     return klass
 
@@ -82,22 +91,19 @@ def classify_by_r(klass, r_limit):
 def _split_blocks(raw_sub):
     """
     Splits the raw data into blocks based on the tracer type and random iteration.
-    
-    Args:
-        raw_sub (Table): Subset of the raw table containing tracer data.
+
     Yields:
-        Tuple[str, int, np.ndarray]: Yields tracer type, random iteration, and
-        a boolean mask for the subset.
+        Tuple[str, int, np.ndarray]: tracer type, random iteration, and index array for the subset.
     """
-    tr = np.asarray(raw_sub['TRACERTYPE']).astype(str)
+    tr = np.asarray(raw_sub['TRACERTYPE'], dtype=str)
     ri = np.asarray(raw_sub['RANDITER'])
     keys = np.char.add(np.char.add(tr, '|'), ri.astype(str))
-    uniq = np.unique(keys)
-    for key in uniq:
-        m = (keys == key)
-        ttype  = str(np.unique(tr[m])[0])
-        randit = int(np.unique(ri[m])[0])
-        yield ttype, randit, m
+    uniq, inv = np.unique(keys, return_inverse=True)
+    for k_idx, key in enumerate(uniq):
+        idxs = np.nonzero(inv == k_idx)[0]
+        ttype = tr[idxs[0]]
+        randit = int(ri[idxs[0]])
+        yield ttype, randit, idxs
 
 
 def _dbscan_labels(coords, eps):
@@ -127,9 +133,9 @@ def _grouped_sum(values, labels, ngrp):
         np.ndarray: Array of sums for each group.
     """
     order = np.argsort(labels, kind='mergesort')
-    vals  = values[order]
+    vals = values[order]
     lab_o = labels[order]
-    cuts  = np.r_[0, np.cumsum(np.bincount(lab_o, minlength=ngrp))]
+    cuts = np.r_[0, np.cumsum(np.bincount(lab_o, minlength=ngrp))]
     return np.add.reduceat(vals, cuts[:-1])
 
 
@@ -262,18 +268,22 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
     raw_tbl, cls_tbl = _read_zone_tables(raw_path, class_path)
     cls_tbl = classify_by_r(cls_tbl, r_limit)
 
-    ids_web = set(np.asarray(cls_tbl['TARGETID'][cls_tbl['WEBTYPE'] == webtype], dtype=np.int64))
-    raw_sub = raw_tbl[np.isin(raw_tbl['TARGETID'], list(ids_web))]
+    ids_web = np.asarray(cls_tbl['TARGETID'][cls_tbl['WEBTYPE'] == webtype], dtype=np.int64)
+    if ids_web.size == 0:
+        return None
+    mask_web = np.isin(raw_tbl['TARGETID'], ids_web, assume_unique=False)
+    raw_sub = raw_tbl[mask_web]
+    if len(raw_sub) == 0:
+        return None
+
+    tid_all = np.asarray(raw_sub['TARGETID'], dtype=np.int64)
+    x = np.asarray(raw_sub['XCART'], dtype=float)
+    y = np.asarray(raw_sub['YCART'], dtype=float)
+    z = np.asarray(raw_sub['ZCART'], dtype=float)
 
     blocks = []
-    tr_all = np.asarray(raw_sub['TRACERTYPE']).astype(str)
-    ri_all = np.asarray(raw_sub['RANDITER'])
-    tid_all = np.asarray(raw_sub['TARGETID'])
-    x = np.asarray(raw_sub['XCART'], float)
-    y = np.asarray(raw_sub['YCART'], float)
-    z = np.asarray(raw_sub['ZCART'], float)
 
-    for ttype, randit, mask in _split_blocks(raw_sub):
+    for ttype, randit, idxs in _split_blocks(raw_sub):
         is_data = (randit == -1)
         if (source == 'data' and not is_data) or (source == 'rand' and is_data):
             continue
@@ -281,13 +291,16 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
         tracer = ttype.split('_', 1)[0]
         eps = float(linklen_map.get(tracer, linklen_map.get('default', 30.0)))
 
-        coords = np.column_stack((x[mask], y[mask], z[mask]))
-        labels = _dbscan_labels(coords, eps)# fof same as dbscan with min_samples=1
+        coords = np.column_stack((x[idxs], y[idxs], z[idxs]))
+        labels = _dbscan_labels(coords, eps)  # FoF is the same as DBSCAN with min_samples=1
         labs, counts, xcm, ycm, zcm, A, B, C = _group_inertia(coords, labels)
 
-        block_tbl = _build_block_tables(ttype, randit, webtype, tids=tid_all[mask],
-                                       labels=labels,labs=labs, counts=counts,
-                                       xcm=xcm, ycm=ycm, zcm=zcm, A=A, B=B, C=C)
+        block_tbl = _build_block_tables(
+            ttype, randit, webtype,
+            tids=tid_all[idxs],
+            labels=labels, labs=labs, counts=counts,
+            xcm=xcm, ycm=ycm, zcm=zcm, A=A, B=B, C=C
+        )
         blocks.append(block_tbl)
 
     if blocks:

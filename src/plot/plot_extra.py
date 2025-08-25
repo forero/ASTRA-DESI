@@ -1,5 +1,5 @@
 import os, argparse
-import numpy as np, seaborn as sns
+import numpy as np
 import matplotlib.pyplot as plt
 
 from astropy.table import Table
@@ -87,7 +87,7 @@ def load_raw_df(path):
     Returns:
         pd.DataFrame: DataFrame containing the raw data.
     """
-    tbl = Table.read(path)
+    tbl = Table.read(path, memmap=True)
     df = tbl.to_pandas()
     df['TRACERTYPE'] = df['TRACERTYPE'].apply(
                 lambda x: x.decode('utf-8') if isinstance(x, (bytes, bytearray)) else x)
@@ -119,7 +119,7 @@ def load_prob_df(path):
     Returns:
         pd.DataFrame: DataFrame containing the probability data with assigned classes.
     """
-    tbl = Table.read(path)
+    tbl = Table.read(path, memmap=True)
     df = tbl.to_pandas()
     prob_cols = [c for c in ['PVOID','PSHEET','PFILAMENT','PKNOT'] if c in df]
     df['CLASS'] = df[prob_cols].idxmax(axis=1).str[1:].str.lower()
@@ -136,8 +136,11 @@ def compute_r(df):
         pd.DataFrame: DataFrame with an additional 'r' column.
     """
     df = df.copy()
-    denom = (df['NDATA'] + df['NRAND']).replace(0, np.nan)
-    df['r'] = (df['NDATA'] - df['NRAND']) / denom
+    denom = (df['NDATA'] + df['NRAND']).to_numpy()
+    num = (df['NDATA'] - df['NRAND']).to_numpy()
+    r = np.full_like(num, np.nan, dtype=float)
+    np.divide(num, denom, out=r, where=(np.isfinite(denom) & (denom > 0)))
+    df['r'] = r
     return df
 
 
@@ -173,22 +176,31 @@ def plot_radial_distribution(raw_df, zone, tracers, out_dir, bins):
         zone (int): Zone number for title and filename.
         tracers (list): List of tracer types to plot.
         out_dir (str): Output directory to save the plots.
+        bins (int): Number of bins for the histograms.
     """
     fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers),4))
+    if len(tracers) == 1:
+        axes = [axes]
 
     for ax, tracer in zip(axes, tracers):
-        if tracer=='BGS_ANY':
-            tracer = 'BGS'
-        sub = raw_df[raw_df['TRACERTYPE'].str.startswith(tracer)]
-        real = sub[sub['RANDITER']==-1]
-        rand = sub[sub['RANDITER']!=-1].sample(len(real), random_state=0)
+        tr_prefix = 'BGS' if tracer == 'BGS_ANY' else tracer
+        sub = raw_df[raw_df['TRACERTYPE'].str.startswith(tr_prefix)]
+        real = sub[sub['RANDITER'] == -1]
+        rand_pool = sub[sub['RANDITER'] != -1]
+        if len(rand_pool) == 0 or len(real) == 0:
+            ax.set(title=tr_prefix, xlabel=r'$r$', ylabel='Count')
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            ax.grid(linewidth=0.7)
+            continue
+        nsamp = min(len(rand_pool), len(real))
+        rand = rand_pool.sample(nsamp, random_state=0, replace=False)
 
-        r_real = np.linalg.norm(real[['XCART','YCART','ZCART']], axis=1)
-        r_rand = np.linalg.norm(rand[['XCART','YCART','ZCART']], axis=1)
+        r_real = np.linalg.norm(real[['XCART','YCART','ZCART']].to_numpy(), axis=1)
+        r_rand = np.linalg.norm(rand[['XCART','YCART','ZCART']].to_numpy(), axis=1)
 
         ax.grid(linewidth=0.7)
         ax.hist([r_real, r_rand], bins, label=['Real','Random'], alpha=0.7)
-        ax.set(title=tracer, xlabel=r'$r$', ylabel='Count')
+        ax.set(title=tr_prefix, xlabel=r'$r$', ylabel='Count')
         ax.legend(fontsize=6)
 
     fig.suptitle(f'Radial Zone {zone}')
@@ -200,10 +212,10 @@ def plot_radial_distribution(raw_df, zone, tracers, out_dir, bins):
 
 def plot_cdf(df_r, zone, tracers, out_dir):
     """
-    Plot CDF of r values for specified tracers.
-
+    Plot CDF of r values for specified tracers using NumPy ECDF.
+    
     Args:
-        df_r (pd.DataFrame): DataFrame containing 'r', 'TRACERTYPE', and 'ISDATA' columns.
+        df_r (pd.DataFrame): DataFrame containing 'r' values and 'TRACERTYPE' columns.
         zone (int): Zone number for title and filename.
         tracers (list): List of tracer types to plot.
         out_dir (str): Output directory to save the plot.
@@ -212,12 +224,23 @@ def plot_cdf(df_r, zone, tracers, out_dir):
     fig, ax = plt.subplots()
     ax.grid(linewidth=0.7)
 
+    def ecdf(arr):
+        a = np.asarray(arr, dtype=float)
+        a = a[~np.isnan(a)]
+        if a.size == 0:
+            return None, None
+        a = np.sort(a)
+        y = np.arange(1, a.size + 1) / a.size
+        return a, y
+
     for tr in tracers:
         sub = df_r[df_r['TRACERTYPE'].str.startswith(tr)]
-        sns.ecdfplot(sub[sub['ISDATA']]['r'], ax=ax, label=f'{tr} real',
-                     color=cmap[tr], linewidth=1)
-        sns.ecdfplot(sub[~sub['ISDATA']]['r'], ax=ax, label=f'{tr} rand',
-                     color=cmap[tr], linestyle='--', linewidth=1)
+        xr, yr = ecdf(sub[sub['ISDATA']]['r'])
+        if xr is not None:
+            ax.plot(xr, yr, label=f'{tr} real', linewidth=1, color=cmap.get(tr, 'black'))
+        xr, yr = ecdf(sub[~sub['ISDATA']]['r'])
+        if xr is not None:
+            ax.plot(xr, yr, label=f'{tr} rand', linewidth=1, linestyle='--', color=cmap.get(tr, 'black'))
 
     ax.set(xlabel='r', ylabel='CDF', title=f'CDF Zone {zone}')
     ax.legend(fontsize=6)
@@ -226,7 +249,102 @@ def plot_cdf(df_r, zone, tracers, out_dir):
     plt.close(fig)
 
 
-#-------------------- plot wedges -------------------#
+def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=400, subsample_per_zone=None, progress=False):
+    """
+    Plot the dispersion (percentile band) of CDFs over multiple zones in one figure.
+    
+    Args:
+        raw_dir (str): Directory with raw zone files.
+        class_dir (str): Directory with class zone files.
+        zones (list[int]): Zone numbers to include (e.g., range(20)).
+        out_dir (str): Base output directory (the figure is written under `<out_dir>/cdf`).
+        tracers (list[str] or None): Tracers to include. Default: ['BGS_ANY','ELG','LRG','QSO'].
+        xbins (int): Number of points in the common x-grid for interpolation.
+        subsample_per_zone (int or None): Max samples per (zone,tracer,real/rand) for ECDF calculation.
+        progress (bool): Print progress logs.
+    """
+    if tracers is None:
+        tracers = ['BGS_ANY','ELG','LRG','QSO']
+
+    def _ecdf_interp(arr, xgrid):
+        a = np.asarray(arr, dtype=float)
+        a = a[~np.isnan(a)]
+        if a.size == 0:
+            return np.full_like(xgrid, np.nan, dtype=float)
+        a.sort()
+        y = np.arange(1, a.size + 1) / a.size
+        return np.interp(xgrid, a, y, left=0.0, right=1.0)
+
+    xgrid = np.linspace(-1.0, 1.0, xbins)
+
+    if subsample_per_zone is not None and subsample_per_zone <= 0:
+        subsample_per_zone = None
+
+    per_tracer_real = {t: [] for t in tracers}
+    per_tracer_rand = {t: [] for t in tracers}
+
+    for i, z in enumerate(zones):
+        if progress and (i % 2 == 0):
+            print(f"[cdf-disp] zone {z} ({i+1}/{len(zones)})")
+        raw_path, cls_path = get_zone_paths(raw_dir, class_dir, z)
+        raw_df = load_raw_df(raw_path)
+        cls_df = load_class_df(cls_path)
+        merged = raw_df.merge(cls_df[['TARGETID','NDATA','NRAND']], on='TARGETID', how='left')
+        r_df = compute_r(merged)
+
+        for tr in tracers:
+            tr_prefix = 'BGS' if tr == 'BGS_ANY' else tr
+            sub = r_df[r_df['TRACERTYPE'].str.startswith(tr_prefix)]
+            real_r = sub[sub['ISDATA']]['r'].to_numpy()
+            rand_r = sub[~sub['ISDATA']]['r'].to_numpy()
+
+            if subsample_per_zone is not None:
+                if real_r.size > subsample_per_zone:
+                    idx = np.random.default_rng(0).choice(real_r.size, subsample_per_zone, replace=False)
+                    real_r = real_r[idx]
+                if rand_r.size > subsample_per_zone:
+                    idx = np.random.default_rng(0).choice(rand_r.size, subsample_per_zone, replace=False)
+                    rand_r = rand_r[idx]
+            y_real = _ecdf_interp(real_r, xgrid)
+            y_rand = _ecdf_interp(rand_r, xgrid)
+            if np.isfinite(y_real).any():
+                per_tracer_real[tr].append(y_real)
+            if np.isfinite(y_rand).any():
+                per_tracer_rand[tr].append(y_rand)
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    ax.grid(linewidth=0.7)
+
+    for tr in tracers:
+        color = CLASS_COLORS.get('sheet', 'C0')
+        tracer_color_map = {'BGS_ANY':'blue','ELG':'red','LRG':'green','QSO':'purple'}
+        color = tracer_color_map.get(tr, 'black')
+
+        if len(per_tracer_real[tr]) > 0:
+            Y = np.vstack(per_tracer_real[tr])
+            p16, p50, p84 = np.nanpercentile(Y, [16,50,84], axis=0)
+            ax.fill_between(xgrid, p16, p84, alpha=0.15, label=f'{tr} real ±1σ', color=color)
+            ax.plot(xgrid, p50, linewidth=1.5, color=color, label=f'{tr} real median')
+
+        if len(per_tracer_rand[tr]) > 0:
+            Y = np.vstack(per_tracer_rand[tr])
+            p16, p50, p84 = np.nanpercentile(Y, [16,50,84], axis=0)
+            ax.fill_between(xgrid, p16, p84, alpha=0.10, label=f'{tr} rand ±1σ', color=color)
+            ax.plot(xgrid, p50, linewidth=1.2, linestyle='--', color=color, label=f'{tr} rand median')
+
+    ax.set_ylabel('CDF')
+    ax.set_xlabel(r"$r = \frac{N_{\mathrm{data}} - N_{\mathrm{rand}}}{N_{\mathrm{data}} + N_{\mathrm{rand}}}$")
+    ax.set_title('Dispersion of CDF across zones', fontsize=16)
+    ax.legend(fontsize=9, ncol=2)
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, 'cdf/cdf_dispersion_zones.png')
+    print(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fig.savefig(path, dpi=360)
+    plt.close(fig)
+
+
 def _prepare_real(raw_df, prob_df):
     """
     Merge raw and prob DataFrames, filter to real data only.
@@ -289,15 +407,16 @@ def _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z):
     """
     zs = np.linspace(z_lo, z_hi, 300)
     z_ticks = np.linspace(z_lo, z_hi, n_z)
-    ra_ticks = np.linspace(ra_ctr - half_w/(Planck18.comoving_distance(z_hi).value*np.cos(np.deg2rad(dec_ctr))) * (180/np.pi),
-                          ra_ctr + half_w/(Planck18.comoving_distance(z_hi).value*np.cos(np.deg2rad(dec_ctr))) * (180/np.pi),
-                          n_ra)
+    Dc_hi = Planck18.comoving_distance(z_hi).value
+    cos_dec = np.cos(np.deg2rad(dec_ctr))
+    half_w_ang = half_w / (Dc_hi * cos_dec) * (180/np.pi)
+    ra_ticks = np.linspace(ra_ctr - half_w_ang, ra_ctr + half_w_ang, n_ra)
 
     for z0 in z_ticks:
-        w0 = half_w * ((z0 - z_lo)/(z_hi - z_lo))
+        w0 = half_w * ((z0 - z_lo) / (z_hi - z_lo))
         ax.hlines(z0, -w0, w0, color='gray', lw=0.5, alpha=0.5)
     for rt in ra_ticks[::4]:
-        Dx = Planck18.comoving_distance(zs).value * np.deg2rad(rt - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
+        Dx = Planck18.comoving_distance(zs).value * np.deg2rad(rt - ra_ctr) * cos_dec
         ax.plot(Dx, zs, color='gray', lw=0.5, alpha=0.5)
 
     ax.set_xlim(-half_w, half_w)
@@ -395,9 +514,12 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
         _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
         _draw_border(ax, half_w, z_lo, z_hi)
 
+        Dc_hi = Planck18.comoving_distance(z_hi).value
+        cos_dec = np.cos(np.deg2rad(dec_ctr))
+        denom = Dc_hi * cos_dec
         sec = ax.secondary_xaxis('top',
-            functions=(lambda x: ra_ctr + np.rad2deg(x / (Planck18.comoving_distance(z_hi).value * np.cos(np.deg2rad(dec_ctr)))),
-                       lambda r: Planck18.comoving_distance(z_hi).value * np.deg2rad(r - ra_ctr) * np.cos(np.deg2rad(dec_ctr))))
+            functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
+                       lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
         sec.set_xticks(ra_ticks[::4])
         sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
         sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
@@ -451,9 +573,12 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
         _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
         _draw_border(ax, half_w, z_lo, z_hi)
 
+        Dc_hi = Planck18.comoving_distance(z_hi).value
+        cos_dec = np.cos(np.deg2rad(dec_ctr))
+        denom = Dc_hi * cos_dec
         sec = ax.secondary_xaxis('top',
-            functions=(lambda x: ra_ctr + np.rad2deg(x / (Planck18.comoving_distance(z_hi).value * np.cos(np.deg2rad(dec_ctr)))),
-                       lambda r: Planck18.comoving_distance(z_hi).value * np.deg2rad(r - ra_ctr) * np.cos(np.deg2rad(dec_ctr))))
+            functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
+                       lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
         sec.set_xticks(ra_ticks[::4])
         sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
         sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
@@ -476,17 +601,21 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--raw-dir', required=True)
-    p.add_argument('--class-dir', required=True)
+    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw')
+    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class')
     p.add_argument('--zones', nargs='+', type=int, default=None)
-    p.add_argument('--output', required=True)
+    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs')
     p.add_argument('--bins', type=int, default=10)
     p.add_argument('--tracers', nargs='+',
                    default=['BGS_ANY','ELG','LRG','QSO'])
     p.add_argument('--plot-z', action='store_true', default=True)
     p.add_argument('--plot-radial', action='store_true', default=True)
     p.add_argument('--plot-cdf', action='store_true', default=True)
+    p.add_argument('--plot-cdf-dispersion', action='store_true', default=True)
     p.add_argument('--plot-wedges', action='store_true', default=True)
+    p.add_argument('--xbins', type=int, default=200, help='Number of x grid points for CDF interpolation (default: 200)')
+    p.add_argument('--subsample-per-zone', type=int, default=50000, help='Max samples per (zone,tracer,real/rand) for dispersion plot')
+    p.add_argument('--progress', action='store_true', default=False, help='Print simple progress logs')
     return p.parse_args()
 
 
@@ -497,27 +626,32 @@ def main():
 
     raw_cache, class_cache, prob_cache = {}, {}, {}
 
-    for zone in zones:
-        raw_path, cls_path = get_zone_paths(args.raw_dir, args.class_dir, zone)
-        prob_path = get_prob_path(args.raw_dir, args.class_dir, zone)
+    # for zone in zones:
+    #     raw_path, cls_path = get_zone_paths(args.raw_dir, args.class_dir, zone)
+    #     prob_path = get_prob_path(args.raw_dir, args.class_dir, zone)
 
-        raw_df = raw_cache.setdefault(zone, load_raw_df(raw_path))
-        cls_df = class_cache.setdefault(zone, load_class_df(cls_path))
-        cls_df = cls_df[cls_df['ISDATA'] == True]
+    #     raw_df = raw_cache.setdefault(zone, load_raw_df(raw_path))
+    #     cls_df = class_cache.setdefault(zone, load_class_df(cls_path))
+    #     cls_df = cls_df[cls_df['ISDATA'] == True]
 
-        merged = raw_df.merge(cls_df[['TARGETID','NDATA','NRAND']], on='TARGETID', how='left')
-        r_df = compute_r(merged)
+    #     merged = raw_df.merge(cls_df[['TARGETID','NDATA','NRAND']], on='TARGETID', how='left')
+    #     r_df = compute_r(merged)
 
-        if args.plot_z:
-            plot_z_histogram(merged, zone, args.bins, outdirs['z'])
-        if args.plot_cdf:
-            plot_cdf(r_df, zone, args.tracers, outdirs['cdf'])
-        if args.plot_radial:
-            plot_radial_distribution(raw_df, zone, args.tracers, outdirs['radial'], args.bins)
-        if args.plot_wedges:
-            prob_df = prob_cache.setdefault(zone, load_prob_df(prob_path))
-            plot_wedges(raw_df, prob_df, zone, args.output)
-            plot_wedges_slice(raw_df, prob_df, zone, args.output)
+        # if args.plot_z:
+        #     plot_z_histogram(merged, zone, args.bins, outdirs['z'])
+        # if args.plot_cdf:
+        #     plot_cdf(r_df, zone, args.tracers, outdirs['cdf'])
+        # if args.plot_radial:
+        #     plot_radial_distribution(raw_df, zone, args.tracers, outdirs['radial'], args.bins)
+        # if args.plot_wedges:
+        #     prob_df = prob_cache.setdefault(zone, load_prob_df(prob_path))
+        #     plot_wedges(raw_df, prob_df, zone, args.output)
+        #     plot_wedges_slice(raw_df, prob_df, zone, args.output)
+
+    if args.plot_cdf_dispersion:
+        plot_cdf_dispersion(args.raw_dir, args.class_dir, zones, args.output, args.tracers,
+                            xbins=args.xbins, subsample_per_zone=args.subsample_per_zone,
+                            progress=args.progress)
 
 
 if __name__ == '__main__':

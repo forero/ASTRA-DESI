@@ -5,8 +5,8 @@ from astropy.table import Table, join
 from astropy.cosmology import Planck18
 from matplotlib.lines import Line2D
 
-from plot.plot_extra import get_zone_paths
-plt.style.use('dark_background')
+from plot_extra import get_zone_paths
+# plt.style.use('dark_background')
 
 plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
                      'xtick.labelsize': 20,'ytick.labelsize': 20, 'legend.fontsize': 10,})
@@ -20,7 +20,6 @@ RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS']
 main_color, sec_color = 'black', 'gray'
 # main_color, sec_color = 'white', 'gainsboro' #for dark background
-
 
 
 def _zone_tag(zone):
@@ -50,8 +49,18 @@ def read_groups(groups_dir, zone, webtype):
     """
     tag = _zone_tag(zone)
     path = os.path.join(groups_dir, f'zone_{tag}_groups_fof_{webtype}.fits.gz')
-    tbl = Table.read(path)
-    return tbl[GROUPS_COLS]
+    try:
+        tbl = Table.read(path, memmap=True)
+        missing = [c for c in GROUPS_COLS if c not in tbl.colnames]
+        if missing:
+            raise KeyError(f'Missing columns {missing} in {path}')
+        return tbl[GROUPS_COLS]
+    except TypeError:
+        tbl = Table.read(path)
+        missing = [c for c in GROUPS_COLS if c not in tbl.colnames]
+        if missing:
+            raise KeyError(f'Missing columns {missing} in {path}')
+        return tbl[GROUPS_COLS]
 
 
 def read_raw_min(raw_dir, class_dir, zone):
@@ -67,9 +76,9 @@ def read_raw_min(raw_dir, class_dir, zone):
     """
     raw_path, _ = get_zone_paths(raw_dir, class_dir, zone)
     try:
-        return Table.read(raw_path, hdu=1, include_names=RAW_COLS)
+        return Table.read(raw_path, hdu=1, include_names=RAW_COLS, memmap=True)
     except TypeError:
-        tbl = Table.read(raw_path, hdu=1)
+        tbl = Table.read(raw_path, hdu=1, memmap=True)
         missing = [c for c in RAW_COLS if c not in tbl.colnames]
         if missing:
             raise KeyError(f'Missing columns {missing} in {raw_path}')
@@ -258,7 +267,8 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
         ax.set_ylabel(ylabel, fontsize=25, labelpad=15)
 
 
-def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z', connect_lines=False, line_min_npts=2):
+def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z',
+                connect_lines=False, line_min_npts=2):
     """
     Plots the wedge diagrams for the given tracers and zone.
 
@@ -269,7 +279,8 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
         webtype (str): The type of web to plot.
         out_png (str): Output file path for the plot.
         smin (float): Minimum marker size.
-        max_z (float): Global maximum redshift cap. Per-tracer limits (TRACER_ZLIMS) are applied and this value acts as an additional upper bound.
+        max_z (float): Global maximum redshift cap. Per-tracer limits (TRACER_ZLIMS) are applied and this
+                       value acts as an additional upper bound.
         n_ra (int): Number of RA ticks to draw.
         n_z (int): Number of redshift ticks to draw.
         coord (str): Coordinate system being used ('z' or 'dc').
@@ -292,6 +303,9 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     axes = np.atleast_1d(axes).ravel()
     plt.suptitle(f'{webtype.capitalize()}s in zone {_zone_tag(zone)}', fontsize=27, y=1.01)
 
+    cmap = plt.get_cmap('tab20')
+    palette = np.asarray(cmap.colors)
+
     for i, tr in enumerate(tracers):
         tr = str(tr)
         ax = axes[i]
@@ -306,8 +320,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
             m &= (zvec <= z_cap)
 
         if not np.any(m):
-            ax.set_xlim(-half_w, half_w)
-            ax.set_ylim(0, y_max)
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes, fontsize=16)
             continue
 
         ra_min, ra_max, ra_ctr, Dc_maxz, half_w, zmax = _compute_zone_params(ravec[m], zvec[m], z_cap)
@@ -320,9 +333,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
         z_ticks, ra_ticks = _draw_grid(ax, ra_min, ra_max, ra_ctr, Dc_maxz, half_w, y_max, n_ra, n_z, coord)
 
         _, color_idx = np.unique(gid, return_inverse=True)
-        cmap = plt.get_cmap('tab20')
-        idx_mod = color_idx % cmap.N
-        palette = np.asarray(cmap.colors)
+        idx_mod = color_idx % palette.shape[0]
 
         scale = yvals / y_max
         x = scale * (Dc_maxz * np.deg2rad(ra - ra_ctr))
@@ -365,7 +376,7 @@ def parse_args():
     p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw', help='Raw data dir')
     p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class', help='Classification dir')
     p.add_argument('--groups-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/groups', help='Output groups dir')
-    p.add_argument('--output', default='.')
+    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs/')
     p.add_argument('--zone', type=int, default=0)
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--tracers', nargs='*', default=None)
@@ -407,7 +418,9 @@ def main():
 
     tag = _zone_tag(args.zone)
     out_png = os.path.join(args.output, f'groups_wedges_zone_{tag}_{args.webtype}_{args.coord}.png')
-    path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z, n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines, line_min_npts=args.line_min_npts)
+    path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z,
+                       n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines,
+                       line_min_npts=args.line_min_npts)
 
 
 if __name__ == '__main__':
