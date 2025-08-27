@@ -447,6 +447,27 @@ def _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w):
                    zorder=CLASS_ZORDER[cls])
 
 
+def _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w):
+    """
+    Plot points on the wedge plot without class distinction.
+
+    Args:
+        ax (matplotlib.axes.Axes): Axes to draw on.
+        sub (pd.DataFrame): Subset DataFrame for a specific tracer.
+        ra_ctr (float): Central RA in degrees.
+        dec_ctr (float): Central DEC in degrees.
+        z_lo (float): Lower z limit.
+        z_hi (float): Upper z limit.
+        half_w (float): Half-width of the wedge at z_hi.
+    """
+    Dc_vals = Planck18.comoving_distance(sub['Z']).value
+    x = Dc_vals * np.deg2rad(sub['RA'] - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
+    y = sub['Z']
+    mask = np.abs(x) <= half_w * ((y - z_lo)/(z_hi - z_lo))
+    ax.scatter(x[mask], y[mask], s=2, c='black',)
+
+
+
 def _draw_border(ax, half_w, z_lo, z_hi):
     """
     Draw border lines of the wedge plot.
@@ -461,27 +482,60 @@ def _draw_border(ax, half_w, z_lo, z_hi):
     ax.plot([ half_w, 0], [z_hi, z_lo], 'k-', lw=1.5)
 
 
+def _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='right'):
+    """
+    Write z tick labels along the slanted wedge border.
+
+    Args:
+        ax (matplotlib.axes.Axes): Axes to draw on.
+        z_ticks (np.ndarray): Array of z tick positions to annotate.
+        half_w (float): Half-width of the wedge at z_hi.
+        z_lo (float): Lower z limit.
+        z_hi (float): Upper z limit.
+        side (str): Which slanted side to annotate: 'right' or 'left'.
+    """
+    if not np.isfinite(half_w) or (z_hi - z_lo) <= 0:
+        return
+
+    angle_deg = np.degrees(np.arctan2((z_hi - z_lo), half_w))
+    offset = 0.05 * abs(half_w)
+
+    for z0 in np.asarray(z_ticks, dtype=float):
+        if not np.isfinite(z0):
+            continue
+        s = (z0 - z_lo) / (z_hi - z_lo)
+        s = np.clip(s, 0.0, 1.0)
+
+        if side == 'right':
+            x_border = half_w * s
+            x_text = x_border + offset
+            rot = angle_deg
+            ha = 'left'
+        else:
+            x_border = -half_w * s
+            x_text = x_border - offset
+            rot = -angle_deg
+            ha = 'right'
+        ax.text(x_text, z0, f'{z0:.2f}', rotation=rot, ha=ha, va='center', fontsize=10)
+
+
 def _configure_axes(ax, side='right'):
     """
     Configure the axes for the wedge plot.
 
     Args:
         ax (matplotlib.axes.Axes): Axes to configure.
-        side (str): Side for y-axis ticks ('left' or 'right').
+        side (str): (kept for API compatibility; no effect on tick placement)
     """
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.set_frame_on(False)
-    if side == 'right':
-        ax.yaxis.tick_right()
-        ax.tick_params(left=True, right=False, labelleft=True, labelright=False)
-    else:
-        ax.yaxis.tick_left()
-        ax.tick_params(left=True, right=False, labelleft=True, labelright=False)
+    ax.set_yticks([])
+    ax.tick_params(left=False, right=False, labelleft=False, labelright=False)
     ax.set_xticks([])
 
 
-def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
+def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, grouped=False):
     """
     Plot and save wedges for all tracers in a given zone.
 
@@ -508,8 +562,12 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
 
         ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(sub)
         z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
-        _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+        if grouped:
+            _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+        else:
+            _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
         _draw_border(ax, half_w, z_lo, z_hi)
+        _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='right')
 
         Dc_hi = Planck18.comoving_distance(z_hi).value
         cos_dec = np.cos(np.deg2rad(dec_ctr))
@@ -523,12 +581,11 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
 
         if ax is axes[0]:
             ax.set_ylabel('z', fontsize=20, labelpad=15)
-            ax.set_yticks(z_ticks)
-            ax.set_yticklabels([f'{zt:.1f}' for zt in z_ticks], fontsize=13)
-
-    handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
-               for k,c in CLASS_COLORS.items()]
-    fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
+            # y-ticks/labels are drawn along the slanted border by _annotate_z_side
+    if grouped:
+        handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
+                for k,c in CLASS_COLORS.items()]
+        fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
                ncol=len(CLASS_COLORS), fontsize=14)
 
     plt.suptitle(f'Zone {zone}', fontsize=18)
@@ -537,7 +594,7 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10):
     plt.close(fig)
 
 
-def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset=0.3):
+def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset=0.3, grouped=False):
     """
     Plot and save wedges for all tracers in a given zone, slicing z by BASE type.
 
@@ -556,7 +613,7 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
                              gridspec_kw={'wspace': 0.5})
     axes = axes.flatten()
 
-    ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(real, offset=offset)
+    ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(real, z_hi=1.0, offset=offset)
 
     for ax, tracer in zip(axes, tracers):
         sub = real[real['BASE'] == tracer]
@@ -564,11 +621,15 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
         ax.set_title(tracer.replace('_ANY',''), fontsize=16, y=1.05)
 
         if sub.empty:
-            continue
+            raise ValueError(f'No random data for tracer {tracer} in zone {zone}')
 
         z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
-        _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+        if grouped:
+            _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+        else:
+            _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
         _draw_border(ax, half_w, z_lo, z_hi)
+        _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='left')
 
         Dc_hi = Planck18.comoving_distance(z_hi).value
         cos_dec = np.cos(np.deg2rad(dec_ctr))
@@ -582,13 +643,11 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
 
         if ax is axes[0]:
             ax.set_ylabel('z', fontsize=20, labelpad=15)
-            ax.set_yticks(z_ticks)
-            ax.set_yticklabels([f'{zt:.1f}' for zt in z_ticks], fontsize=13)
-
-    handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
-               for k,c in CLASS_COLORS.items()]
-    fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
-               ncol=len(CLASS_COLORS), fontsize=14)
+    if grouped:
+        handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
+                for k,c in CLASS_COLORS.items()]
+        fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
+                ncol=len(CLASS_COLORS), fontsize=14)
 
     plt.suptitle(f'Zone {zone}', fontsize=18)
     os.makedirs(os.path.join(output_dir, 'wedges/slice'), exist_ok=True)
@@ -596,7 +655,6 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
     plt.close(fig)
 
 
-#! entropy ------------------------------------------------------------------------
 def entropy(df):
     """
     Compute the Shannon entropy for each row in the DataFrame.
@@ -715,7 +773,6 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25):
     os.makedirs(path, exist_ok=True)
     fig.savefig(f'{path}/pdf_entropy.png', dpi=360)
     return fig, axes
-#! ------------------------------------------------------------------------
 
 
 def parse_args():
@@ -731,6 +788,8 @@ def parse_args():
     p.add_argument('--plot-cdf', action='store_true', default=True)
     p.add_argument('--plot-cdf-dispersion', action='store_true', default=True)
     p.add_argument('--plot-wedges', action='store_true', default=True)
+    p.add_argument('--plot-wedges-slice', action='store_true', default=True)
+    p.add_argument('--plot-wedges-grouped', action='store_true', default=False)
     p.add_argument('--plot-entropy-cdf', action='store_true', default=True)
     p.add_argument('--xbins', type=int, default=200, help='Number of x grid points for CDF interpolation (default: 200)')
     p.add_argument('--subsample-per-zone', type=int, default=50000, help='Max samples per (zone,tracer,real/rand) for dispersion plot')
@@ -761,10 +820,12 @@ def main():
             plot_cdf(r_df, zone, args.tracers, outdirs['cdf'])
         if args.plot_radial:
             plot_radial_distribution(raw_df, zone, args.tracers, outdirs['radial'], args.bins)
-        if args.plot_wedges:
+        if args.plot_wedges or args.plot_wedges_slice:
             prob_df = prob_cache.setdefault(zone, load_prob_df(prob_path))
-            plot_wedges(raw_df, prob_df, zone, args.output)
-            plot_wedges_slice(raw_df, prob_df, zone, args.output)
+            if args.plot_wedges:
+                plot_wedges(raw_df, prob_df, zone, args.output, args.plot_wedges_grouped)
+            if args.plot_wedges_slice:
+                plot_wedges_slice(raw_df, prob_df, zone, args.output, args.plot_wedges_grouped)
 
     if args.plot_cdf_dispersion:
         plot_cdf_dispersion(args.raw_dir, args.class_dir, zones, args.output, args.tracers,
