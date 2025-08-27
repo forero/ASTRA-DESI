@@ -20,7 +20,7 @@ python zenodo_push.py \
   --description "$DESCRIPTION" \
   --creators-json "$MEMBERS_JSON" \
   --keywords "${KEYWORDS[@]}" \
-#   --sandbox \
   --publish \
   --token-file ~/.zenodo_token
 #   --dry-run \ #for testing!!!
+#   --sandbox \
