@@ -82,3 +82,33 @@ python -m src.main \
 - **Probability files**: void/sheet/filament/knot probabilities
 - **Groups**: FoF groups
 - **Plots**: histograms, CDFs, and wedge diagrams
+
+
+## Data sharing on Zenodo
+
+This repository includes utility scripts to package and upload the generated data products to **Zenodo** for long-term archiving and sharing.  
+
+- A staging area is created automatically in `/pscratch/.../zenodo_staging/`, ensuring the original pipeline outputs are never modified.  
+- Each subfolder (`raw/`, `class/`, `groups/`) is compressed into a `.tar.gz` file (e.g., `raw.tar.gz`, `class.tar.gz`, `groups.tar.gz`).  
+- These tarballs are then uploaded to Zenodo using the REST API, with metadata such as title, description, creators, keywords, and version provided via command-line arguments or JSON files.  
+- Authentication is handled via a Zenodo API token stored in a local file (e.g., `~/.zenodo_token`).  
+
+Example (sandbox mode, publishing after upload):
+
+```bash
+python src/utils/zenodo_push.py \
+  --paths /pscratch/sd/v/vtorresg/cosmic-web/edr/raw \
+         /pscratch/sd/v/vtorresg/cosmic-web/edr/class \
+         /pscratch/sd/v/vtorresg/cosmic-web/edr/groups \
+  --pscratch-dir /pscratch/sd/v/vtorresg/cosmic-web \
+  --title "ASTRA-DESI EDR Release v0.1" \
+  --description "Early Data Release products for ASTRA-DESI (raw, class, groups)." \
+  --creators-json ./json/members.json \
+  --keywords ASTRA DESI "cosmic web" \
+  --sandbox \
+  --publish \
+  --token-file ~/.zenodo_token
+```
+
+This will produce tarballs in the staging directory and upload them to Zenodo.  
+Use `--dry-run` to only generate the staging and tarballs without uploading.
