@@ -364,8 +364,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     for j in range(i+1, len(axes)):
         axes[j].axis('off')
 
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(out_png), exist_ok=True)
+    fig.tight_layout()    
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close(fig)
     return out_png
@@ -376,7 +375,7 @@ def parse_args():
     p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw', help='Raw data dir')
     p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class', help='Classification dir')
     p.add_argument('--groups-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/groups', help='Output groups dir')
-    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs/')
+    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs/wedges/filaments')
     p.add_argument('--zone', type=int, default=0)
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--tracers', nargs='*', default=None)

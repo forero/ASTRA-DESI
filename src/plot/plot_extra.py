@@ -123,7 +123,7 @@ def load_prob_df(path):
     df = tbl.to_pandas()
     prob_cols = [c for c in ['PVOID','PSHEET','PFILAMENT','PKNOT'] if c in df]
     df['CLASS'] = df[prob_cols].idxmax(axis=1).str[1:].str.lower()
-    return df[['TARGETID','CLASS']]
+    return df[['TARGETID','CLASS','PVOID','PSHEET','PFILAMENT','PKNOT']]
 
 
 def compute_r(df):
@@ -284,8 +284,6 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
     per_tracer_rand = {t: [] for t in tracers}
 
     for i, z in enumerate(zones):
-        # if progress and (i % 2 == 0):
-            # print(f"[cdf-disp] zone {z} ({i+1}/{len(zones)})")
         raw_path, cls_path = get_zone_paths(raw_dir, class_dir, z)
         raw_df = load_raw_df(raw_path)
         cls_df = load_class_df(cls_path)
@@ -598,20 +596,142 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
     plt.close(fig)
 
 
+#! entropy ------------------------------------------------------------------------
+def entropy(df):
+    """
+    Compute the Shannon entropy for each row in the DataFrame.
+    
+    Args:
+        df (pd.DataFrame): The input DataFrame containing probability columns.
+    Returns:
+        pd.DataFrame: The input DataFrame with an additional column for entropy.
+    """
+    cols = ['PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']
+    P = np.column_stack([np.asarray(df[c], dtype=float) for c in cols])
+    out = df.copy()
+
+    # H = - sum p_i log2 p_i / log2(4)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        terms = P * np.log2(P)
+    terms[~np.isfinite(terms)] = 0.0
+    H = -np.sum(terms, axis=1) / np.log2(4.0)
+
+    out['H'] = H.astype(np.float32)
+    return out
+
+
+def _read_raw_df_min(raw_path):
+    """
+    Read the raw FITS file and return a minimal DataFrame.
+    
+    Args:
+        raw_path (str): The path to the raw FITS file.
+    Returns:
+        pd.DataFrame: A minimal DataFrame containing relevant columns.
+    """
+    tbl = Table.read(raw_path, memmap=True)
+    df = tbl.to_pandas()
+    df['TRACERTYPE'] = df['TRACERTYPE'].apply(lambda x: x.decode('utf-8')
+                                              if isinstance(x, (bytes, bytearray)) else x)
+    df['BASE'] = df['TRACERTYPE'].str.replace(r'_(DATA|RAND)$','', regex=True)
+    df['ISDATA'] = df['TRACERTYPE'].str.endswith('_DATA')
+    return df[['TARGETID','TRACERTYPE','BASE','ISDATA']]
+
+
+def _targets_of_tracer_real(raw_df, tracer_prefix):
+    """
+    Get the set of TARGETIDs for a specific tracer prefix from the raw dataframe.
+    
+    Args:
+        raw_df (pd.DataFrame): The raw dataframe containing tracer information.
+        tracer_prefix (str): The tracer prefix to filter by.
+    Returns:
+        set: A set of TARGETIDs matching the tracer prefix.
+    """
+    if tracer_prefix == 'BGS_ANY':
+        tracer_prefix = 'BGS'
+    m = raw_df['ISDATA'] & raw_df['BASE'].str.startswith(tracer_prefix)
+    return set(raw_df.loc[m, 'TARGETID'].to_numpy(dtype=np.int64))
+
+
+def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25):
+    """
+    Plot the PDF of the normalized Shannon entropy H for specified tracers across zones.
+    
+    Args:
+        raw_dir (str): Directory containing raw data files.
+        class_dir (str): Directory containing class data files.
+        zones (list): List of zone identifiers.
+        tracers (list): List of tracer identifiers.
+        out_path (str): Output path for the plot.
+        bins (int): Number of bins for the histogram.
+    """
+    colors = plt.cm.tab20(np.linspace(0, 1, max(20, len(zones))))
+    fig, axes = plt.subplots(2, 2, figsize=(10,10), sharey=True, sharex=True)
+    axes = np.ravel(axes)
+
+    for ax, tracer in zip(axes, tracers):
+        ax.grid(True, alpha=0.3)
+        ax.set_title(tracer.replace('_ANY', ''))
+
+        for iz, z in enumerate(zones):
+            raw_path = os.path.join(raw_dir, f'zone_{int(z):02d}.fits.gz')
+            prob_path = get_prob_path(raw_dir, class_dir, int(z))
+
+            raw_df = _read_raw_df_min(raw_path)
+            tids_tr = _targets_of_tracer_real(raw_df, tracer.split('_', 1)[0])
+
+            probs_df = load_prob_df(prob_path).copy()
+            probs_df = entropy(probs_df)
+
+            tids = probs_df['TARGETID'].to_numpy(dtype=np.int64, copy=False)
+            m = np.isin(tids, list(tids_tr))
+            v = probs_df.loc[m, 'H'].to_numpy(dtype=float, copy=False)
+
+            hist, edges = np.histogram(v, bins=bins, range=(0, 0.6), density=True)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            label = f'Zone {int(z)}' if ax is axes[0] else None
+            ax.plot(centers, hist, color=colors[iz], label=label)
+
+        if ax in (axes[0], axes[2]):
+            ax.set_ylabel('PDF')
+        if ax in (axes[2], axes[3]):
+            ax.set_xlabel('H')
+
+    handles, labels = [], []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        for hh, ll in zip(h, l):
+            if ll not in labels and ll is not None:
+                handles.append(hh); labels.append(ll)
+
+    if handles:
+        fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.01),
+                   bbox_transform=fig.transFigure, ncol=min(7, len(labels)), frameon=False)
+    fig.subplots_adjust(bottom=0.14, top=0.85)
+    plt.suptitle('Normalized Shannon Entropy', y=0.94)
+
+    path = f'{out_path}/entropy'
+    os.makedirs(path, exist_ok=True)
+    fig.savefig(f'{path}/pdf_entropy.png', dpi=360)
+    return fig, axes
+#! ------------------------------------------------------------------------
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw')
     p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class')
-    p.add_argument('--zones', nargs='+', type=int, default=None)
     p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs')
+    p.add_argument('--zones', nargs='+', type=int, default=None)
     p.add_argument('--bins', type=int, default=10)
-    p.add_argument('--tracers', nargs='+',
-                   default=['BGS_ANY','ELG','LRG','QSO'])
+    p.add_argument('--tracers', nargs='+', default=['BGS_ANY','LRG','ELG','QSO'])
     p.add_argument('--plot-z', action='store_true', default=True)
     p.add_argument('--plot-radial', action='store_true', default=True)
     p.add_argument('--plot-cdf', action='store_true', default=True)
     p.add_argument('--plot-cdf-dispersion', action='store_true', default=True)
     p.add_argument('--plot-wedges', action='store_true', default=True)
+    p.add_argument('--plot-entropy-cdf', action='store_true', default=True)
     p.add_argument('--xbins', type=int, default=200, help='Number of x grid points for CDF interpolation (default: 200)')
     p.add_argument('--subsample-per-zone', type=int, default=50000, help='Max samples per (zone,tracer,real/rand) for dispersion plot')
     p.add_argument('--progress', action='store_true', default=False, help='Print simple progress logs')
@@ -624,7 +744,6 @@ def main():
     outdirs = make_output_dirs(args.output)
 
     raw_cache, class_cache, prob_cache = {}, {}, {}
-
     for zone in zones:
         raw_path, cls_path = get_zone_paths(args.raw_dir, args.class_dir, zone)
         prob_path = get_prob_path(args.raw_dir, args.class_dir, zone)
@@ -651,6 +770,8 @@ def main():
         plot_cdf_dispersion(args.raw_dir, args.class_dir, zones, args.output, args.tracers,
                             xbins=args.xbins, subsample_per_zone=args.subsample_per_zone,
                             progress=args.progress)
+    if args.plot_entropy_cdf:
+        plot_pdf_entropy(args.raw_dir, args.class_dir, zones, args.tracers, args.output, args.bins)
 
 
 if __name__ == '__main__':

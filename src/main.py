@@ -170,7 +170,7 @@ def classify_zone(zone, tbl, output_class, n_random):
         pr, cr, rdict = generate_pairs(tbl, n_random)
         save_pairs_fits(pr, os.path.join(output_class, f'{base}_pairs.fits.gz'))
         save_classification_fits(cr, os.path.join(output_class, f'{base}_class.fits.gz'))
-        save_probability_fits(rdict, os.path.join(output_class, f'{base}_probability.fits.gz'))
+        save_probability_fits(cr, os.path.join(output_class, f'{base}_probability.fits.gz'), r_limit=0.9)
     except Exception as e:
         raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
     

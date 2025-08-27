@@ -193,47 +193,53 @@ def save_classification_fits(rows, output_path):
     tbl.write(output_path, format='fits', overwrite=True)
 
 
-def build_probability_table(r_by_tid):
-	"""
-	Builds a probability table from the random values associated with target IDs.
+def build_probability_table(class_rows, r_limit=0.9):
+    """
+    Builds a probability table from the classification rows.
 
-	Args:
-		r_by_tid (defaultdict): Dictionary mapping target IDs to lists of random values.
-	Returns:
-		Table: Astropy Table containing target IDs and their corresponding probabilities.
-	"""
-	n = len(r_by_tid)
-	dtype = [('TARGETID','i8'), ('PVOID','f4'),
-             ('PSHEET','f4'), ('PFILAMENT','f4'),
-             ('PKNOT','f4')]
-	data = np.zeros(n, dtype=dtype)
+    Args:
+        class_rows (list): List of tuples containing classification data.
+        r_limit (float): Upper limit for the r value bins.
+    Returns:
+        Table: Astropy Table containing target IDs and their corresponding probabilities.
+    """
+    arr = np.asarray(class_rows, 
+                     dtype=[('TARGETID','i8'),
+                            ('RANDITER','i4'),
+                            ('ISDATA','b'),
+                            ('NDATA','i4'),
+                            ('NRAND','i4')])
 
-	for i,(tid, rlist) in enumerate(r_by_tid.items()):
-		arr = np.asarray(rlist, dtype=np.float32)
-		if arr.size:
-			void_m = (arr <= -0.9)
-			sheet_m = (arr > -0.9) & (arr < 0.0)
-			fila_m = (arr >= 0.0) & (arr < 0.9)
-			knot_m = (arr >= 0.9)
-			counts = np.array([void_m.sum(), sheet_m.sum(), fila_m.sum(), knot_m.sum()], dtype=np.int64)
-			total = counts.sum()
-			if total > 0:
-				probs = counts / total
-			else:
-				probs = np.zeros(4, dtype=np.float32)
-		else:
-			probs = np.zeros(4, dtype=np.float32)
-		data[i] = (int(tid), float(probs[0]), float(probs[1]), float(probs[2]), float(probs[3]))
-	return Table(data)
+    m = arr['ISDATA']
+    tids  = arr['TARGETID'][m]
+    ndata = arr['NDATA'][m].astype(np.float64, copy=False)
+    nrand = arr['NRAND'][m].astype(np.float64, copy=False)
+
+    denom = ndata + nrand
+    r = np.empty_like(denom)
+    np.divide(ndata - nrand, denom, out=r, where=(denom > 0))
+
+    classes = np.digitize(r, bins=[-r_limit, 0.0, r_limit])
+    uniq, inv = np.unique(tids, return_inverse=True)
+    counts = np.zeros((uniq.size, 4), dtype=np.int64)
+    np.add.at(counts, (inv, classes), 1)
+
+    total = counts.sum(axis=1, keepdims=True).astype(np.float32)
+    probs = counts.astype(np.float32)
+    np.divide(probs, total, out=probs, where=(total > 0))
+
+    return Table({'TARGETID':uniq, 'PVOID':probs[:, 0],
+                  'PSHEET':probs[:, 1], 'PFILAMENT':probs[:, 2],
+                  'PKNOT':probs[:, 3]})
 
 
-def save_probability_fits(r_by_tid, output_path):
+def save_probability_fits(class_rows, output_path):
 	"""
 	Saves the probability table to a FITS file.
 
 	Args:
-		r_by_tid (defaultdict): Dictionary mapping target IDs to lists of random values.
+		class_rows (list): List of tuples containing classification data.
 		output_path (str): Path to save the FITS file.
 	"""
-	tbl = build_probability_table(r_by_tid)
+	tbl = build_probability_table(class_rows, r_limit=r_limit)
 	tbl.write(output_path, format='fits', overwrite=True)
