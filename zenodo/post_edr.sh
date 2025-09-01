@@ -7,7 +7,7 @@ PATHS=("/pscratch/sd/v/vtorresg/cosmic-web/edr/raw"
 
 PSCRATCH_DIR="/pscratch/sd/v/vtorresg/cosmic-web"
 
-TITLE="ASTRA-DESI EDR Release v0.1"
+TITLE="ASTRA-DESI EDR Release v0.2"
 DESCRIPTION="Early Data Release products for ASTRA-DESI (raw, class, groups)."
 MEMBERS_JSON='./json/members.json'
 KEYWORDS=("ASTRA" "DESI" "cosmic-web" "LSS")
@@ -20,7 +20,7 @@ python zenodo_push.py \
   --description "$DESCRIPTION" \
   --creators-json "$MEMBERS_JSON" \
   --keywords "${KEYWORDS[@]}" \
-  --publish \
   --token-file ~/.zenodo_token
+  # --publish \
 #   --dry-run \ #for testing!!!
 #   --sandbox \

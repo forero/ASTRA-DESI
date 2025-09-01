@@ -51,4 +51,6 @@ srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores /usr/bin
       --class-out "${CLASS_OUT}" \
       --groups-out "${GROUPS_OUT}" \
       --plot-output "${FIGS_OUT}" \
-      --webtype filament --source data --n-random 100 #--plot
+      --webtype filament \
+      --source data \
+      --n-random 1

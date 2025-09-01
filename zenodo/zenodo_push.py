@@ -1,5 +1,5 @@
 import os, json, tarfile
-import argparse
+import argparse, time
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -34,19 +34,17 @@ def parse_args():
 
 def _make_folder_tarballs(staging_dir: str) -> List[str]:
     """
-    Crea un .tar.gz por cada subcarpeta inmediata dentro de staging_dir.
-    Por ejemplo: <staging>/raw -> <staging>/raw.tar.gz
-                 <staging>/class -> <staging>/class.tar.gz
-                 <staging>/groups -> <staging>/groups.tar.gz
-    Si no hay subcarpetas, empaqueta todos los archivos en dataset.tar.gz.
-    Devuelve la lista de rutas a los .tar.gz creados.
+    Creates tar.gz files for each subdirectory in the staging directory.
+
+    Args:
+        staging_dir (str): The path to the staging directory.
+    Returns:
+        List[str]: A list of paths to the created .tar.gz files.
     """
     s = Path(staging_dir)
     tar_paths: List[str] = []
-    # Subdirectorios inmediatos del staging
     subdirs = [p for p in s.iterdir() if p.is_dir()]
     if not subdirs:
-        # Empaquetar todo el contenido del staging en un único tar.gz
         tar_path = s / "dataset.tar.gz"
         with tarfile.open(tar_path, mode="w:gz") as tf:
             for p in s.rglob("*"):
@@ -58,7 +56,6 @@ def _make_folder_tarballs(staging_dir: str) -> List[str]:
     for d in subdirs:
         tar_path = s / f"{d.name}.tar.gz"
         with tarfile.open(tar_path, mode="w:gz") as tf:
-            # arcname = nombre de la carpeta para que al extraer quede exactamente raw/, class/, groups/, etc.
             tf.add(d, arcname=d.name)
         tar_paths.append(str(tar_path))
 
@@ -111,6 +108,7 @@ def main():
 
     token = _get_token(args.token_env, args.token_file)
     base_url = 'https://sandbox.zenodo.org' if args.sandbox else 'https://zenodo.org'
+    init_t = time.time()
 
     staging_name = slugify(args.title)
     staging_dir, copied_paths = ensure_pscratch_copy(source_paths=args.paths,
@@ -130,7 +128,6 @@ def main():
         for p in copied_paths[-5:]:
             print(f' - {p}')
 
-    # Crear tarballs por carpeta dentro del staging
     tar_paths = _make_folder_tarballs(staging_dir)
     print(f'- Tarballs to upload: {len(tar_paths)}')
     for t in tar_paths:
@@ -156,7 +153,8 @@ def main():
            'title': dep.get('title') or dep.get('metadata', {}).get('title'),
            'published': bool(dep.get('doi')),
            'doi': dep.get('doi'),
-           'record_url': dep.get('links', {}).get('record_html') or dep.get('links', {}).get('html'),}
+           'record_url': dep.get('links', {}).get('record_html') or dep.get('links', {}).get('html'),
+           'elapsed t': f'{(time.time() - init_t)/60} min'}
     print(json.dumps(out, indent=2))
 
 if __name__ == '__main__':
