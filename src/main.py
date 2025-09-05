@@ -2,7 +2,7 @@ import os, argparse, json, time, numpy as np
 from astropy.table import vstack, join, Table
 
 from desiproc.read_data import *
-from desiproc.implement_astra import *
+from desiproc import implement_astra as astra
 from plot.plot_groups import *
 from desiproc.gen_groups import process_zone
 
@@ -167,10 +167,10 @@ def classify_zone(zone, tbl, output_class, n_random):
     """
     try:
         base = f'zone_{(f"{zone:02d}" if isinstance(zone, int) else str(zone))}'
-        pr, cr, rdict = generate_pairs(tbl, n_random)
-        save_pairs_fits(pr, os.path.join(output_class, f'{base}_pairs.fits.gz'))
-        save_classification_fits(cr, os.path.join(output_class, f'{base}_class.fits.gz'))
-        save_probability_fits(cr, os.path.join(output_class, f'{base}_probability.fits.gz'), r_limit=0.9)
+        pr, cr, rdict = astra.generate_pairs(tbl, n_random)
+        astra.save_pairs_fits(pr, os.path.join(output_class, f'{base}_pairs.fits.gz'))
+        astra.save_classification_fits(cr, os.path.join(output_class, f'{base}_class.fits.gz'))
+        astra.save_probability_fits(cr, os.path.join(output_class, f'{base}_probability.fits.gz'), r_limit=0.9)
     except Exception as e:
         raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
     
@@ -264,8 +264,9 @@ def main():
             REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
             RANDOM_COLUMNS = REAL_COLUMNS
 
-            DEFAULT_CUTS = {'NGC1': {'RA_min':110, 'RA_max':300, 'DEC_min':-80, 'DEC_max':48, 'Z_min':0.1, 'Z_max':0.9},
-                            'NGC2': {'RA_min':180, 'RA_max':260, 'DEC_min':30, 'DEC_max':40, 'Z_min':0.1, 'Z_max':0.9},}
+            DEFAULT_CUTS = {'NGC1': {'RA_min':60, 'RA_max':230, 'DEC_min':-70, 'DEC_max':38, 'Z_min':0.4, 'Z_max':0.9},
+                            'NGC2': {'RA_min':140, 'RA_max':220, 'DEC_min':30, 'DEC_max':40, 'Z_min':0.4, 'Z_max':0.9},
+                            'NGC3': {'RA_min':0, 'RA_max':360, 'DEC_min':-90, 'DEC_max':90, 'Z_min':0.0, 'Z_max':5.0}}
             if args.config: # load external config json if prov
                 with open(args.config, 'r') as f:
                     user_cuts = json.load(f)
@@ -305,7 +306,7 @@ def main():
             if args.release.upper() == 'EDR':
                 tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out, args.n_random, TRACERS, NORTH_ROSETTES)
             else:
-                zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(str(z), 9999)
+                zone_value = {'NGC1': 1001, 'NGC2': 1002, 'NGC3': 1003}.get(str(z), 9999)
                 cuts = DEFAULT_CUTS[str(z)]
                 tbl = build_raw_region(str(z), cuts, args.region, TRACERS, real_tables, random_tables,
                                        args.raw_out, args.n_random, zone_value)

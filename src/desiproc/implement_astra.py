@@ -59,7 +59,7 @@ def compute_delaunay_pairs(pts):
     return pairs
 
 
-def process_delaunay(pts, tids, is_data, iteration):
+def process_delaunay(pts, tids, is_data, iteration, tracer):
     """
     Processes 3D coordinates to compute pairs, counts, and classification for a given iteration.
 
@@ -96,8 +96,9 @@ def process_delaunay(pts, tids, is_data, iteration):
     	r_updates[int(tids[i])].append(float(r))
 
     for i in range(n):
-    	class_rows.append((int(tids[i]), iteration, bool(is_data[i]),
-                        int(data_count[i]), int(total_count[i] - data_count[i])))
+        class_rows.append((int(tids[i]), iteration, bool(is_data[i]),
+                        int(data_count[i]), int(total_count[i] - data_count[i]),
+                        str(tracer)))
 
     return pair_rows, class_rows, r_updates
 
@@ -119,14 +120,14 @@ def generate_pairs(tbl, n_random):
 	r_by_tid = defaultdict(list)
 
 	blocks = extract_tracer_blocks(tbl)
-	for data in blocks.values():
+	for tracer, data in blocks.items():
 		tids, rand_sub, coords, is_data = (data['tids'], data['rand'], data['coords'], data['is_data'])
 
 		for j in range(n_random):
 			mask = is_data | (rand_sub == j)
 			if not mask.any():
 				continue
-			pr, cr, ru = process_delaunay(coords[mask], tids[mask], is_data[mask], j)
+			pr, cr, ru = process_delaunay(coords[mask], tids[mask], is_data[mask], j, tracer)
 			pair_rows.extend(pr)
 			class_rows.extend(cr)
 			for tid, rs in ru.items():
@@ -177,8 +178,8 @@ def build_class_table(rows):
 			- NDATA: Number of real data points
 			- NRAND: Number of random points
 	"""
-	return Table(rows=rows, names=('TARGETID','RANDITER','ISDATA','NDATA','NRAND'),
-                 dtype=('i8','i4','bool','i4','i4'))
+	return Table(rows=rows, names=('TARGETID','RANDITER','ISDATA','NDATA','NRAND','TRACERTYPE'),
+                 dtype=('i8','i4','bool','i4','i4','U24'))
 
 
 def save_classification_fits(rows, output_path):
@@ -203,24 +204,25 @@ def build_probability_table(class_rows, r_limit=0.9):
     Returns:
         Table: Astropy Table containing target IDs and their corresponding probabilities.
     """
-    arr = np.asarray(class_rows, 
-                     dtype=[('TARGETID','i8'),
-                            ('RANDITER','i4'),
-                            ('ISDATA','b'),
-                            ('NDATA','i4'),
-                            ('NRAND','i4')])
+    arr = np.asarray(class_rows, dtype=[('TARGETID','i8'), ('RANDITER','i4'),
+                                        ('ISDATA','?'), ('NDATA','i4'),
+                                        ('NRAND','i4'), ('TRACERTYPE','U24')])
 
     m = arr['ISDATA']
-    tids  = arr['TARGETID'][m]
+    tids = arr['TARGETID'][m]
+    trcs = arr['TRACERTYPE'][m].astype('U24')
     ndata = arr['NDATA'][m].astype(np.float64, copy=False)
     nrand = arr['NRAND'][m].astype(np.float64, copy=False)
 
     denom = ndata + nrand
-    r = np.empty_like(denom)
+    r = np.zeros_like(denom, dtype=np.float64)
     np.divide(ndata - nrand, denom, out=r, where=(denom > 0))
 
     classes = np.digitize(r, bins=[-r_limit, 0.0, r_limit])
-    uniq, inv = np.unique(tids, return_inverse=True)
+    keys = np.empty(tids.size, dtype=[('TARGETID','i8'),('TRACERTYPE','U24')])
+    keys['TARGETID'] = tids
+    keys['TRACERTYPE'] = trcs
+    uniq, inv = np.unique(keys, return_inverse=True)
     counts = np.zeros((uniq.size, 4), dtype=np.int64)
     np.add.at(counts, (inv, classes), 1)
 
@@ -228,18 +230,20 @@ def build_probability_table(class_rows, r_limit=0.9):
     probs = counts.astype(np.float32)
     np.divide(probs, total, out=probs, where=(total > 0))
 
-    return Table({'TARGETID':uniq, 'PVOID':probs[:, 0],
-                  'PSHEET':probs[:, 1], 'PFILAMENT':probs[:, 2],
-                  'PKNOT':probs[:, 3]})
+    return Table({'TARGETID': uniq['TARGETID'], 'TRACERTYPE': uniq['TRACERTYPE'],
+                  'PVOID':probs[:, 0], 'PSHEET':probs[:, 1],
+                  'PFILAMENT':probs[:, 2], 'PKNOT':probs[:, 3]})
 
 
-def save_probability_fits(class_rows, output_path):
+def save_probability_fits(class_rows, output_path, r_limit=0.9):
 	"""
 	Saves the probability table to a FITS file.
 
 	Args:
 		class_rows (list): List of tuples containing classification data.
 		output_path (str): Path to save the FITS file.
+		r_limit (float, optional): Upper limit threshold used to bin r into
+		    classes when computing probabilities. Defaults to 0.9.
 	"""
 	tbl = build_probability_table(class_rows, r_limit=r_limit)
 	tbl.write(output_path, format='fits', overwrite=True)
