@@ -12,53 +12,83 @@ CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot'
 CLASS_ZORDER = {'void':0, 'sheet':1, 'filament':2, 'knot':3}
 
 
+def _zone_tag(zone):
+    """
+    Convert zone to tag used in filenames. Accepts int or string labels.
+
+    - If an int (or str representing an int), returns zero-padded two-digit number (e.g., 0 -> '00').
+    - Otherwise, returns the string as-is (e.g., 'NGC1').
+    """
+    try:
+        return f"{int(zone):02d}"
+    except Exception:
+        return str(zone)
+
+
 def get_zone_paths(raw_dir, class_dir, zone):
     """
-    Get file paths for a given zone number.
+    Get file paths for a given zone number or label.
 
     Args:
         raw_dir (str): Directory containing raw data files.
         class_dir (str): Directory containing classification files.
-        zone (int): Zone number.
+        zone (int | str): Zone number (EDR) or label like 'NGC1' (DR1).
     Returns:
         tuple: Paths to the raw data file and classification file for the zone.
     """
-    z2 = f'{zone:02d}'
-    return (os.path.join(raw_dir, f'zone_{z2}.fits.gz'),
-            os.path.join(class_dir, f'zone_{z2}_class.fits.gz'),)
+    ztag = _zone_tag(zone)
+    return (os.path.join(raw_dir, f'zone_{ztag}.fits.gz'),
+            os.path.join(class_dir, f'zone_{ztag}_class.fits.gz'),)
 
 
 def get_prob_path(raw_dir, class_dir, zone):
     """
-    Get the probability file path for a given zone number.
+    Get the probability file path for a given zone number or label.
 
     Args:
         raw_dir (str): Directory containing raw data files.
         class_dir (str): Directory containing classification files.
-        zone (int): Zone number.
+        zone (int | str): Zone number (EDR) or label like 'NGC1' (DR1).
     Returns:
         str: Path to the probability file for the zone.
     """
-    z2 = f'{zone:02d}'
-    return os.path.join(class_dir, f'zone_{z2}_probability.fits.gz')
+    ztag = _zone_tag(zone)
+    return os.path.join(class_dir, f'zone_{ztag}_probability.fits.gz')
 
 
 def infer_zones(raw_dir, provided):
     """
     Infer available zones from raw directory if not provided.
 
+    Supports both numeric zones (e.g., 0, 01, 12) and string labels
+    (e.g., 'NGC1'). Returns a list of zone identifiers as strings
+    or ints depending on input in `provided`. When inferred from
+    filenames, returns the raw tag from filenames without casting.
+
     Args:
         raw_dir (str): Directory containing raw data files.
-        provided (list or None): List of zone numbers if provided.
+        provided (list or None): List of zone identifiers if provided.
     Returns:
-        list: List of zone numbers.
+        list: List of zone identifiers (strings like 'NGC1' or numeric-like strings).
     """
     if provided:
         return provided
-    files = os.listdir(raw_dir)
-    zones = sorted(int(f.split('_')[1].split('.')[0]) for f in files
-                   if f.startswith('zone_') and f.endswith('.fits.gz'))
-    return zones
+    import re
+    pat = re.compile(r"^zone_(.+)\.fits\.gz$")
+    tags = []
+    for f in os.listdir(raw_dir):
+        m = pat.match(f)
+        if m:
+            tags.append(m.group(1))
+
+    # Sort numerics as numbers, others lexicographically
+    def _key(t):
+        try:
+            return (0, int(t))
+        except Exception:
+            return (1, str(t))
+
+    return sorted(tags, key=_key)
 
 
 def make_output_dirs(base):
@@ -516,7 +546,7 @@ def _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='right'):
             x_text = x_border - offset
             rot = -angle_deg
             ha = 'right'
-        ax.text(x_text, z0, f'{z0:.2f}', rotation=rot, ha=ha, va='center', fontsize=10)
+        ax.text(x_text, z0, f'{z0:.2f}', rotation=rot, ha=ha, va='center', fontsize=15)
 
 
 def _configure_axes(ax, side='right'):
@@ -557,40 +587,41 @@ def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, grouped=Fals
         _configure_axes(ax, side='right')
         ax.set_title(tracer.replace('_ANY',''), fontsize=16, y=1.05)
 
-        if sub.empty:
-            raise ValueError(f'No data for tracer {tracer} in zone {zone}')
+        if not sub.empty:
+            print(f'No data for tracer {tracer} in zone {zone}, skipping plot.')
+            # raise ValueError(f'No data for tracer {tracer} in zone {zone}')
 
-        ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(sub)
-        z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
-        if grouped:
-            _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        else:
-            _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        _draw_border(ax, half_w, z_lo, z_hi)
-        _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='right')
+            ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(sub)
+            z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
+            if grouped:
+                _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+            else:
+                _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+            _draw_border(ax, half_w, z_lo, z_hi)
+            _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='right')
 
-        Dc_hi = Planck18.comoving_distance(z_hi).value
-        cos_dec = np.cos(np.deg2rad(dec_ctr))
-        denom = Dc_hi * cos_dec
-        sec = ax.secondary_xaxis('top',
-            functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
-                       lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
-        sec.set_xticks(ra_ticks[::4])
-        sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
-        sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
+            Dc_hi = Planck18.comoving_distance(z_hi).value
+            cos_dec = np.cos(np.deg2rad(dec_ctr))
+            denom = Dc_hi * cos_dec
+            sec = ax.secondary_xaxis('top',
+                functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
+                        lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
+            sec.set_xticks(ra_ticks[::4])
+            sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
+            sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
 
-        if ax is axes[0]:
-            ax.set_ylabel('z', fontsize=20, labelpad=15)
-            # y-ticks/labels are drawn along the slanted border by _annotate_z_side
+            if ax is axes[0]:
+                ax.set_ylabel('z', fontsize=20, labelpad=15)
+                # y-ticks/labels are drawn along the slanted border by _annotate_z_side
     if grouped:
         handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
                 for k,c in CLASS_COLORS.items()]
         fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
                ncol=len(CLASS_COLORS), fontsize=14)
 
-    plt.suptitle(f'Zone {zone}', fontsize=18)
+    plt.suptitle(f'Zone {_zone_tag(zone)}', fontsize=18)
     os.makedirs(os.path.join(output_dir, 'wedges/complete'), exist_ok=True)
-    fig.savefig(os.path.join(output_dir, f'wedges/complete/wedge_zone_{zone:02d}.png'), dpi=360)
+    fig.savefig(os.path.join(output_dir, f'wedges/complete/wedge_zone_{_zone_tag(zone)}.png'), dpi=360)
     plt.close(fig)
 
 
@@ -620,38 +651,38 @@ def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset
         _configure_axes(ax, side='left')
         ax.set_title(tracer.replace('_ANY',''), fontsize=16, y=1.05)
 
-        if sub.empty:
-            raise ValueError(f'No random data for tracer {tracer} in zone {zone}')
+        if not sub.empty:
+            # raise ValueError(f'No random data for tracer {tracer} in zone {zone}')
 
-        z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
-        if grouped:
-            _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        else:
-            _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        _draw_border(ax, half_w, z_lo, z_hi)
-        _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='left')
+            z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
+            if grouped:
+                _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+            else:
+                _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
+            _draw_border(ax, half_w, z_lo, z_hi)
+            _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='left')
 
-        Dc_hi = Planck18.comoving_distance(z_hi).value
-        cos_dec = np.cos(np.deg2rad(dec_ctr))
-        denom = Dc_hi * cos_dec
-        sec = ax.secondary_xaxis('top',
-            functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
-                       lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
-        sec.set_xticks(ra_ticks[::4])
-        sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
-        sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
+            Dc_hi = Planck18.comoving_distance(z_hi).value
+            cos_dec = np.cos(np.deg2rad(dec_ctr))
+            denom = Dc_hi * cos_dec
+            sec = ax.secondary_xaxis('top',
+                functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
+                        lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
+            sec.set_xticks(ra_ticks[::4])
+            sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
+            sec.set_xlabel('RA (deg)', fontsize=14, labelpad=13)
 
-        if ax is axes[0]:
-            ax.set_ylabel('z', fontsize=20, labelpad=15)
+            if ax is axes[0]:
+                ax.set_ylabel('z', fontsize=20, labelpad=15)
     if grouped:
         handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
                 for k,c in CLASS_COLORS.items()]
         fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
                 ncol=len(CLASS_COLORS), fontsize=14)
 
-    plt.suptitle(f'Zone {zone}', fontsize=18)
+    plt.suptitle(f'Zone {_zone_tag(zone)}', fontsize=18)
     os.makedirs(os.path.join(output_dir, 'wedges/slice'), exist_ok=True)
-    fig.savefig(os.path.join(output_dir, f'wedges/slice/wedge_slice_zone_{zone:02d}.png'), dpi=360)
+    fig.savefig(os.path.join(output_dir, f'wedges/slice/wedge_slice_zone_{_zone_tag(zone)}.png'), dpi=360)
     plt.close(fig)
 
 
@@ -733,8 +764,8 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25):
         ax.set_title(tracer.replace('_ANY', ''))
 
         for iz, z in enumerate(zones):
-            raw_path = os.path.join(raw_dir, f'zone_{int(z):02d}.fits.gz')
-            prob_path = get_prob_path(raw_dir, class_dir, int(z))
+            raw_path, _ = get_zone_paths(raw_dir, class_dir, z)
+            prob_path = get_prob_path(raw_dir, class_dir, z)
 
             raw_df = _read_raw_df_min(raw_path)
             tids_tr = _targets_of_tracer_real(raw_df, tracer.split('_', 1)[0])
@@ -748,7 +779,7 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25):
 
             hist, edges = np.histogram(v, bins=bins, range=(0, 0.6), density=True)
             centers = 0.5 * (edges[:-1] + edges[1:])
-            label = f'Zone {int(z)}' if ax is axes[0] else None
+            label = f'Zone {_zone_tag(z)}' if ax is axes[0] else None
             ax.plot(centers, hist, color=colors[iz], label=label)
 
         if ax in (axes[0], axes[2]):
@@ -777,10 +808,11 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class')
-    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs')
-    p.add_argument('--zones', nargs='+', type=int, default=None)
+    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/raw')
+    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/class')
+    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/figs')
+    # Accept zones as strings or integers (e.g., 0, 01, NGC1)
+    p.add_argument('--zones', nargs='+', default=None)
     p.add_argument('--bins', type=int, default=10)
     p.add_argument('--tracers', nargs='+', default=['BGS_ANY','LRG','ELG','QSO'])
     p.add_argument('--plot-z', action='store_true', default=True)

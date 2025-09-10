@@ -9,7 +9,7 @@ from astropy.table import join as at_join
 LINE_COLOR = 'black'
 plt.rcParams.update({'font.family': 'serif'})
 
-from plot_groups import (read_groups, read_raw_min, mask_source, tracer_prefixes,
+from .plot_groups import (read_groups, read_raw_min, mask_source, tracer_prefixes,
                               ORDERED_TRACERS, TRACER_ZLIMS)
 
 

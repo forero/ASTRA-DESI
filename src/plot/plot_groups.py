@@ -5,7 +5,16 @@ from astropy.table import Table, join
 from astropy.cosmology import Planck18
 from matplotlib.lines import Line2D
 
-from plot_extra import get_zone_paths
+# Support both package and script execution
+try:
+    # When run as a package: python -m src.plot.plot_groups
+    from .plot_extra import get_zone_paths
+except Exception:
+    # When run directly: python src/plot/plot_groups.py or from src/plot/
+    import os as _os, sys as _sys
+    _here = _os.path.abspath(_os.path.dirname(__file__))
+    _sys.path.append(_os.path.dirname(_here))  # add src/ to sys.path
+    from plot.plot_extra import get_zone_paths
 # plt.style.use('dark_background')
 
 plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
@@ -372,11 +381,12 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw', help='Raw data dir')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class', help='Classification dir')
-    p.add_argument('--groups-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/groups', help='Output groups dir')
-    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs/wedges/filaments')
-    p.add_argument('--zone', type=int, default=0)
+    p.add_argument('--release', choices=['EDR','DR1'], default='DR1', help='Dataset release: EDR (zones 00..19) or DR1 (NGC1/NGC2)')
+    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/raw', help='Raw data dir')
+    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/class', help='Classification dir')
+    p.add_argument('--groups-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/groups', help='Output groups dir')
+    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/figs/wedges/filaments')
+    p.add_argument('--zone', type=str, default='NGC1', help='EDR: 0..19 or 00..19; DR1: NGC1/NGC2')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--tracers', nargs='*', default=None)
     p.add_argument('--source', choices=['data','rand','both'], default='data')
@@ -392,11 +402,24 @@ def parse_args():
 def main():
     args = parse_args()
 
-    groups = read_groups(args.groups_dir, args.zone, args.webtype)
+    # Interpret zone per release
+    if args.release.upper() == 'EDR':
+        try:
+            zone = int(args.zone)
+        except Exception:
+            # allow strings like '00'
+            zone = int(str(args.zone))
+    else:
+        zone = str(args.zone)
+
+    # Ensure output directory exists
+    os.makedirs(args.output, exist_ok=True)
+
+    groups = read_groups(args.groups_dir, zone, args.webtype)
     gm = mask_source(np.asarray(groups['RANDITER']), args.source)
     groups = groups[gm]
 
-    raw = read_raw_min(args.raw_dir, args.class_dir, args.zone)
+    raw = read_raw_min(args.raw_dir, args.class_dir, zone)
     rm = mask_source(np.asarray(raw['RANDITER']), args.source)
     raw = raw[rm]
 
@@ -415,7 +438,7 @@ def main():
     else:
         tracers = [t for t in ORDERED_TRACERS if t in avail_set]
 
-    tag = _zone_tag(args.zone)
+    tag = _zone_tag(zone)
     out_png = os.path.join(args.output, f'groups_wedges_zone_{tag}_{args.webtype}_{args.coord}.png')
     path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z,
                        n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines,

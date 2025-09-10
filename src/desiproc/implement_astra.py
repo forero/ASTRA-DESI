@@ -124,7 +124,7 @@ def generate_pairs(tbl, n_random):
 		tids, rand_sub, coords, is_data = (data['tids'], data['rand'], data['coords'], data['is_data'])
 
 		for j in range(n_random):
-			mask = is_data | (rand_sub == j)
+			mask = is_data | (rand_sub == j)#; print(f"Processing tracer {tracer}, random iteration {j}")
 			if not mask.any():
 				continue
 			pr, cr, ru = process_delaunay(coords[mask], tids[mask], is_data[mask], j, tracer)

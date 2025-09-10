@@ -235,8 +235,7 @@ def main():
         p.add_argument('--plot-smin', type=int, default=1, help='Minimum marker size for scatter')
         p.add_argument('--plot-max-z', type=float, default=None, help='Max redshift to include in plot')
         p.add_argument('--connect-lines', action='store_true', help='Connect points in groups plot')
-        p.add_argument('--only-plot', action='store_true',
-                       help='Skip preproc and only plot')
+        p.add_argument('--only-plot', action='store_true', help='Skip preproc and only plot')
 
         p.add_argument('--release', choices=['EDR','DR1'], default='EDR', help='Data release: EDR (by rosette) or DR1 (by NGC/SGC)')
         p.add_argument('--region', choices=['N','S'], default='N', help='Region for DR1 (N=NGC, S=SGC). Ignored for EDR.')
@@ -264,9 +263,8 @@ def main():
             REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
             RANDOM_COLUMNS = REAL_COLUMNS
 
-            DEFAULT_CUTS = {'NGC1': {'RA_min':60, 'RA_max':230, 'DEC_min':-70, 'DEC_max':38, 'Z_min':0.4, 'Z_max':0.9},
-                            'NGC2': {'RA_min':140, 'RA_max':220, 'DEC_min':30, 'DEC_max':40, 'Z_min':0.4, 'Z_max':0.9},
-                            'NGC3': {'RA_min':0, 'RA_max':360, 'DEC_min':-90, 'DEC_max':90, 'Z_min':0.0, 'Z_max':5.0}}
+            DEFAULT_CUTS = {'NGC1': {'RA_min':110, 'RA_max':260, 'DEC_min':-10, 'DEC_max':34, 'Z_min':0.4, 'Z_max':0.9},
+                            'NGC2': {'RA_min':180, 'RA_max':260, 'DEC_min':30, 'DEC_max':40, 'Z_min':0.4, 'Z_max':0.9},}
             if args.config: # load external config json if prov
                 with open(args.config, 'r') as f:
                     user_cuts = json.load(f)
@@ -306,7 +304,7 @@ def main():
             if args.release.upper() == 'EDR':
                 tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out, args.n_random, TRACERS, NORTH_ROSETTES)
             else:
-                zone_value = {'NGC1': 1001, 'NGC2': 1002, 'NGC3': 1003}.get(str(z), 9999)
+                zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(str(z), 9999)
                 cuts = DEFAULT_CUTS[str(z)]
                 tbl = build_raw_region(str(z), cuts, args.region, TRACERS, real_tables, random_tables,
                                        args.raw_out, args.n_random, zone_value)
