@@ -3,7 +3,7 @@ import numpy as np
 from astropy.table import Table, vstack, join
 from sklearn.cluster import DBSCAN
 from astropy.io import fits
-import time as t
+import time as t, re
 
 
 RAW_COLS = ['TRACERTYPE','RANDITER','TARGETID','XCART','YCART','ZCART']
@@ -26,18 +26,40 @@ def _read_fits_columns(path, cols):
     return Table(subset, copy=False)
 
 
-def _get_zone_paths(raw_dir, class_dir, zone):
+def _safe_tag(tag):
+    """
+    Make a safe string tag for filenames by replacing unsafe characters with '_'.
+    
+    Args:
+        tag (str or None): Input tag string.
+    Returns:
+        str: Safe tag string prefixed with '_' if not empty, else empty string.
+    """
+    if tag is None:
+        return ''
+    safe = re.sub(r"[^A-Za-z0-9_\-\.\+]+", "_", str(tag))
+    return f'_{safe}' if safe else ''
+
+
+def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     """
     Get file paths for a given zone number or label.
+    
+    Args:
+        raw_dir (str): Directory containing raw data files.
+        class_dir (str): Directory containing classification data files.
+        zone (int or str): Zone number (int) or label (str).
+        out_tag (str or None): Optional tag to append to filenames.
+    Returns:
+        Tuple[str, str]: Paths to the raw and classification files for the zone.
     """
-    # accept ints (0-99) with zero-padding or string labels (like NGC1)
     if isinstance(zone, int):
         ztag = f'{zone:02d}'
     else:
-        # zone might be str from argparse for edr zones (rosettes)
         ztag = str(zone)
-    return (os.path.join(raw_dir, f'zone_{ztag}.fits.gz'),
-            os.path.join(class_dir, f'zone_{ztag}_class.fits.gz'),)
+    tsuf = _safe_tag(out_tag)
+    return (os.path.join(raw_dir, f'zone_{ztag}{tsuf}.fits.gz'),
+            os.path.join(class_dir, f'zone_{ztag}{tsuf}_class.fits.gz'),)
 
 
 def _read_zone_tables(raw_path, class_path):
@@ -92,8 +114,10 @@ def _split_blocks(raw_sub):
     """
     Splits the raw data into blocks based on the tracer type and random iteration.
 
-    Yields:
-        Tuple[str, int, np.ndarray]: tracer type, random iteration, and index array for the subset.
+    Args:
+        raw_sub (Table): Subset of the raw data table.
+    Returns:
+        Generator yielding tuples of (tracer type, random iteration, indices).
     """
     tr = np.asarray(raw_sub['TRACERTYPE'], dtype=str)
     ri = np.asarray(raw_sub['RANDITER'])
@@ -117,7 +141,7 @@ def _dbscan_labels(coords, eps):
     Returns:
         np.ndarray: Array of cluster labels, where -1 indicates noise.
     """
-    lab = DBSCAN(eps=eps, min_samples=1, metric='euclidean').fit(coords).labels_
+    lab = DBSCAN(eps=eps, min_samples=1, metric='euclidean', algorithm='ball_tree').fit(coords).labels_
     return lab.astype(np.int32)
 
 
@@ -225,7 +249,7 @@ def _build_block_tables(ttype, randit, webtype, tids, labels, labs,
                     join_type='left')
 
 
-def write_fits_gz(tbl, out_dir, zone, webtype):
+def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None):
     """
     Writes the table to a FITS file and compresses it with gzip.
     
@@ -238,16 +262,19 @@ def write_fits_gz(tbl, out_dir, zone, webtype):
         str: Path to the compressed FITS file.
     """
     os.makedirs(out_dir, exist_ok=True)
-    uncompressed = os.path.join(out_dir, f'zone_{(f"{zone:02d}" if isinstance(zone,int) else str(zone))}_groups_fof_{webtype}.fits')
+    tsuf = _safe_tag(out_tag)
+    uncompressed = os.path.join(out_dir, f'zone_{(f"{zone:02d}" if isinstance(zone,int) else str(zone))}{tsuf}_groups_fof_{webtype}.fits')
     compressed = uncompressed + '.gz'
+    tmp_compressed = compressed + '.tmp'
     tbl.write(uncompressed, overwrite=True)
-    with open(uncompressed, 'rb') as fi, gzip.open(compressed, 'wb') as fo:
+    with open(uncompressed, 'rb') as fi, gzip.open(tmp_compressed, 'wb') as fo:
         shutil.copyfileobj(fi, fo)
     os.remove(uncompressed)
+    os.replace(tmp_compressed, compressed)
     return compressed
 
 
-def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map, r_limit):
+def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map, r_limit, out_tag=None):
     """
     Processes a single zone to build groups based on the provided parameters.
     
@@ -264,7 +291,7 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
         str: Path to the compressed FITS file containing the groups for the zone,
         or None if no valid groups were found.
     """
-    raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone)
+    raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
     raw_tbl, cls_tbl = _read_zone_tables(raw_path, class_path)
     cls_tbl = classify_by_r(cls_tbl, r_limit)
 
@@ -305,7 +332,7 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
 
     if blocks:
         merged = vstack(blocks, metadata_conflicts='silent')
-        return write_fits_gz(merged, out_dir, zone, webtype)
+        return write_fits_gz(merged, out_dir, zone, webtype, out_tag=out_tag)
     return None
 
 
@@ -319,6 +346,7 @@ def parse_args():
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--source', choices=['data','rand','both'], default='data')
     p.add_argument('--r-limit', type=float, default=0.9)
+    p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')
     p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"ELG":10,"LRG":10,"QSO":10,"default":10}')
     return p.parse_args()
 
@@ -330,7 +358,7 @@ def main():
         out = process_zone(z, raw_dir=args.raw_dir, class_dir=args.class_dir,
                            out_dir=args.groups_dir, webtype=args.webtype,
                            source=args.source, linklen_map=linklen_map,
-                           r_limit=args.r_limit)
+                           r_limit=args.r_limit, out_tag=args.out_tag)
         if out is not None:
             print(f'---- zone {z} done: {out}')
         else:

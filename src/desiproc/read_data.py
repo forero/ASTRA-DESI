@@ -77,6 +77,8 @@ def _ensure_zone_column(tbl, zone_value):
         zone_value (int): Constant integer value to assign to ZONE.
     Returns:
         Table: Table guaranteed to have a 'ZONE' column.
+    Raises:
+        RuntimeError: If any exception occurs during the operation.
     """
     try:
         if 'ZONE' not in tbl.colnames:
@@ -97,14 +99,13 @@ def _filter_by_box(tbl, ra_min, ra_max, dec_min, dec_max, z_min=None, z_max=None
         z_min, z_max (float or None): Redshift limits; if None, Z is not filtered.
     Returns:
         Table: Filtered view of the input table.
+    Raises:
+        RuntimeError: If filtering fails.
     """
     try:
         ra = np.asarray(tbl['RA'], dtype=float)
         dec = np.asarray(tbl['DEC'], dtype=float)
         mask = (ra > ra_min) & (ra < ra_max) & (dec > dec_min) & (dec < dec_max)
-        if (z_min is not None) and (z_max is not None) and ('Z' in tbl.colnames):
-            z = np.asarray(tbl['Z'], dtype=float)
-            mask &= (z > z_min) & (z < z_max)
         return tbl[mask]
     except Exception as e:
         raise RuntimeError(f"Error filtering by box: {e}") from e
@@ -226,12 +227,13 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
 def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
     """
     DR1-friendly: process real data by REGION ('N' or 'S') and rectangular sky/redshift cuts.
+    If region is 'ALL', first concatenate N and S, then apply the cuts.
     Adds a synthetic 'ZONE' column if missing so downstream code stays compatible.
 
     Args:
         real_tables (dict): Preloaded real data tables, indexed as real_tables[tracer][region].
         tracer (str): Tracer type (e.g., 'BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO').
-        region (str): 'N' or 'S'.
+        region (str): 'N', 'S', or 'ALL' to combine both hemispheres.
         cuts (dict): {'RA_min','RA_max','DEC_min','DEC_max','Z_min','Z_max'} (Z limits optional).
         zone_value (int): Constant to assign to 'ZONE' if it does not exist (synthetic zone id).
     Returns:
@@ -239,14 +241,24 @@ def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
     Raises:
         KeyError: If tracer/region is not present.
         ValueError: If no entries after filtering.
+        RuntimeError: If any other exception occurs during processing.
     """
     try:
-        region = region.upper()
-        tbl = real_tables[tracer][region]
+        region = str(region).upper()
+        if region == 'ALL':
+            tN = real_tables[tracer].get('N')
+            tS = real_tables[tracer].get('S')
+            if (tN is None) and (tS is None):
+                raise KeyError(f'No data for tracer {tracer} in any hemisphere')
+            if (tN is not None) and (tS is not None):
+                tbl = vstack([tN, tS])
+            else:
+                tbl = tN if tN is not None else tS
+        else:
+            tbl = real_tables[tracer][region]
         sel = _filter_by_box(tbl,
                              cuts['RA_min'], cuts['RA_max'],
-                             cuts['DEC_min'], cuts['DEC_max'],
-                             cuts.get('Z_min', None), cuts.get('Z_max', None))
+                             cuts['DEC_min'], cuts['DEC_max'])
         if len(sel) == 0:
             raise ValueError(f'No entries for {tracer} in region {region} after cuts {cuts}')
         sel = _ensure_zone_column(sel, zone_value)
@@ -265,12 +277,13 @@ def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
 def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_count, zone_value=9001):
     """
     DR1-friendly: generate randoms by REGION ('N' or 'S') and rectangular sky/redshift cuts.
+    If region is 'ALL', use random tables from both hemispheres.
     Creates a synthetic 'ZONE' column (constant) if missing to keep compatibility.
 
     Args:
         random_tables (dict): Preloaded random data tables; random_tables[tracer][region] is a dict of tables.
         tracer (str): Tracer type (e.g., 'BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO').
-        region (str): 'N' or 'S'.
+        region (str): 'N', 'S', or 'ALL'.
         cuts (dict): {'RA_min','RA_max','DEC_min','DEC_max','Z_min','Z_max'} (Z limits optional).
         n_random (int): Number of random realizations to generate.
         real_count (int): Number of real points to match per realization.
@@ -280,43 +293,50 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
     Raises:
         KeyError: If no random data for the tracer/region.
         ValueError: If filtered randoms have fewer points than real_count.
+        RuntimeError: If any other exception occurs during sampling.
     """
     try:
-        region = region.upper()
-        tables = list(random_tables[tracer][region].values())
+        region = str(region).upper()
+        if region == 'ALL':
+            hemi_dict = random_tables[tracer]
+            tables = []
+            for hemi in ('N', 'S'):
+                sub = hemi_dict.get(hemi, {})
+                tables.extend(list(sub.values()))
+        else:
+            tables = list(random_tables[tracer][region].values())
         if len(tables) == 0:
             raise KeyError(f'No random tables for {tracer} in region {region}')
 
         zone_tables = []
+        total_after_cuts = 0
         for tbl in tables:
             sel = _filter_by_box(tbl,
                                  cuts['RA_min'], cuts['RA_max'],
                                  cuts['DEC_min'], cuts['DEC_max'],
                                  cuts.get('Z_min', None), cuts.get('Z_max', None))
-            if len(sel) < real_count:
-                raise ValueError(f'Region {region} randoms have only {len(sel)} points after cuts (< {real_count})')
+            if len(sel) == 0:
+                continue
             sel = _ensure_zone_column(sel, zone_value)
             zone_tables.append(sel)
+            total_after_cuts += len(sel)
 
-        n_files = len(zone_tables)
-        if n_files == 0:
+        if total_after_cuts == 0:
             raise ValueError(f'No random entries for {tracer} in region {region} after cuts {cuts}')
+        if total_after_cuts < real_count:
+            raise ValueError(f'Region {region} randoms total have only {total_after_cuts} points after cuts (< {real_count})')
 
         zone_tables_xyz = []
         for _sel in zone_tables:
             _sel_xyz = _compute_cartesian(_sel.copy())
             zone_tables_xyz.append(_sel_xyz)
+        pool = vstack(zone_tables_xyz)
 
-        samples, used = [], set()
+        samples = []
         for j in range(n_random):
-            if len(used) == n_files:
-                used.clear()
-            choices = [i for i in range(n_files) if i not in used]
-            idx = random.Random(j).choice(choices)
-            used.add(idx)
-            sel = zone_tables_xyz[idx]
-            rows = np.random.default_rng(j).choice(len(sel), real_count, replace=False)
-            samp = sel[rows]
+            rng = np.random.default_rng(j)
+            rows = rng.choice(len(pool), real_count, replace=False)
+            samp = pool[rows]
             samp['TRACERTYPE'] = f'{tracer}_RAND'
             samp['RANDITER'] = j
             samples.append(samp)

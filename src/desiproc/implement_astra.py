@@ -2,7 +2,24 @@ import numpy as np
 from astropy.table import Table
 from scipy.spatial import Delaunay
 from collections import defaultdict
-import gc
+import multiprocessing as mp, os, gc
+
+
+_GP_SHARED = None
+
+def _gp_init_worker(tids, rand_sub, coords, is_data, tracer):
+    """
+    Initializes global variables for worker processes.
+    
+    Args:
+    	tids (np.ndarray): Array of target IDs.
+    	rand_sub (np.ndarray): Array of random iteration indices.
+    	coords (np.ndarray): Array of 3D coordinates.
+    	is_data (np.ndarray): Boolean array indicating real data points.
+    	tracer (str): Tracer type string.
+    """
+    global _GP_SHARED
+    _GP_SHARED = (tids, rand_sub, coords, is_data, tracer)
 
 
 def extract_tracer_blocks(tbl):
@@ -38,25 +55,30 @@ def compute_delaunay_pairs(pts):
     """
     Computes unique pairs of points from a set of 3D coordinates using Delaunay triangulation.
 
+    Optimized: uses the CSR-like neighbor representation from SciPy's Delaunay
+    (vertex_neighbor_vertices) to avoid materializing and uniquifying all
+    simplex edges, greatly reducing memory and time for large inputs.
+
     Args:
-    	pts (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
+        pts (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
     Returns:
-    	np.ndarray: Array of unique pairs of indices representing edges in the triangulation.
+        np.ndarray: Array of unique pairs (i,j) with i<j.
     """
-    try:
-        tri = Delaunay(pts)
-        simps = tri.simplices
-    finally:
-        try:
-            del tri
-        except NameError:
-            pass
-    comb = np.array([(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)], dtype=np.int64)
-    edges = simps[:, comb].reshape(-1, 2)
-    edges.sort(axis=1)
-    pairs = np.unique(edges, axis=0)
+    tri = Delaunay(pts)
+    indptr, indices = tri.vertex_neighbor_vertices
+    n = pts.shape[0]
+    out = []
+    for i in range(n):
+        start, end = indptr[i], indptr[i+1]
+        nbrs = indices[start:end]
+        for j in nbrs:
+            if j > i:
+                out.append((i, j))
+    del tri
     gc.collect()
-    return pairs
+    if not out:
+        return np.empty((0,2), dtype=np.int64)
+    return np.asarray(out, dtype=np.int64)
 
 
 def process_delaunay(pts, tids, is_data, iteration, tracer):
@@ -103,37 +125,80 @@ def process_delaunay(pts, tids, is_data, iteration, tracer):
     return pair_rows, class_rows, r_updates
 
 
-def generate_pairs(tbl, n_random):
-	"""
-	Generates pairs of target IDs and classification data from the input table.
+def _gp_process_iter(j):
+    """
+    Worker function to process a specific random iteration.
+    
+    Args:
+    	j (int): Random iteration index.
+    Returns:
+    	tuple: Contains:
+    		- pair_rows (list): List of tuples representing pairs of target IDs and iteration.
+    		- class_rows (list): List of tuples for classification data.
+    """
+    tids, rand_sub, coords, is_data, tracer = _GP_SHARED
+    mask = is_data | (rand_sub == j)
+    if not mask.any():
+        return [], [], {}
+    return process_delaunay(coords[mask], tids[mask], is_data[mask], j, tracer)
 
-	Args:
-		tbl (Table): Astropy Table containing the data.
-		n_random (int): Number of random iterations to process.
-	Returns:
-		tuple: Contains:
-			- pair_rows (list): List of tuples representing pairs of target IDs and iteration.
-			- class_rows (list): List of tuples for classification data.
-			- r_by_tid (defaultdict): Dictionary mapping target IDs to random values.
-	"""
-	pair_rows, class_rows = [], []
-	r_by_tid = defaultdict(list)
 
-	blocks = extract_tracer_blocks(tbl)
-	for tracer, data in blocks.items():
-		tids, rand_sub, coords, is_data = (data['tids'], data['rand'], data['coords'], data['is_data'])
+def generate_pairs(tbl, n_random, n_jobs=None):
+    """
+    Generates pairs of target IDs and classification data from the input table.
 
-		for j in range(n_random):
-			mask = is_data | (rand_sub == j)#; print(f"Processing tracer {tracer}, random iteration {j}")
-			if not mask.any():
-				continue
-			pr, cr, ru = process_delaunay(coords[mask], tids[mask], is_data[mask], j, tracer)
-			pair_rows.extend(pr)
-			class_rows.extend(cr)
-			for tid, rs in ru.items():
-				r_by_tid[tid].extend(rs)
+    Args:
+        tbl (Table): Astropy Table containing the data.
+        n_random (int): Number of random iterations to process.
+    Returns:
+        tuple: Contains:
+            - pair_rows (list): List of tuples representing pairs of target IDs and iteration.
+            - class_rows (list): List of tuples for classification data.
+            - r_by_tid (defaultdict): Dictionary mapping target IDs to random values.
+    """
+    pair_rows, class_rows = [], []
+    r_by_tid = defaultdict(list)
 
-	return pair_rows, class_rows, r_by_tid
+    if n_jobs is None:
+        try:
+            cpu_env = int(os.environ.get('SLURM_CPUS_PER_TASK', '1'))
+        except Exception:
+            cpu_env = 1
+        n_jobs = max(1, min(cpu_env, int(n_random)))
+        try:
+            cap = int(os.environ.get('PAIR_NJOBS_CAP', '0'))
+            if cap > 0:
+                n_jobs = max(1, min(n_jobs, cap))
+        except Exception:
+            pass
+
+    blocks = extract_tracer_blocks(tbl)
+    for tracer, data in blocks.items():
+        tids, rand_sub, coords, is_data = (data['tids'], data['rand'], data['coords'], data['is_data'])
+
+        if n_jobs > 1:
+            with mp.get_context('fork').Pool(processes=n_jobs,
+                                             initializer=_gp_init_worker,
+                                             initargs=(tids, rand_sub, coords, is_data, tracer)) as pool:
+                for pr, cr, ru in pool.imap_unordered(_gp_process_iter, range(n_random)):
+                    if pr:
+                        pair_rows.extend(pr)
+                    if cr:
+                        class_rows.extend(cr)
+                    for tid, rs in ru.items():
+                        r_by_tid[tid].extend(rs)
+        else:
+            for j in range(n_random):
+                mask = is_data | (rand_sub == j)
+                if not mask.any():
+                    continue
+                pr, cr, ru = process_delaunay(coords[mask], tids[mask], is_data[mask], j, tracer)
+                pair_rows.extend(pr)
+                class_rows.extend(cr)
+                for tid, rs in ru.items():
+                    r_by_tid[tid].extend(rs)
+
+    return pair_rows, class_rows, r_by_tid
 
 
 def build_pairs_table(rows):
@@ -161,7 +226,119 @@ def save_pairs_fits(rows, output_path):
 		output_path (str): Path to save the FITS file.
 	"""
 	tbl = build_pairs_table(rows)
-	tbl.write(output_path, format='fits', overwrite=True)
+	_tmp = f"{output_path}.tmp"
+	try:
+		tbl.write(_tmp, format='fits', overwrite=True)
+		os.replace(_tmp, output_path)
+	except Exception:
+		try:
+			if os.path.exists(_tmp):
+				os.remove(_tmp)
+		except Exception:
+			pass
+		raise
+
+
+def load_pairs_fits(path):
+    """
+    Load an existing pairs FITS file.
+
+    Args:
+        path (str): Path to the FITS file containing pairs with columns
+            TARGETID1, TARGETID2, RANDITER.
+    Returns:
+        Table: Astropy Table with the pairs data.
+    """
+    try:
+        return Table.read(path, memmap=True)
+    except TypeError:
+        return Table.read(path)
+
+
+def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
+    """
+    Rebuild classification rows (NDATA/NRAND counts) from an existing pairs table.
+
+    This avoids recomputing Delaunay triangulations when the pairs have already
+    been generated and saved. It uses the input raw table `tbl` to determine
+    which TARGETIDs are data (RANDITER == -1) and the TRACERTYPE of each
+    TARGETID, and uses the pairs to count per-iteration degrees.
+
+    Args:
+        tbl (Table): Raw table with columns TARGETID, RANDITER, TRACERTYPE.
+        pairs_tbl (Table): Pairs table with TARGETID1, TARGETID2, RANDITER.
+        n_random (int): Number of random iterations used to generate pairs.
+    Returns:
+        list: Classification rows tuples (TARGETID, RANDITER, ISDATA, NDATA, NRAND, TRACERTYPE).
+    """
+    tids = np.asarray(tbl['TARGETID'], dtype=np.int64)
+    randiter = np.asarray(tbl['RANDITER'], dtype=np.int32)
+    trtype = np.asarray(tbl['TRACERTYPE']).astype('U24')
+
+    is_data_map = {int(t): (ri == -1) for t, ri in zip(tids, randiter)}
+    tracer_map = {int(t): str(tt) for t, tt in zip(tids, trtype)}
+
+    rand_ids_by_j = {}
+    for j in range(n_random):
+        mask = (randiter == j)
+        if mask.any():
+            rand_ids_by_j[j] = np.asarray(tids[mask], dtype=np.int64)
+        else:
+            rand_ids_by_j[j] = np.empty(0, dtype=np.int64)
+
+    data_ids = np.asarray(tids[randiter == -1], dtype=np.int64)
+
+    p_tid1 = np.asarray(pairs_tbl['TARGETID1'], dtype=np.int64)
+    p_tid2 = np.asarray(pairs_tbl['TARGETID2'], dtype=np.int64)
+    p_j = np.asarray(pairs_tbl['RANDITER'], dtype=np.int32)
+
+    class_rows = []
+
+    present_js = np.unique(p_j)
+    for j in range(n_random):
+        if j in present_js:
+            sel = (p_j == j)
+            a = p_tid1[sel]
+            b = p_tid2[sel]
+
+            if a.size > 0:
+                all_pairs_ids = np.concatenate([a, b])
+                uniq, inv = np.unique(all_pairs_ids, return_inverse=True)
+                idx_a = inv[:a.size]
+                idx_b = inv[a.size:]
+
+                total = np.zeros(uniq.size, dtype=np.int64)
+                np.add.at(total, idx_a, 1)
+                np.add.at(total, idx_b, 1)
+
+                is_data_uniq = np.fromiter((1 if is_data_map.get(int(t), False) else 0 for t in uniq),
+                                            dtype=np.int8, count=uniq.size)
+
+                ndata = np.zeros(uniq.size, dtype=np.int64)
+                np.add.at(ndata, idx_a, is_data_uniq[idx_b].astype(np.int64))
+                np.add.at(ndata, idx_b, is_data_uniq[idx_a].astype(np.int64))
+
+                total_map = {int(t): int(c) for t, c in zip(uniq.tolist(), total.tolist())}
+                ndata_map = {int(t): int(c) for t, c in zip(uniq.tolist(), ndata.tolist())}
+            else:
+                total_map, ndata_map = {}, {}
+        else:
+            total_map, ndata_map = {}, {}
+
+        for t in data_ids.tolist():
+            nd = int(ndata_map.get(int(t), 0))
+            tt = int(total_map.get(int(t), 0))
+            nr = tt - nd
+            class_rows.append((int(t), int(j), True, nd, nr, tracer_map.get(int(t), 'UNKNOWN')))
+
+        rids = rand_ids_by_j.get(j, np.empty(0, dtype=np.int64))
+        for t in rids.tolist():
+            nd = int(ndata_map.get(int(t), 0))
+            tt = int(total_map.get(int(t), 0))
+            nr = tt - nd
+            class_rows.append((int(t), int(j), False, nd, nr, tracer_map.get(int(t), 'UNKNOWN')))
+
+    return class_rows
 
 
 def build_class_table(rows):
@@ -191,7 +368,17 @@ def save_classification_fits(rows, output_path):
 		output_path (str): Path to save the FITS file.
 	"""
     tbl = build_class_table(rows)
-    tbl.write(output_path, format='fits', overwrite=True)
+    _tmp = f"{output_path}.tmp"
+    try:
+        tbl.write(_tmp, format='fits', overwrite=True)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except Exception:
+            pass
+        raise
 
 
 def build_probability_table(class_rows, r_limit=0.9):
@@ -246,4 +433,14 @@ def save_probability_fits(class_rows, output_path, r_limit=0.9):
 		    classes when computing probabilities. Defaults to 0.9.
 	"""
 	tbl = build_probability_table(class_rows, r_limit=r_limit)
-	tbl.write(output_path, format='fits', overwrite=True)
+	_tmp = f"{output_path}.tmp"
+	try:
+		tbl.write(_tmp, format='fits', overwrite=True)
+		os.replace(_tmp, output_path)
+	except Exception:
+		try:
+			if os.path.exists(_tmp):
+				os.remove(_tmp)
+		except Exception:
+			pass
+		raise
