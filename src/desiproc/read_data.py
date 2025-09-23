@@ -1,28 +1,32 @@
-from astropy.table import Table, vstack, Column
-from astropy.cosmology import Planck18
-from astropy.coordinates import SkyCoord
-import astropy.units as u
-import numpy as np, random
-
+import random
 import warnings
+
+import astropy.units as u
+import numpy as np
+from astropy.coordinates import SkyCoord
+from astropy.cosmology import Planck18
+from astropy.table import Column, Table, vstack
 from astropy.units import UnitsWarning
+
 warnings.filterwarnings('ignore', category=UnitsWarning)
 
 
 def load_table(path, columns):
     """
-    Read the FITS file and return a Table with specified columns.
-    Renames 'ROSETTE_NUMBER' to 'ZONE' if present.
+    Return a FITS table containing only the requested columns.
+
+    The function renames ``ROSETTE_NUMBER`` to ``ZONE`` when the source column is
+    present so downstream code can rely on a consistent column name.
 
     Args:
-        path (str): Path to the FITS file.
-        columns (list): List of column names to select.
+        path (str): Path to the FITS catalogue.
+        columns (list): Column names to retain.
     Returns:
-        Table: Astropy Table with selected columns.
+        Table: Table containing the selected columns.
     Raises:
         IOError: If the file cannot be read.
         KeyError: If any requested column is missing.
-        RuntimeError: If any other exception occurs during loading.
+        RuntimeError: If the filtered table cannot be produced.
     """
     try:
         tbl = Table.read(path, memmap=True)
@@ -44,14 +48,14 @@ def load_table(path, columns):
 
 def _compute_cartesian(tbl):
     """
-    Compute Cartesian coordinates (XCART, YCART, ZCART) from RA, DEC, and Z.
+    Add Cartesian coordinates (``XCART``, ``YCART``, ``ZCART``) to ``tbl``.
 
     Args:
-        tbl (Table): Astropy Table with 'RA', 'DEC', and 'Z' columns.
+        tbl (Table): Input table with ``RA``, ``DEC``, and ``Z`` columns.
     Returns:
-        Table: Input table with added Cartesian coordinates.
+        Table: The same table with Cartesian coordinates appended.
     Raises:
-        RuntimeError: If coordinate conversion fails.
+        RuntimeError: If the coordinate transformation fails.
     """
     try:
         z = np.asarray(tbl['Z'], dtype=float)
@@ -69,16 +73,15 @@ def _compute_cartesian(tbl):
 
 def _ensure_zone_column(tbl, zone_value):
     """
-    Ensure a 'ZONE' column exists. If missing, create it as a constant integer.
-    This helps keep downstream code compatible when working with DR1 (no rosettes).
+    Ensure that ``tbl`` contains a ``ZONE`` column with a constant value.
 
     Args:
-        tbl (Table): Astropy Table.
-        zone_value (int): Constant integer value to assign to ZONE.
+        tbl (Table): Table to validate.
+        zone_value (int): Value to assign when the column is missing.
     Returns:
-        Table: Table guaranteed to have a 'ZONE' column.
+        Table: Table with an explicit ``ZONE`` column.
     Raises:
-        RuntimeError: If any exception occurs during the operation.
+        RuntimeError: If the column cannot be created.
     """
     try:
         if 'ZONE' not in tbl.colnames:
@@ -90,17 +93,20 @@ def _ensure_zone_column(tbl, zone_value):
 
 def _filter_by_box(tbl, ra_min, ra_max, dec_min, dec_max, z_min=None, z_max=None):
     """
-    Filter a table by rectangular cuts in RA, DEC, and optionally Z.
+    Return rows within rectangular RA/DEC limits optionally clipped in redshift.
 
     Args:
-        tbl (Table): Input table with columns 'RA', 'DEC' and optionally 'Z'.
-        ra_min, ra_max (float): RA limits in degrees.
-        dec_min, dec_max (float): DEC limits in degrees.
-        z_min, z_max (float or None): Redshift limits; if None, Z is not filtered.
+        tbl (Table): Table containing ``RA``/``DEC`` (and optionally ``Z``).
+        ra_min (float): Lower RA bound in degrees.
+        ra_max (float): Upper RA bound in degrees.
+        dec_min (float): Lower DEC bound in degrees.
+        dec_max (float): Upper DEC bound in degrees.
+        z_min (float, optional): Lower redshift bound.
+        z_max (float, optional): Upper redshift bound.
     Returns:
-        Table: Filtered view of the input table.
+        Table: Filtered table view.
     Raises:
-        RuntimeError: If filtering fails.
+        RuntimeError: If the filtering operation fails.
     """
     try:
         ra = np.asarray(tbl['RA'], dtype=float)
@@ -113,38 +119,37 @@ def _filter_by_box(tbl, ra_min, ra_max, dec_min, dec_max, z_min=None, z_max=None
 
 def get_hemisphere(zone, north_rosettes):
     """
-    Determine the hemisphere ('N' or 'S') based on the zone number
-    and a set of known northern rosettes.
+    Return the survey hemisphere (``'N'`` or ``'S'``) for ``zone``.
 
     Args:
-        zone (int): Zone number.
-        north_rosettes (set): Set of northern rosette numbers.
+        zone (int): DESI zone identifier.
+        north_rosettes (set): Indices considered part of the northern footprint.
     Returns:
-        str: 'N' for northern hemisphere, 'S' for southern hemisphere.
+        str: ``'N'`` when the zone is northern, otherwise ``'S'``.
     Raises:
-        RuntimeError: If determination fails.
+        RuntimeError: If the hemisphere cannot be determined.
     """
     try:
-        return ('S','N')[zone in north_rosettes]
+        return ('S', 'N')[zone in north_rosettes]
     except Exception as e:
         raise RuntimeError(f'Error determining hemisphere for zone {zone}: {e}') from e
 
 
 def process_real(real_tables, tracer, zone, north_rosettes):
     """
-    Process real data for a given tracer and zone, computing Cartesian coordinates.
+    Return real objects for a zone with derived Cartesian coordinates.
 
     Args:
-        real_tables (dict): Dictionary of preloaded real data tables.
-        tracer (str): Tracer type (e.g., 'BGS_ANY', 'ELG', 'LRG', 'QSO').
-        zone (int): Zone number.
-        north_rosettes (set): Set of northern rosette numbers.
+        real_tables (dict): Preloaded real tables keyed by tracer and hemisphere.
+        tracer (str): Tracer identifier (e.g., ``'BGS_ANY'``).
+        zone (int): Zone identifier.
+        north_rosettes (set): Indices corresponding to the northern footprint.
     Returns:
-        Table: Processed table with Cartesian coordinates and tracer type.
+        Table: Real objects annotated with tracer type and ``RANDITER``.
     Raises:
-        KeyError: If no data for the tracer in the specified hemisphere.
-        ValueError: If no entries for the zone in the tracer data.
-        RuntimeError: If any other exception occurs during processing.
+        KeyError: If the tracer has no data in the required hemisphere.
+        ValueError: If the zone is empty for the tracer.
+        RuntimeError: If processing fails.
     """
     try:
         hemi = get_hemisphere(zone, north_rosettes)
@@ -154,7 +159,7 @@ def process_real(real_tables, tracer, zone, north_rosettes):
             raise ValueError(f'No entries for zone {zone} in tracer {tracer} ({hemi})')
         sel = _compute_cartesian(sel)
         sel['TRACERTYPE'] = f'{tracer}_DATA'
-        sel['RANDITER'] = -1
+        sel['RANDITER'] = np.full(len(sel), -1, dtype=np.int32)
         return sel
     except KeyError:
         raise
@@ -166,24 +171,25 @@ def process_real(real_tables, tracer, zone, north_rosettes):
 
 def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real_count):
     """
-    Generate n_random reproducible random samples for zone, matching real_count.
-        - Prefilter each random table by zone and validate size.
-        - In a single loop, pick a table via random.Random(j) (seeded),
-        then sample rows via np.random.default_rng(j).
+    Return random catalogues that mirror a zone's real sample size.
+
+    Each iteration selects a random file deterministically via ``random.Random``
+    seeded by the iteration index and samples ``real_count`` rows without
+    replacement using ``numpy.random.default_rng`` for reproducibility.
 
     Args:
-        random_tables (dict): Dictionary of preloaded random data tables.
-        tracer (str): Tracer type (e.g., 'BGS_ANY', 'ELG', 'LRG', 'QSO').
-        zone (int): Zone number.
-        north_rosettes (set): Set of northern rosette numbers.
-        n_random (int): Number of random samples to generate.
-        real_count (int): Number of real points to match.
+        random_tables (dict): Preloaded random tables keyed by tracer and hemisphere.
+        tracer (str): Tracer identifier (e.g., ``'BGS_ANY'``).
+        zone (int): Zone identifier.
+        north_rosettes (set): Indices corresponding to the northern sky footprint.
+        n_random (int): Number of random realizations to generate.
+        real_count (int): Number of objects in the matching real sample.
     Returns:
-        Table: Concatenated table of random samples with Cartesian coordinates.
+        Table: Concatenated random sample table with Cartesian coordinates.
     Raises:
-        KeyError: If no random data for the tracer in the specified hemisphere.
-        ValueError: If zone has fewer random points than real_count.
-        RuntimeError: If any other exception occurs during sampling.
+        KeyError: If the tracer lacks random tables for the required hemisphere.
+        ValueError: If any random table provides fewer than ``real_count`` rows.
+        RuntimeError: If the sampling process fails.
     """
     try:
         hemi = get_hemisphere(zone, north_rosettes)
@@ -212,7 +218,7 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
             rows = np.random.default_rng(j).choice(len(sel), real_count, replace=False)
             samp = sel[rows]
             samp['TRACERTYPE'] = f'{tracer}_RAND'
-            samp['RANDITER'] = j
+            samp['RANDITER'] = np.full(len(samp), j, dtype=np.int32)
             samples.append(samp)
 
         return vstack(samples)
@@ -226,22 +232,20 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
 
 def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
     """
-    DR1-friendly: process real data by REGION ('N' or 'S') and rectangular sky/redshift cuts.
-    If region is 'ALL', first concatenate N and S, then apply the cuts.
-    Adds a synthetic 'ZONE' column if missing so downstream code stays compatible.
+    Return real objects within a sky box for a DR1-style region selection.
 
     Args:
-        real_tables (dict): Preloaded real data tables, indexed as real_tables[tracer][region].
-        tracer (str): Tracer type (e.g., 'BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO').
-        region (str): 'N', 'S', or 'ALL' to combine both hemispheres.
-        cuts (dict): {'RA_min','RA_max','DEC_min','DEC_max','Z_min','Z_max'} (Z limits optional).
-        zone_value (int): Constant to assign to 'ZONE' if it does not exist (synthetic zone id).
+        real_tables (dict): Preloaded real tables keyed by tracer and hemisphere.
+        tracer (str): Tracer identifier (e.g., ``'BGS_BRIGHT'``).
+        region (str): Hemisphere label (``'N'``, ``'S'``, or ``'ALL'``).
+        cuts (dict): Bounding box limits with ``RA``/``DEC`` (and optionally ``Z``).
+        zone_value (int): Synthetic zone identifier to insert when missing.
     Returns:
-        Table: Processed table with Cartesian coordinates and tracer type, filtered to the box.
+        Table: Real objects rolled into a single table with Cartesian coordinates.
     Raises:
-        KeyError: If tracer/region is not present.
-        ValueError: If no entries after filtering.
-        RuntimeError: If any other exception occurs during processing.
+        KeyError: If the tracer lacks data in the requested region.
+        ValueError: If filtering yields no rows.
+        RuntimeError: If the extraction or coordinate conversion fails.
     """
     try:
         region = str(region).upper()
@@ -264,7 +268,7 @@ def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
         sel = _ensure_zone_column(sel, zone_value)
         sel = _compute_cartesian(sel)
         sel['TRACERTYPE'] = f'{tracer}_DATA'
-        sel['RANDITER'] = -1
+        sel['RANDITER'] = np.full(len(sel), -1, dtype=np.int32)
         return sel
     except KeyError:
         raise
@@ -276,24 +280,22 @@ def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
 
 def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_count, zone_value=9001):
     """
-    DR1-friendly: generate randoms by REGION ('N' or 'S') and rectangular sky/redshift cuts.
-    If region is 'ALL', use random tables from both hemispheres.
-    Creates a synthetic 'ZONE' column (constant) if missing to keep compatibility.
+    Return random catalogues matching the regional real-data selection.
 
     Args:
-        random_tables (dict): Preloaded random data tables; random_tables[tracer][region] is a dict of tables.
-        tracer (str): Tracer type (e.g., 'BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO').
-        region (str): 'N', 'S', or 'ALL'.
-        cuts (dict): {'RA_min','RA_max','DEC_min','DEC_max','Z_min','Z_max'} (Z limits optional).
+        random_tables (dict): Preloaded random tables keyed by tracer and hemisphere.
+        tracer (str): Tracer identifier.
+        region (str): Hemisphere label (``'N'``, ``'S'``, or ``'ALL'``).
+        cuts (dict): Bounding box limits with ``RA``/``DEC`` (and optionally ``Z``).
         n_random (int): Number of random realizations to generate.
-        real_count (int): Number of real points to match per realization.
-        zone_value (int): Constant to assign to 'ZONE' if it does not exist (synthetic zone id).
+        real_count (int): Number of objects per realization.
+        zone_value (int): Synthetic zone identifier in case the source lacks one.
     Returns:
-        Table: Concatenated table of random samples with Cartesian coordinates.
+        Table: Concatenated random sample table with Cartesian coordinates.
     Raises:
-        KeyError: If no random data for the tracer/region.
-        ValueError: If filtered randoms have fewer points than real_count.
-        RuntimeError: If any other exception occurs during sampling.
+        KeyError: If the tracer lacks random tables for the requested region.
+        ValueError: If the filtered random pool is too small.
+        RuntimeError: If sampling fails.
     """
     try:
         region = str(region).upper()
@@ -338,7 +340,7 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
             rows = rng.choice(len(pool), real_count, replace=False)
             samp = pool[rows]
             samp['TRACERTYPE'] = f'{tracer}_RAND'
-            samp['RANDITER'] = j
+            samp['RANDITER'] = np.full(len(samp), j, dtype=np.int32)
             samples.append(samp)
 
         return vstack(samples)

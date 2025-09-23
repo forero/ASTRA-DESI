@@ -1,114 +1,173 @@
 # ASTRA-DESI
 
-This repository provides an implementation of the **ASTRA algorithm** (https://arxiv.org/abs/2404.01124) adapted for the **Dark Energy Spectroscopic Instrument (DESI)** data.  
-It supports both the **Early Data Release (EDR)** and **Data Release 1 (DR1)**, integrating directly with DESI clustering catalogs and generating classifications of the cosmic web into **voids, sheets, filaments, and knots**.
+Implementation of the [ASTRA algorithm](https://arxiv.org/abs/2404.01124) adapted to the
+Dark Energy Spectroscopic Instrument (DESI) clustering catalogues. The pipeline supports
+both the **Early Data Release (EDR)** and **Data Release 1 (DR1)** and produces
+per-zone classifications of the cosmic web into **voids, sheets, filaments, and knots**.
 
 
-## Features
+## Requirements
 
-Full pipeline for:
-  - Preprocessing real and random DESI clustering catalogs
-  - Running ASTRA classification using Delaunay triangulation
-  - Generating **pairs**, **classification**, and **probability** tables per zone
-  - Group finding with **FoF** in each web environment
-
-Visualization tools for:
-  - Redshift and radial histograms
-  - Cumulative distribution functions (CDFs)
-  - Wedge plots of web classifications, by tracer and zone
+- Linux environment (NERSC or equivalent HPC node recommended)
+- Python 3.9+ (tested with 3.12)
+- Packages: `numpy`, `scipy`, `pandas`, `astropy`, `matplotlib`
+- Optional: `requests` for Zenodo uploads (pulled in by `zenodo_push.py`)
 
 
-## Structure
+## Repository layout
 
-- `src/desiproc/` – Core data processing:
-  - `read_data.py` – Loading and filtering DESI catalogs
-  - `implement_astra.py` – ASTRA algorithm (pairs, classification, probabilities)
-  - `gen_groups.py` – Group finding (FoF/DBSCAN) and group properties
-- `src/plot/` – Visualization scripts:
-  - `plot_extra.py` – Histograms, radial distributions, wedge plots (raw/probability)
-  - `plot_groups.py` – Wedge plots of FoF groups
-  - `plot_wedge.py` – Tracer-based wedge plots across multiple zones
-- `src/main.py` – Full pipeline driver (EDR or DR1)
-- `jobs/` – Example SLURM batch scripts for running the pipeline on NERSC
+- **`src/desiproc/`** – Core data-processing modules
+  - `read_data.py`: helpers for loading DESI clustering catalogues and building Cartesian
+    coordinates
+  - `implement_astra.py`: Delaunay-based pair generation, web-type classification, and
+    probability estimation
+  - `gen_groups.py`: FoF group finder with configurable `r` thresholds
+  - `paths.py`: canonical naming helpers for raw/classification/probability/pairs files
+- **`src/plot/`** – Visualisation entry points
+  - `common.py`: shared loaders and path resolvers used by all plotting scripts
+  - `plot_wedge.py`: tracer-by-zone wedge plots for raw classifications
+  - `plot_groups.py`: FoF group wedges and diagnostics
+  - `plot_extra.py`: histograms, CDFs, and supplementary wedges
+- **`src/main.py`** – Command-line driver that orchestrates preprocessing, pair generation,
+  classification, probabilities, and group finding (EDR or DR1)
+- **`jobs/`** – Ready-to-run scripts for either interactive shells (`run_edr.sh`) or
+  SLURM batch jobs (`run_edr.sbatch`, `run_dr1.sbatch`)
+- **`zenodo/`** – Tools to stage pipeline outputs and push them to Zenodo (`zenodo_push.py`,
+  `zenodo_upl.py`, `post_edr.sh`, and metadata templates under `zenodo/json/`)
 
 
-## Usage
+## Pipeline Outputs
 
-For **EDR** (zones by rosettes):
+Each zone produces a consistent set of artefacts stored under the release root
+(`classification/`, `probabilities/`, `pairs/`):
+
+- **Raw tables** (`raw/zone_XX*.fits.gz`): combined real + random catalogue
+- **Pairs** (`pairs/zone_XX*_pairs.fits.gz`): Delaunay edges
+- **Classification** (`classification/zone_XX_*classified.fits.gz`): counts of data/random
+  neighbours
+- **Probabilities** (`probabilities/zone_XX*_probability.fits.gz`): void/sheet/filament/knot
+  likelihoods using independent lower/upper `r` thresholds
+- **Groups** (`groups/zone_XX*_groups_fof_WEBTYPE.fits.gz`): FoF group catalogues
+- **Plots** (`figs/` or custom output): histograms, CDFs, standard wedges, FoF wedges
+
+
+## Running the pipeline
+
+### 1. Direct CLI (`src/main.py`)
+
+Key CLI options:
+
+- `--release {EDR,DR1}` selects the catalogue layout.
+- `--r-lower` and `--r-upper` control the asymmetric thresholds used when classifying
+  web types (defaults: `-0.9`, `0.9`).
+- `--tracers` can restrict processing to a subset of tracer prefixes.
+- `--plot` enables post-processing plots (written to `--plot-output` or `--groups-out`).
+- `--only-plot` skips the heavy processing steps and reuses existing outputs.
+
+**EDR example**
 
 ```bash
-python -m src.main \
-  --base-dir /path/to/edr/catalogs \
-  --raw-out /path/to/output/raw \
-  --class-out /path/to/output/class \
-  --groups-out /path/to/output/groups \
+python src/main.py \
   --release EDR \
+  --zone 0 \
+  --base-dir /path/to/edr/catalogs \
+  --raw-out /path/to/work/edr/raw \
+  --class-out /path/to/work/edr/class \
+  --groups-out /path/to/work/edr/groups \
+  --plot-output /path/to/work/edr/figs \
   --n-random 100 \
+  --r-lower -0.9 --r-upper 0.9 \
   --plot
 ```
 
-For **DR1** (zones by NGC/SGC regions):
+**DR1 example**
 
 ```bash
-python -m src.main \
-  --base-dir /path/to/dr1/catalogs \
-  --raw-out /path/to/output/raw \
-  --class-out /path/to/output/class \
-  --groups-out /path/to/output/groups \
+python src/main.py \
   --release DR1 \
-  --region N \
+  --base-dir /path/to/dr1/catalogs \
+  --raw-out /path/to/work/dr1/raw \
+  --class-out /path/to/work/dr1/class \
+  --groups-out /path/to/work/dr1/groups \
+  --plot-output /path/to/work/dr1/figs \
   --zones NGC1 NGC2 \
+  --tracers BGS_BRIGHT ELG_LOPnotqso \
   --n-random 100 \
+  --r-lower -0.8 --r-upper 0.95 \
   --plot
 ```
 
-### Plotting only (using existing outputs)
+Environment variables such as `PAIR_NJOBS_CAP` (maximum multiprocessing workers for
+pair generation) can be exported beforehand when running on shared systems. When
+`SLURM_CPUS_PER_TASK` is not set, the pipeline now defaults to using all visible CPU
+cores (`os.cpu_count`).
+
+
+### 2. Shell scripts in `jobs/`
+
+The shell helpers wrap `src/main.py` with common configurations and directory layouts.
+
+- `jobs/run_edr.sh [zone|all]` loads `python/3.12` on NERSC, points to the public EDR
+  clustering directory, and produces/plots outputs in `/pscratch/.../edr/`. The script
+  defaults to `--only-plot`, making it ideal for regenerating visualisations once the
+  heavy processing has completed.
+
+  ```bash
+  # Regenerate plots for all EDR zones
+  bash jobs/run_edr.sh all
+
+  # Regenerate plots for a single zone
+  bash jobs/run_edr.sh 05
+  ```
+
+
+### 3. SLURM batch jobs (`jobs/*.sbatch`)
+
+- `jobs/run_edr.sbatch` submits one SLURM array per EDR zone, running the full pipeline
+  (including plotting). Scratch outputs are written under `/pscratch/.../edr/`.
+- `jobs/run_dr1.sbatch` is adapted to DR1; edit the `ZLABELS` and `TRACERS_BY_ZONE`
+  arrays to match the desired zones/tracers. The script also enforces
+  `PAIR_NJOBS_CAP`, capping multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
+
+
+## Visualisation tools
+
+The plotting scripts under `src/plot/` share the loaders defined in `src/plot/common.py`.
+Key entry points:
+
+- `plot_wedge.py`: raw-classification wedges by tracer. Accepts the same release/tag
+  layout as the main pipeline.
+- `plot_groups.py`: FoF group wedges with additional diagnostics.
+- `plot_extra.py`: CDFs, histograms, and supplemental wedges. Supports on-disk caching
+  (`--cache-dir`) to avoid repeated I/O.
+
+Each script has an independent CLI.
+
+
+## Zenodo packaging (`zenodo/`)
+
+The `zenodo` directory provides automation for staging outputs and publishing them on
+Zenodo:
+
+- `zenodo_push.py`: orchestrates staging on `/pscratch`, compression of release folders,
+  and upload via the Zenodo REST API. Supports sandbox mode, `--dry-run`, metadata JSON
+  inputs (creators/related identifiers), and optional publication.
+- `zenodo_upl.py`: lower-level helpers used by `zenodo_push.py` (copying staging trees,
+  slugifying titles, etc.).
+- `post_edr.sh`: example shell wrapper invoking `zenodo_push.py` for the EDR products.
+- `json/members.json`: sample metadata template for Zenodo creators.
+
+Basic usage (sandbox upload):
 
 ```bash
-python -m src.main \
-  --raw-out /path/to/output/raw \
-  --class-out /path/to/output/class \
-  --groups-out /path/to/output/groups \
-  --only-plot \
-  --plot-output /path/to/plots
-```
-
-
-## Outputs
-
-- **Raw tables**: combined real + random catalogs per zone  
-- **Pairs files**: Delaunay-based connections
-- **Classification files**: counts and webtype assignments
-- **Probability files**: void/sheet/filament/knot probabilities
-- **Groups**: FoF groups
-- **Plots**: histograms, CDFs, and wedge diagrams
-
----
-## Data sharing on Zenodo
-
-This repository includes utility scripts to package and upload the generated data products to **Zenodo** for long-term archiving and sharing.  
-
-- A staging area is created automatically in `/pscratch/.../zenodo_staging/`, ensuring the original pipeline outputs are never modified
-- Each subfolder (`raw/`, `class/`, `groups/`) is compressed into a `.tar.gz` file (e.g., `raw.tar.gz`, `class.tar.gz`, `groups.tar.gz`)
-- These tarballs are then uploaded to Zenodo using the REST API, with metadata such as title, description, creators, keywords, and version provided via command-line arguments or JSON files
-- Authentication is handled via a Zenodo API token stored in a local file (e.g., `~/.zenodo_token`)
-
-Example (sandbox mode, publishing after upload):
-
-```bash
-python src/utils/zenodo_push.py \
-  --paths /pscratch/sd/v/vtorresg/cosmic-web/edr/raw \
-         /pscratch/sd/v/vtorresg/cosmic-web/edr/class \
-         /pscratch/sd/v/vtorresg/cosmic-web/edr/groups \
-  --pscratch-dir /pscratch/sd/v/vtorresg/cosmic-web \
-  --title "ASTRA-DESI EDR Release v0.1" \
+python zenodo/zenodo_push.py \
+  --paths /pscratch/.../edr/raw /pscratch/.../edr/class /pscratch/.../edr/groups \
+  --pscratch-dir /pscratch/.../cosmic-web \
+  --title "ASTRA-DESI EDR Release v0.2" \
   --description "Early Data Release products for ASTRA-DESI (raw, class, groups)." \
-  --creators-json ./json/members.json \
+  --creators-json zenodo/json/members.json \
   --keywords ASTRA DESI "cosmic web" \
-  --sandbox \
-  --publish \
-  --token-file ~/.zenodo_token
+  --sandbox --publish --token-file ~/.zenodo_token
 ```
 
-This will produce tarballs in the staging directory and upload them to Zenodo.  
-Use `--dry-run` to only generate the staging and tarballs without uploading.
+Add `--dry-run` to generate the staging tarballs without performing the upload.

@@ -7,13 +7,13 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAIN_SCRIPT="$PROJECT_ROOT/src/main.py"
 
 CLUSTER_DIR="/global/cfs/cdirs/desi/public/edr/vac/edr/lss/v2.0/LSScats/clustering"
-SCRATCH_BASE="/pscratch/sd/v/vtorresg/cosmic-web"
+SCRATCH_BASE="/pscratch/sd/v/vtorresg/cosmic-web-test"
 
 RAW_OUT="$SCRATCH_BASE/edr/raw"
-CLASS_OUT="$SCRATCH_BASE/edr/class"
+RELEASE_ROOT="$SCRATCH_BASE/edr/release"
 LOGDIR="$SCRATCH_BASE/edr/logs"
 
-mkdir -p "$RAW_OUT" "$CLASS_OUT" "$LOGDIR"
+mkdir -p "$RAW_OUT" "$RELEASE_ROOT" "$LOGDIR"
 
 ZONE_ARG="${1:-all}"
 
@@ -29,10 +29,11 @@ run_zone(){
 
   /usr/bin/time -f "$fmt" -o "$tlog" \
     python3 "$MAIN_SCRIPT" \
+      --release   EDR \
       --zone      "$zone" \
       --base-dir  "$CLUSTER_DIR" \
       --raw-out   "$RAW_OUT" \
-      --class-out "$CLASS_OUT" \
+      --class-out "$RELEASE_ROOT" \
       --only-plot \
       # 1>>"$LOGDIR/zone_${zone}_${ts}.out" \
       2>>"$LOGDIR/zone_${zone}.err"

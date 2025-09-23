@@ -1,41 +1,13 @@
 import os, argparse, json, time, numpy as np
 from astropy.table import vstack, join, Table
-import re
 
 from desiproc.read_data import *
 from desiproc import implement_astra as astra
 from plot.plot_groups import *
 from desiproc.gen_groups import process_zone
-
-
-def _zone_tag(z):
-    """
-    Convert a zone number to a zero-padded string.
-
-    Args:
-        z (int or str): Zone number (0-99) or label (e.g., 'NGC1').
-    Returns:
-        str: Zero-padded zone number as a string.
-    """
-    try:
-        return f'{int(z):02d}'
-    except Exception:
-        return str(z)
-
-
-def _safe_tag(tag):
-    """
-    Make a safe tag string for filenames by replacing unsafe characters with underscores.
-    
-    Args:
-        tag (str or None): Input tag string.
-    Returns:
-        str: Safe tag string prefixed with underscore, or empty string if tag is None or empty.
-    """
-    if tag is None:
-        return ''
-    safe = re.sub(r"[^A-Za-z0-9_\-\.\+]+", "_", str(tag))
-    return f'_{safe}' if safe else ''
+from desiproc.paths import (zone_tag, safe_tag, zone_prefix,
+                            classification_path, probability_path, pairs_path,
+                            ensure_release_subdirs, normalize_release_dir)
 
 
 def _read_groups_compat(groups_dir, zone, webtype, out_tag=None):
@@ -52,8 +24,8 @@ def _read_groups_compat(groups_dir, zone, webtype, out_tag=None):
     Raises:
         TypeError: If the file cannot be read.
     """
-    tag = _zone_tag(zone)
-    tsuf = _safe_tag(out_tag)
+    tag = zone_tag(zone)
+    tsuf = safe_tag(out_tag)
     path = os.path.join(groups_dir, f'zone_{tag}{tsuf}_groups_fof_{webtype}.fits.gz')
     try:
         return Table.read(path, memmap=True)
@@ -75,8 +47,8 @@ def _read_raw_min_compat(raw_dir, class_dir, zone, out_tag=None):
     Raises:
         Exception: If the file cannot be read.
     """
-    tag = _zone_tag(zone)
-    tsuf = _safe_tag(out_tag)
+    tag = zone_tag(zone)
+    tsuf = safe_tag(out_tag)
     raw_path = os.path.join(raw_dir, f'zone_{tag}{tsuf}.fits.gz')
     cols = ['TARGETID','TRACERTYPE','RANDITER','RA','DEC','Z']
     try:
@@ -126,7 +98,7 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
 
 
 def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tables, output_raw,
-                     n_random, zone_value, out_tag=None):
+                     n_random, zone_value, out_tag=None, release_tag=None):
     """
     Build a raw table for a DR1 sub-region (e.g., 'NGC1', 'NGC2') by combining real and random data
     filtered by RA/DEC/Z cuts. Tracers that yield no rows after cuts are skipped (warning), so the
@@ -167,10 +139,21 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
             raise ValueError(f'No data in region {region} for cuts {cuts} (tracers tried: {tracers})')
 
         tbl = vstack(parts)
-        tsuf = _safe_tag(out_tag)
+        if 'RANDITER' in tbl.colnames:
+            tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
+
+        tsuf = safe_tag(out_tag)
         out = os.path.join(output_raw, f'zone_{zone_label}{tsuf}.fits.gz')
         tmp = out + '.tmp'
-        tbl.write(tmp, format='fits', overwrite=True)
+
+        tbl_out = tbl.copy()
+        if 'ZONE' in tbl_out.colnames:
+            tbl_out.remove_column('ZONE')
+
+        tbl_out.meta['ZONE'] = zone_tag(zone_label)
+        tbl_out.meta['RELEASE'] = str(release_tag) if release_tag is not None else 'UNKNOWN'
+
+        tbl_out.write(tmp, format='fits', overwrite=True)
         os.replace(tmp, out)
         if skipped:
             print(f'[info] In {zone_label} skipped tracers (empty): {", ".join(skipped)}')
@@ -179,7 +162,8 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
         raise RuntimeError(f'Error building raw table for region {zone_label}: {e}') from e
 
 
-def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, tracers, north_rosettes, out_tag=None):
+def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, tracers, north_rosettes,
+                    out_tag=None, release_tag=None):
     """
     Build a raw table for a specific zone by combining real and random data.
 
@@ -205,17 +189,29 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, trac
             rpt = generate_randoms(random_tables, tr, zone, north_rosettes, n_random, count)
             parts.append(rpt)
         tbl = vstack(parts)
-        tsuf = _safe_tag(out_tag)
+        if 'RANDITER' in tbl.colnames:
+            tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
+
+        tsuf = safe_tag(out_tag)
         out = os.path.join(output_raw, f'zone_{zone:02d}{tsuf}.fits.gz')
         tmp = out + '.tmp'
-        tbl.write(tmp, format='fits', overwrite=True)
+
+        tbl_out = tbl.copy()
+        if 'ZONE' in tbl_out.colnames:
+            tbl_out.remove_column('ZONE')
+
+        tbl_out.meta['ZONE'] = zone_tag(zone)
+        tbl_out.meta['RELEASE'] = str(release_tag) if release_tag is not None else 'UNKNOWN'
+
+        tbl_out.write(tmp, format='fits', overwrite=True)
         os.replace(tmp, out)
         return tbl
     except Exception as e:
         raise RuntimeError(f'Error building raw table for zone {zone}: {e}') from e
 
 
-def classify_zone(zone, tbl, output_class, n_random, out_tag=None):
+def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
+                  out_tag=None, release_tag=None):
     """
     Classify a zone by generating pairs, classification, and probability files.
     Saves the generated files in the specified output directory.
@@ -225,39 +221,46 @@ def classify_zone(zone, tbl, output_class, n_random, out_tag=None):
         tbl (Astropy Table): Input table with real and random data.
         output_class (str): Output directory for classification files.
         n_random (int): Number of randoms per real object.
+        r_lower (float): Lower ``r`` threshold (negative).
+        r_upper (float): Upper ``r`` threshold (positive).
     Raises:
         RuntimeError: If classification or saving files fails.
     """
     try:
-        tsuf = _safe_tag(out_tag)
-        base = f'zone_{(f"{zone:02d}" if isinstance(zone, int) else str(zone))}{tsuf}'
-        pairs_path = os.path.join(output_class, f'{base}_pairs.fits.gz')
-        class_path = os.path.join(output_class, f'{base}_class.fits.gz')
-        prob_path = os.path.join(output_class, f'{base}_probability.fits.gz')
+        prefix = zone_prefix(zone, out_tag)
+        pairs_file = pairs_path(output_class, zone, out_tag)
+        class_file = classification_path(output_class, zone, out_tag)
+        prob_file = probability_path(output_class, zone, out_tag)
 
-        if os.path.exists(pairs_path):
-            print(f'[classify] Reusing existing pairs: {pairs_path}')
-            need_class = not os.path.exists(class_path)
-            need_prob = not os.path.exists(prob_path)
+        zone_header = zone_tag(zone)
+        meta = {'ZONE': zone_header, 'RELEASE': str(release_tag) if release_tag is not None else 'UNKNOWN'}
+
+        for path in (pairs_file, class_file, prob_file):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        if os.path.exists(pairs_file):
+            print(f'[classify] Reusing existing pairs: {pairs_file}')
+            need_class = not os.path.exists(class_file)
+            need_prob = not os.path.exists(prob_file)
             if need_class or need_prob:
                 try:
-                    ptbl = astra.load_pairs_fits(pairs_path)
+                    ptbl = astra.load_pairs_fits(pairs_file)
                     cr = astra.build_class_rows_from_pairs(tbl, ptbl, n_random)
-                    astra.save_classification_fits(cr, class_path)
-                    astra.save_probability_fits(cr, prob_path, r_limit=0.9)
+                    astra.save_classification_fits(cr, class_file, meta=meta)
+                    astra.save_probability_fits(cr, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
                 except Exception as e:
-                    print(f'[classify] Warning: failed to read existing pairs ({e}); recomputing pairs for {base}')
+                    print(f'[classify] Warning: failed to read existing pairs ({e}); recomputing pairs for {prefix}')
                     pr, cr, _ = astra.generate_pairs(tbl, n_random)
-                    astra.save_pairs_fits(pr, pairs_path)
-                    astra.save_classification_fits(cr, class_path)
-                    astra.save_probability_fits(cr, prob_path, r_limit=0.9)
+                    astra.save_pairs_fits(pr, pairs_file, meta=meta)
+                    astra.save_classification_fits(cr, class_file, meta=meta)
+                    astra.save_probability_fits(cr, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
             else:
-                print(f'[classify] Found class and probability files; skipping rebuild for {base}')
+                print(f'[classify] Found class and probability files; skipping rebuild for {prefix}')
         else:
             pr, cr, _ = astra.generate_pairs(tbl, n_random)
-            astra.save_pairs_fits(pr, pairs_path)
-            astra.save_classification_fits(cr, class_path)
-            astra.save_probability_fits(cr, prob_path, r_limit=0.9)
+            astra.save_pairs_fits(pr, pairs_file, meta=meta)
+            astra.save_classification_fits(cr, class_file, meta=meta)
+            astra.save_probability_fits(cr, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
     except Exception as e:
         raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
     
@@ -272,7 +275,7 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
         args (argparse.Namespace): Command-line arguments.
         plot_dir (str): Directory to save plots.
     """
-    tag = _zone_tag(z)
+    tag = zone_tag(z)
     try:
         groups = _read_groups_compat(args.groups_out, z, args.webtype, getattr(args, 'out_tag', None))
     except Exception as e:
@@ -296,10 +299,9 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
     available = tracer_prefixes(np.asarray(jtbl['TRACERTYPE']).astype(str))
     tracers = pick_tracers(available, args.plot_tracers)
 
-    tsuf = _safe_tag(getattr(args, 'out_tag', None))
+    tsuf = safe_tag(getattr(args, 'out_tag', None))
     out_png = os.path.join(plot_dir, f'groups_wedges_zone_{tag}{tsuf}_{args.webtype}.png')
     plot_wedges(jtbl, tracers, z, args.webtype, out_png, args.plot_smin, args.plot_max_z, connect_lines=args.connect_lines)
-    # print(f'----- [plot] Saved {out_png}')
 
 
 def main():
@@ -313,7 +315,12 @@ def main():
 
         p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament', help='Webtype to group')
         p.add_argument('--source', choices=['data','rand','both'], default='data', help='Use data, randoms, or both for FoF')
-        p.add_argument('--r-limit', type=float, default=0.9, help='r threshold to classify webtype')
+        p.add_argument('--r-lower', type=float, default=-0.9,
+                       help='Lower r threshold used to classify web types (default: -0.9)')
+        p.add_argument('--r-upper', type=float, default=0.9,
+                       help='Upper r threshold used to classify web types (default: 0.9)')
+        p.add_argument('--r-limit', type=float, default=None,
+                       help='[Deprecated] Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
         p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}', help='JSON-type dict of linking lengths per tracer')
 
         p.add_argument('--zone', type=int, default=None, help='Single zone to run (0...19)')
@@ -333,6 +340,13 @@ def main():
         p.add_argument('--config', type=str, default=None, help='Optional JSON file with cuts per label for DR1 (keys like NGC1/NGC2).')
 
         args = p.parse_args()
+
+        if args.r_limit is not None:
+            sym = float(abs(args.r_limit))
+            args.r_lower = -sym
+            args.r_upper = sym
+        if args.r_lower >= 0 or args.r_upper <= 0:
+            raise ValueError('--r-lower must be negative and --r-upper must be positive.')
 
         if args.release.upper() == 'EDR':
             TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
@@ -388,13 +402,20 @@ def main():
         if not args.only_plot and not args.base_dir:
             raise RuntimeError('--base-dir is required unless --only-plot is specified')
 
+        release_tag = str(args.release).upper()
+
         os.makedirs(args.raw_out, exist_ok=True)
-        os.makedirs(args.class_out, exist_ok=True)
+        class_root = normalize_release_dir(args.class_out)
+        os.makedirs(class_root, exist_ok=True)
+        ensure_release_subdirs(class_root)
         os.makedirs(args.groups_out, exist_ok=True)
+
+        args.class_out = class_root
 
         plot_dir = args.plot_output or args.groups_out
         os.makedirs(plot_dir, exist_ok=True)
 
+        print(f'--- [pipeline] Starting release {args.release.upper()} with tracers: {", ".join(SEL_TRACERS)}')
         i_t = time.time()
 
         if args.release.upper() == 'EDR':
@@ -417,26 +438,39 @@ def main():
 
         for z in zones:
             if args.release.upper() == 'EDR':
-                tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out, args.n_random, SEL_TRACERS, NORTH_ROSETTES, args.out_tag)
+                tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out,
+                                      args.n_random, SEL_TRACERS, NORTH_ROSETTES,
+                                      out_tag=args.out_tag, release_tag=release_tag)
             else:
                 zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(str(z), 9999)
                 cuts = DEFAULT_CUTS[str(z)]
                 tbl = build_raw_region(str(z), cuts, 'ALL', SEL_TRACERS, real_tables, random_tables,
-                                       args.raw_out, args.n_random, zone_value, args.out_tag)
+                                       args.raw_out, args.n_random, zone_value,
+                                       out_tag=args.out_tag, release_tag=release_tag)
+            print(f'-- [pipeline] Built raw zone {z} with {len(tbl)} rows in {time.time()-i_t:.2f} s')
+            
+            i_t = time.time()
+            classify_zone(z, tbl, args.class_out, args.n_random,
+                          args.r_lower, args.r_upper,
+                          out_tag=args.out_tag, release_tag=release_tag)
+            print(f'-- [pipeline] Classified zone {z} in {time.time()-i_t:.2f} s')
 
-            classify_zone(z, tbl, args.class_out, args.n_random, args.out_tag)
-
+            i_t = time.time()
             out_groups = process_zone(z, args.raw_out, args.class_out,
                                       args.groups_out, args.webtype, args.source,
-                                      linklen_map, args.r_limit, out_tag=args.out_tag)
+                                      linklen_map, args.r_lower, args.r_upper,
+                                      release_tag=release_tag, out_tag=args.out_tag)
+            print(f'-- [pipeline] Grouped zone {z} in {time.time()-i_t:.2f} s')
+            
+            i_t = time.time()
             if out_groups is not None:
                 tag = f'{z:02d}' if isinstance(z, int) else str(z)
-                print(f'[groups] zone {tag} in -> {out_groups}')
                 if args.plot:
                     plot_zone_wedges_for_args(z, args, plot_dir)
+                    print(f'--- [pipeline] Plotted zone {tag} in {time.time()-i_t:.2f} s')
             else:
                 tag = f'{z:02d}' if isinstance(z, int) else str(z)
-                print(f'[groups] zone {tag}: no objects with WEBTYPE={args.webtype} for {args.source} source')
+            
     except Exception as e:
         raise RuntimeError(f'Pipeline failed with: {e}') from e
 

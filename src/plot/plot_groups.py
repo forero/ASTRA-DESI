@@ -1,20 +1,16 @@
-import os, argparse, re, glob, sys
-import numpy as np
+import argparse, glob, os
+
 import matplotlib.pyplot as plt
-from astropy.table import Table, join, vstack
+import numpy as np
 from astropy.cosmology import Planck18
+from astropy.table import Table, join, vstack
 from matplotlib.lines import Line2D
 
-try:
-    from .plot_extra import get_zone_paths
-except Exception:
-    _here = os.path.abspath(os.path.dirname(__file__))
-    sys.path.append(os.path.dirname(_here))
-    from plot.plot_extra import get_zone_paths
-# plt.style.use('dark_background')
+from desiproc.paths import safe_tag, zone_tag
+from .common import resolve_raw_path
 
 plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
-                     'xtick.labelsize': 20,'ytick.labelsize': 20, 'legend.fontsize': 10,})
+                     'xtick.labelsize': 20, 'ytick.labelsize': 20, 'legend.fontsize': 10})
 
 CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
 CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
@@ -25,41 +21,25 @@ RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS','XCM','YCM','ZCM']
 main_color, sec_color = 'black', 'gray'
 # main_color, sec_color = 'white', 'gainsboro' #for dark background
+# plt.style.use('dark_background')
 
 
-def _zone_tag(zone):
-    """
-    Convert a zone number to a zero-padded string.
-
-    Args:
-        zone (int or str): Zone number (0-99) or label (e.g., 'NGC1').
-    Returns:
-        str: Zero-padded zone number as a string.
-    """
-    try:
-        return f'{int(zone):02d}'
-    except Exception:
-        return str(zone)
-
-def _safe_tag(tag):
-    if tag is None:
-        return ''
-    safe = re.sub(r"[^A-Za-z0-9_\-\.\+]+", "_", str(tag))
-    return f'_{safe}' if safe else ''
 
 def read_groups(groups_dir, zone, webtype, out_tag=None):
     """
-    Reads the groups table for a given zone and webtype.
-    
+    Return the FoF group table for ``zone`` and ``webtype``.
+
     Args:
-        groups_dir (str): Directory where the groups files are stored.
-        zone (int): Zone number or label.
-        webtype (str): Type of web structure (e.g., 'void', 'sheet', 'filament', 'knot').
+        groups_dir (str): Directory containing FoF group catalogues.
+        zone (int | str): Zone identifier.
+        webtype (str): Web structure label (``'void'``, ``'sheet'``, ``'filament'``, ``'knot'``).
+        out_tag (str | None): Optional suffix used when generating the catalogue.
     Returns:
-        Table: Astropy Table containing the groups data.
+        Table: Groups table restricted to the columns defined in ``GROUPS_COLS``.
     """
-    tag = _zone_tag(zone)
-    tsuf = _safe_tag(out_tag)
+
+    tag = zone_tag(zone)
+    tsuf = safe_tag(out_tag)
     if out_tag is not None:
         path = os.path.join(groups_dir, f'zone_{tag}{tsuf}_groups_fof_{webtype}.fits.gz')
         if os.path.exists(path):
@@ -102,55 +82,47 @@ def read_groups(groups_dir, zone, webtype, out_tag=None):
 
 def read_raw_min(raw_dir, class_dir, zone, out_tag=None):
     """
-    Reads the raw data for a given zone, filtering to include only necessary columns.
-    
-    Args:
-        raw_dir (str): Directory where the raw data files are stored.
-        class_dir (str): Directory where the class data files are stored.
-        zone (int): Zone number.
-    Returns:
-        Table: Astropy Table containing the raw data with selected columns.
-    """
-    tag = _zone_tag(zone)
-    tsuf = _safe_tag(out_tag)
-    if out_tag is not None:
-        raw_path, _ = get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
-        if os.path.exists(raw_path):
-            try:
-                return Table.read(raw_path, hdu=1, include_names=RAW_COLS, memmap=True)
-            except TypeError:
-                tbl = Table.read(raw_path, hdu=1, memmap=True)
-                missing = [c for c in RAW_COLS if c not in tbl.colnames]
-                if missing:
-                    raise KeyError(f'Missing columns {missing} in {raw_path}')
-                return tbl[RAW_COLS]
+    Return raw data restricted to ``RAW_COLS`` for plotting.
 
-    legacy = os.path.join(raw_dir, f'zone_{tag}.fits.gz')
-    if os.path.exists(legacy):
+    Args:
+        raw_dir (str): Directory containing raw catalogues.
+        class_dir (str): Directory containing classification catalogues.
+        zone (int | str): Zone identifier.
+        out_tag (str | None): Optional suffix used when generating the catalogue.
+    Returns:
+        Table: Raw table containing the columns listed in ``RAW_COLS``.
+    """
+
+    try:
+        raw_path = resolve_raw_path(raw_dir, zone, out_tag)
+        tbl = Table.read(raw_path, hdu=1, include_names=RAW_COLS, memmap=True)
+        return tbl
+    except (FileNotFoundError, TypeError):
+        pass
+
+    zone_str = zone_tag(zone)
+    legacy = os.path.join(raw_dir, f'zone_{zone_str}.fits.gz')
+    candidates = [legacy]
+    candidates.extend(sorted(glob.glob(os.path.join(raw_dir, f'zone_{zone_str}_*.fits.gz'))))
+
+    tables = []
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
         try:
-            return Table.read(legacy, hdu=1, include_names=RAW_COLS, memmap=True)
-        except TypeError:
-            tbl = Table.read(legacy, hdu=1, memmap=True)
+            tbl = Table.read(path, hdu=1, include_names=RAW_COLS, memmap=True)
+        except Exception:
+            tbl = Table.read(path, memmap=True)
             missing = [c for c in RAW_COLS if c not in tbl.colnames]
             if missing:
-                raise KeyError(f'Missing columns {missing} in {legacy}')
-            return tbl[RAW_COLS]
-
-    pattern = os.path.join(raw_dir, f'zone_{tag}_*.fits.gz')
-    files = sorted(glob.glob(pattern))
-    if not files:
-        raise FileNotFoundError(f'No raw files found for zone {tag} in {raw_dir}')
-    tables = []
-    for path in files:
-        try:
-            t = Table.read(path, hdu=1, include_names=RAW_COLS, memmap=True)
-        except TypeError:
-            t = Table.read(path, hdu=1, memmap=True)
-            missing = [c for c in RAW_COLS if c not in t.colnames]
-            if missing:
                 raise KeyError(f'Missing columns {missing} in {path}')
-            t = t[RAW_COLS]
-        tables.append(t)
+            tbl = tbl[RAW_COLS]
+        tables.append(tbl)
+
+    if not tables:
+        raise FileNotFoundError(f'No raw files found for zone {zone_str} in {raw_dir}')
+    if len(tables) == 1:
+        return tables[0]
     return vstack(tables, metadata_conflicts='silent')
 
 
@@ -373,7 +345,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     nrows, ncols = subplot_grid(len(tracers))
     fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 30*nrows), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
-    plt.suptitle(f'{webtype.capitalize()}s in zone {_zone_tag(zone)}', fontsize=27, y=1.01)
+    plt.suptitle(f'{webtype.capitalize()}s in zone {zone_tag(zone)}', fontsize=27, y=1.01)
 
     cmap = plt.get_cmap('tab20')
     palette = np.asarray(cmap.colors)
@@ -509,7 +481,6 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     fig.tight_layout()    
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close(fig)
-    print(out_png)
     return out_png
 
 
@@ -517,6 +488,11 @@ def _aggregate_group_centers(joined):
     """
     Aggregate per-group centers from the joined table (which has RA, Z, TRACERTYPE, GROUPID, NPTS).
     Returns arrays per unique group with median RA/Z and associated tracer prefix and NPTS.
+    
+    Args:
+        joined (pd.DataFrame): The joined data containing tracer information.
+    Returns:
+        tuple: A tuple containing arrays of tracer prefixes, group IDs, median RA, median Z, and number of points per group.
     """
     tr_types = np.asarray(joined['TRACERTYPE']).astype(str)
     tracers = np.char.partition(tr_types, '_')[:, 0]
@@ -544,6 +520,21 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
     """
     Plot per-group centers (median RA/z) for the selected tracers.
     Sizes points by group membership (NPTS). Reuses the wedge layout.
+    
+    Args:
+        joined (pd.DataFrame): The joined data containing tracer information.
+        tracers (list): List of tracer types to plot.
+        zone (int): The zone number to plot.
+        webtype (str): The type of web to plot.
+        out_png (str): Output file path for the plot.
+        min_npts (int): Minimum number of points in a group to be plotted.
+        max_z (float | None): Global maximum redshift cap. Per-tracer limits (TRACER_ZLIMS) are applied and this
+                              value acts as an additional upper bound.
+        n_ra (int): Number of RA ticks to draw.
+        n_z (int): Number of redshift ticks to draw.
+        coord (str): Coordinate system being used ('z' or 'dc').
+    Returns:
+        str: The output PNG file path.
     """
     ravec = np.asarray(joined['RA'], float)
     zvec = np.asarray(joined['Z'], float)
@@ -565,7 +556,7 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
     nrows, ncols = subplot_grid(len(tracers))
     fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 30*nrows), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
-    plt.suptitle(f'{webtype.capitalize()} groups (centers) in zone {_zone_tag(zone)}', fontsize=27, y=1.01)
+    plt.suptitle(f'{webtype.capitalize()} groups (centers) in zone {zone_tag(zone)}', fontsize=27, y=1.01)
 
     for i, tr in enumerate(tracers):
         tr = str(tr)
@@ -599,7 +590,6 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
     fig.tight_layout()
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close(fig)
-    print(out_png)
     return out_png
 
 
@@ -670,8 +660,8 @@ def main():
     else:
         tracers = [t for t in ORDERED_TRACERS if t in avail_set]
 
-    tag = _zone_tag(zone)
-    tsuf = _safe_tag(args.out_tag)
+    tag = zone_tag(zone)
+    tsuf = safe_tag(args.out_tag)
     out_png = os.path.join(args.output, f'groups_wedges_zone_{tag}{tsuf}_{args.webtype}_{args.coord}.png')
     path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z,
                        n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines,

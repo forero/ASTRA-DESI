@@ -1,9 +1,16 @@
-import os, argparse, gzip, shutil, json
+import argparse
+import gzip
+import json
+import os
+import shutil
+import time as t
+
 import numpy as np
-from astropy.table import Table, vstack, join
-from sklearn.cluster import DBSCAN
 from astropy.io import fits
-import time as t, re
+from astropy.table import Table, join, vstack
+from sklearn.cluster import DBSCAN
+
+from .paths import locate_classification_file, safe_tag, zone_tag
 
 
 RAW_COLS = ['TRACERTYPE','RANDITER','TARGETID','XCART','YCART','ZCART']
@@ -26,21 +33,6 @@ def _read_fits_columns(path, cols):
     return Table(subset, copy=False)
 
 
-def _safe_tag(tag):
-    """
-    Make a safe string tag for filenames by replacing unsafe characters with '_'.
-    
-    Args:
-        tag (str or None): Input tag string.
-    Returns:
-        str: Safe tag string prefixed with '_' if not empty, else empty string.
-    """
-    if tag is None:
-        return ''
-    safe = re.sub(r"[^A-Za-z0-9_\-\.\+]+", "_", str(tag))
-    return f'_{safe}' if safe else ''
-
-
 def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     """
     Get file paths for a given zone number or label.
@@ -53,13 +45,18 @@ def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     Returns:
         Tuple[str, str]: Paths to the raw and classification files for the zone.
     """
-    if isinstance(zone, int):
-        ztag = f'{zone:02d}'
+    ztag = zone_tag(zone)
+    tsuf = safe_tag(out_tag)
+    raw_base = os.path.join(raw_dir, f'zone_{ztag}{tsuf}')
+    raw_candidates = (f'{raw_base}.fits.gz', f'{raw_base}.fits')
+    for raw_path in raw_candidates:
+        if os.path.exists(raw_path):
+            break
     else:
-        ztag = str(zone)
-    tsuf = _safe_tag(out_tag)
-    return (os.path.join(raw_dir, f'zone_{ztag}{tsuf}.fits.gz'),
-            os.path.join(class_dir, f'zone_{ztag}{tsuf}_class.fits.gz'),)
+        raise FileNotFoundError(f'Raw table not found for zone {zone} with tag {out_tag}')
+
+    class_path = locate_classification_file(class_dir, zone, out_tag)
+    return raw_path, class_path
 
 
 def _read_zone_tables(raw_path, class_path):
@@ -77,34 +74,34 @@ def _read_zone_tables(raw_path, class_path):
     return raw, klass
 
 
-def classify_by_r(klass, r_limit):
+def classify_by_r(klass, r_lower, r_upper):
     """
-    Classify entries in the classification table based on the ratio of real
-    data to random data.
-    
+    Classify rows according to the ratio of real to random counts.
+
     Args:
-        klass (Table): Classification table with columns 'NDATA' and 'NRAND'.
-        r_limit (float): Threshold for classification.
+        klass (Table): Classification table with ``NDATA`` and ``NRAND`` columns.
+        r_lower (float): Lower threshold (should be negative).
+        r_upper (float): Upper threshold (should be positive).
     Returns:
-        Table: Updated classification table with a new 'WEBTYPE' column.
+        Table: Classification table with an updated ``WEBTYPE`` column.
+    Raises:
+        ValueError: If the thresholds do not straddle zero.
     """
+
+    if r_lower >= 0 or r_upper <= 0:
+        raise ValueError('r_lower must be negative and r_upper must be positive.')
+
     ndata = np.asarray(klass['NDATA'], float)
     nrand = np.asarray(klass['NRAND'], float)
     denom = ndata + nrand
     r = np.divide(ndata - nrand, denom, out=np.zeros_like(denom, dtype=float),
-                  where=(denom > 0)) #just in case denom is zero
+                  where=denom > 0,)
 
     web = np.empty(r.size, dtype='U8')
-    web[:] = ''
-    void_m = (r <= -r_limit)
-    sheet_m = (r > -r_limit) & (r < 0.0)
-    fil_m  = (r >= 0.0) & (r < r_limit)
-    knot_m = (r >= r_limit)
-
-    web[void_m] = 'void'
-    web[sheet_m] = 'sheet'
-    web[fil_m]  = 'filament'
-    web[knot_m] = 'knot'
+    web[r <= r_lower] = 'void'
+    web[(r > r_lower) & (r < 0.0)] = 'sheet'
+    web[(r >= 0.0) & (r < r_upper)] = 'filament'
+    web[r >= r_upper] = 'knot'
 
     klass['WEBTYPE'] = web
     return klass
@@ -249,23 +246,28 @@ def _build_block_tables(ttype, randit, webtype, tids, labels, labs,
                     join_type='left')
 
 
-def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None):
+def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None, release_tag=None):
     """
-    Writes the table to a FITS file and compresses it with gzip.
-    
+    Write ``tbl`` to a gzipped FITS file with zone metadata.
+
     Args:
-        tbl (Table): Astropy Table to be written.
-        out_dir (str): Output directory for the FITS file.
-        zone (int): Zone number for naming the file.
-        webtype (str): Type of web structure for naming the file.
+        tbl (Table): Group catalogue to persist.
+        out_dir (str): Destination directory.
+        zone (int | str): Zone identifier used in the filename and metadata.
+        webtype (str): Cosmic web type for the output file name.
+        out_tag (str, optional): Additional tag appended to the filename.
+        release_tag (str, optional): Release label stored in the FITS header.
     Returns:
         str: Path to the compressed FITS file.
     """
     os.makedirs(out_dir, exist_ok=True)
-    tsuf = _safe_tag(out_tag)
-    uncompressed = os.path.join(out_dir, f'zone_{(f"{zone:02d}" if isinstance(zone,int) else str(zone))}{tsuf}_groups_fof_{webtype}.fits')
+    tsuf = safe_tag(out_tag)
+    zone_str = zone_tag(zone)
+    uncompressed = os.path.join(out_dir, f'zone_{zone_str}{tsuf}_groups_fof_{webtype}.fits')
     compressed = uncompressed + '.gz'
     tmp_compressed = compressed + '.tmp'
+    tbl.meta['ZONE'] = zone_str
+    tbl.meta['RELEASE'] = str(release_tag) if release_tag is not None else ''
     tbl.write(uncompressed, overwrite=True)
     with open(uncompressed, 'rb') as fi, gzip.open(tmp_compressed, 'wb') as fo:
         shutil.copyfileobj(fi, fo)
@@ -274,26 +276,30 @@ def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None):
     return compressed
 
 
-def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map, r_limit, out_tag=None):
+def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map,
+                 r_lower, r_upper, release_tag=None, out_tag=None):
     """
-    Processes a single zone to build groups based on the provided parameters.
-    
+    Generate group catalogues for a zone.
+
     Args:
-        zone (int): Zone number to process.
-        raw_dir (str): Directory containing raw data files.
-        class_dir (str): Directory containing classification data files.
-        out_dir (str): Directory to save the output groups files.
-        webtype (str): Type of web structure to filter.
-        source (str): Source of data, either 'data', 'rand', or 'both'.
-        linklen_map (dict): Mapping of tracer types to linking lengths.
-        r_limit (float): Ratio limit for classification.
+        zone (int | str): Zone identifier to process.
+        raw_dir (str): Directory containing raw catalogues.
+        class_dir (str): Release directory containing classification products.
+        out_dir (str): Destination directory for groups.
+        webtype (str): Desired cosmic web type (e.g., ``'filament'``).
+        source (str): Source selection (``'data'``, ``'rand'``, or ``'both'``).
+        linklen_map (dict): Mapping of tracer to linking length.
+        r_lower (float): Lower threshold applied when classifying by ``r``.
+        r_upper (float): Upper threshold applied when classifying by ``r``.
+        release_tag (str, optional): Release label stored in output metadata.
+        out_tag (str, optional): Tag appended to filenames.
     Returns:
-        str: Path to the compressed FITS file containing the groups for the zone,
-        or None if no valid groups were found.
+        str | None: Path to the generated groups FITS file, or ``None`` when no
+        objects meet the criteria.
     """
     raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
     raw_tbl, cls_tbl = _read_zone_tables(raw_path, class_path)
-    cls_tbl = classify_by_r(cls_tbl, r_limit)
+    cls_tbl = classify_by_r(cls_tbl, r_lower, r_upper)
 
     ids_web = np.asarray(cls_tbl['TARGETID'][cls_tbl['WEBTYPE'] == webtype], dtype=np.int64)
     if ids_web.size == 0:
@@ -332,33 +338,50 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
 
     if blocks:
         merged = vstack(blocks, metadata_conflicts='silent')
-        return write_fits_gz(merged, out_dir, zone, webtype, out_tag=out_tag)
+        return write_fits_gz(merged, out_dir, zone, webtype,
+                             out_tag=out_tag, release_tag=release_tag)
     return None
 
 
 def parse_args():
     release_default = os.environ.get('RELEASE', 'edr')
+
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'raw'), help='Raw data dir')
-    p.add_argument('--class-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'class'), help='Classification dir')
+    p.add_argument('--class-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default), help='Release dir containing classification/probabilities/pairs')
     p.add_argument('--groups-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'groups'), help='Output groups dir')
     p.add_argument('--zones', nargs='+', type=str, default=[f"{i:02d}" for i in range(20)], help='Zone numbers or labels (e.g., 00 01 ... or NGC1 NGC2)')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--source', choices=['data','rand','both'], default='data')
-    p.add_argument('--r-limit', type=float, default=0.9)
+    p.add_argument('--r-lower', type=float, default=-0.9,
+                   help='Lower r threshold used to classify web types (default: -0.9)')
+    p.add_argument('--r-upper', type=float, default=0.9,
+                   help='Upper r threshold used to classify web types (default: 0.9)')
+    p.add_argument('--r-limit', type=float, default=None,
+                   help='[Deprecated] Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')
     p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"ELG":10,"LRG":10,"QSO":10,"default":10}')
+    p.add_argument('--release', default=release_default.upper(), help='Release tag stored in FITS metadata')
     return p.parse_args()
 
 def main():
     args = parse_args()
     linklen_map = json.loads(args.linking)
+    if args.r_limit is not None:
+        sym = float(abs(args.r_limit))
+        args.r_lower = -sym
+        args.r_upper = sym
+    if args.r_lower >= 0 or args.r_upper <= 0:
+        raise ValueError('r_lower must be negative and r_upper must be positive.')
+    release_tag = str(args.release).upper()
     init = t.time()
     for z in args.zones:
         out = process_zone(z, raw_dir=args.raw_dir, class_dir=args.class_dir,
                            out_dir=args.groups_dir, webtype=args.webtype,
                            source=args.source, linklen_map=linklen_map,
-                           r_limit=args.r_limit, out_tag=args.out_tag)
+                           r_lower=args.r_lower, r_upper=args.r_upper,
+                           release_tag=release_tag,
+                           out_tag=args.out_tag)
         if out is not None:
             print(f'---- zone {z} done: {out}')
         else:

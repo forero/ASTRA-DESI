@@ -1,10 +1,14 @@
-import os, re, argparse
+import argparse, os, re
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from astropy.table import Table
 from astropy.cosmology import Planck18
-import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+
+from desiproc.paths import normalize_release_dir, safe_tag, zone_tag
+from .common import ( load_probability_dataframe, load_raw_dataframe, resolve_class_path,
+                     resolve_probability_path, resolve_raw_path,)
 
 plt.rcParams.update({'font.family': 'serif', 'font.size': 12, 'axes.labelsize': 12,
                      'xtick.labelsize': 10, 'ytick.labelsize': 10,'legend.fontsize': 10,})
@@ -69,107 +73,59 @@ def make_output_dirs(base_out):
     os.makedirs(os.path.join(base_out, 'tracer_zone'), exist_ok=True)
 
 
-def get_zone_paths(raw_dir, class_dir, zone):
+def get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     """
-    Get the file paths for the raw and class data for a specific zone.
+    Return the paths to the raw and classification FITS files for ``zone``.
     
     Args:
-        raw_dir (str): The path to the raw data directory.
-        class_dir (str): The path to the class data directory.
-        zone (int): The zone number to process.
+        raw_dir (str): Directory containing raw catalogues.
+        class_dir (str): Directory containing classification/probabilities/pairs subfolders.
+        zone (int): The zone number.
+        out_tag (str): Optional tag used when generating the release files.
     Returns:
-        tuple: A tuple containing the raw and class data file paths.
+        tuple: A tuple containing the paths to the raw and classification FITS files.
     """
-    raw_gz = os.path.join(raw_dir, f'zone_{zone:02d}.fits.gz')
-    raw_fx = os.path.join(raw_dir, f'zone_{zone:02d}.fits')
-    cls_gz = os.path.join(class_dir, f'zone_{zone:02d}_class.fits.gz')
-    cls_fx = os.path.join(class_dir, f'zone_{zone:02d}_class.fits')
-
-    raw_path = raw_gz if os.path.exists(raw_gz) else raw_fx
-    cls_path = cls_gz if os.path.exists(cls_gz) else cls_fx
-
-    if not os.path.exists(raw_path):
-        raise FileNotFoundError(f'No RAW: {raw_gz} ni {raw_fx}')
-    if not os.path.exists(cls_path):
-        raise FileNotFoundError(f'No CLASS: {cls_gz} ni {cls_fx}')
+    raw_path = resolve_raw_path(raw_dir, zone, out_tag)
+    cls_path = resolve_class_path(class_dir, zone, out_tag)
     return raw_path, cls_path
 
 
-def get_prob_path(class_dir, zone):
+def get_prob_path(class_dir, zone, out_tag=None):
     """
-    Get the file path for the probability data for a specific zone.
-
+    Return the path to the probability FITS file for ``zone``.
+    
     Args:
-        class_dir (str): The path to the class data directory.
-        zone (int): The zone number to process.
+        class_dir (str): Directory containing classification/probabilities/pairs subfolders.
+        zone (int): The zone number.
+        out_tag (str): Optional tag used when generating the release files.
     Returns:
-        str: The file path for the probability data.
+        str: The path to the probability FITS file.
     """
-    prob_gz = os.path.join(class_dir, f'zone_{zone:02d}_probability.fits.gz')
-    prob_fx = os.path.join(class_dir, f'zone_{zone:02d}_probability.fits')
-    prob_path = prob_gz if os.path.exists(prob_gz) else prob_fx
-    if not os.path.exists(prob_path):
-        raise FileNotFoundError(f'No existe PROB: {prob_gz} ni {prob_fx}')
-    return prob_path
+    return resolve_probability_path(class_dir, zone, out_tag)
 
 
 def load_raw_df(raw_path):
     """
-    Load the raw data from a FITS file.
-
+    Load the raw catalogue into a pandas DataFrame.
+    
     Args:
-        raw_path (str): The path to the raw data file.
+        raw_path (str): The path to the raw FITS file.
     Returns:
-        pd.DataFrame: The loaded raw data as a DataFrame.
+        pd.DataFrame: The loaded raw DataFrame.
     """
-    t = Table.read(raw_path, memmap=True)
-    df = t.to_pandas()
-
-    if 'RANDITER' in df.columns:
-        df['ISDATA'] = (df['RANDITER'].to_numpy() == -1)
-    else:
-        df['ISDATA'] = True
-
-    if 'TRACERTYPE' in df.columns:
-        def _norm_tt(x):
-            if isinstance(x, (bytes, bytearray)):
-                try:
-                    x = x.decode('utf-8', errors='ignore')
-                except Exception:
-                    x = str(x)
-            return str(x).strip()
-        df['BASE'] = df['TRACERTYPE'].apply(_norm_tt)
-        df['BASE_CORE'] = df['BASE'].str.rsplit('_', n=1).str[0]
-    else:
-        df['BASE'] = 'ALL'
-        df['BASE_CORE'] = 'ALL'
-
-    if 'TARGETID' in df.columns:
-        df['TARGETID'] = df['TARGETID'].astype(np.int64)
-
-    required = ['RA', 'DEC', 'Z', 'TARGETID']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f'missing col {missing} in RAW: {raw_path}')
-    return df
+    return load_raw_dataframe(raw_path)
 
 
 def load_prob_df(prob_path):
     """
-    Load the probability data from a FITS file.
-
+    Load the probability catalogue into a pandas DataFrame.
+    
     Args:
-        prob_path (str): The path to the probability data file.
+        prob_path (str): The path to the probability FITS file.
     Returns:
-        pd.DataFrame: The loaded probability data as a DataFrame.
+        pd.DataFrame: The loaded probability DataFrame.
     """
-    t = Table.read(prob_path, memmap=True)
-    df = t.to_pandas()
-    for c in ['TARGETID','PVOID','PSHEET','PFILAMENT','PKNOT']:
-        if c not in df.columns:
-            df[c] = 0.0 if c != 'TARGETID' else df.get('TARGETID', pd.Series(dtype=np.int64))
-    df['TARGETID'] = df['TARGETID'].astype(np.int64, copy=False)
-    return df[['TARGETID','PVOID','PSHEET','PFILAMENT','PKNOT']]
+    return load_probability_dataframe(prob_path)
 
 
 def assign_most_likely_class(df_prob):
@@ -191,6 +147,13 @@ def assign_most_likely_class(df_prob):
 def _labels_for_iteration(tclass, use_isdata, iter_j):
     """
     Get the labels for a specific iteration of the classification.
+    
+    Args:
+        tclass (Table): The classification table.
+        use_isdata (bool): Whether to use data or randoms.
+        iter_j (int): The random iteration index.
+    Returns:
+        pd.DataFrame: A DataFrame with TARGETID and CLASS columns.
     """
     df = tclass.to_pandas()
     need = {'TARGETID','RANDITER','ISDATA','NDATA','NRAND'}
@@ -512,7 +475,8 @@ def plot_wedges_rand(raw_df, labels_df, zones, tracer, output_dir, n_ra=15, n_z=
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/class')
+    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr', help='Release directory containing classification/probabilities/pairs subfolders')
+    p.add_argument('--tag', default=None, help='Optional tracer/out-tag used when generating the release files')
     p.add_argument('--zones', nargs='+', type=int, default=None)
     p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs')
     p.add_argument('--bins', type=int, default=10)
@@ -525,6 +489,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    args.class_dir = normalize_release_dir(args.class_dir)
     zones = infer_zones(args.raw_dir, args.zones)
     make_output_dirs(args.output)
 
@@ -532,8 +497,8 @@ def main():
     if args.catalog == 'real':
         prob_cache = {}
         for zone in zones:
-            raw_p, _ = get_zone_paths(args.raw_dir, args.class_dir, zone)
-            prob_p = get_prob_path(args.class_dir, zone)
+            raw_p, _ = get_zone_paths(args.raw_dir, args.class_dir, zone, args.tag)
+            prob_p = get_prob_path(args.class_dir, zone, args.tag)
 
             df_raw = load_raw_df(raw_p); df_raw['ZONE'] = zone
             df_prob = load_prob_df(prob_p); df_prob['ZONE'] = zone
@@ -552,7 +517,7 @@ def main():
     else: 
         labels_cache = {}
         for zone in zones:
-            raw_p, cls_p = get_zone_paths(args.raw_dir, args.class_dir, zone)
+            raw_p, cls_p = get_zone_paths(args.raw_dir, args.class_dir, zone, args.tag)
             df_raw = load_raw_df(raw_p); df_raw['ZONE'] = zone
             tc = Table.read(cls_p, memmap=True)
             df_labels = _labels_for_iteration(tc, use_isdata=False, iter_j=args.randiter)

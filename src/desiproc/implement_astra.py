@@ -1,22 +1,25 @@
+import gc
+import multiprocessing as mp
+import os
+from collections import defaultdict
+
 import numpy as np
 from astropy.table import Table
 from scipy.spatial import Delaunay
-from collections import defaultdict
-import multiprocessing as mp, os, gc
-
 
 _GP_SHARED = None
 
+
 def _gp_init_worker(tids, rand_sub, coords, is_data, tracer):
     """
-    Initializes global variables for worker processes.
-    
+    Initialise shared worker state for multiprocessing jobs.
+
     Args:
-    	tids (np.ndarray): Array of target IDs.
-    	rand_sub (np.ndarray): Array of random iteration indices.
-    	coords (np.ndarray): Array of 3D coordinates.
-    	is_data (np.ndarray): Boolean array indicating real data points.
-    	tracer (str): Tracer type string.
+        tids (np.ndarray): Target identifiers.
+        rand_sub (np.ndarray): Random iteration numbers for each row.
+        coords (np.ndarray): Cartesian coordinates with shape ``(N, 3)``.
+        is_data (np.ndarray): Boolean mask identifying real data rows.
+        tracer (str): Tracer label associated with the block.
     """
     global _GP_SHARED
     _GP_SHARED = (tids, rand_sub, coords, is_data, tracer)
@@ -24,12 +27,13 @@ def _gp_init_worker(tids, rand_sub, coords, is_data, tracer):
 
 def extract_tracer_blocks(tbl):
     """
-    Extracts blocks of data for each tracer type from the table.
+    Group table rows by tracer prefix and return per-tracer blocks.
 
     Args:
-    	tbl (Table): Astropy Table containing the data.
+        tbl (Table): Input table containing ``TRACERTYPE`` and coordinate columns.
     Returns:
-    	dict: Dictionary with tracer types as keys and their corresponding data blocks.
+        dict: Mapping from tracer prefix to arrays of IDs, iterations, coordinates,
+        and data masks.
     """
     tracertypes = tbl['TRACERTYPE'].astype(str)
     randiters = np.asarray(tbl['RANDITER'], dtype=np.int32)
@@ -53,16 +57,15 @@ def extract_tracer_blocks(tbl):
 
 def compute_delaunay_pairs(pts):
     """
-    Computes unique pairs of points from a set of 3D coordinates using Delaunay triangulation.
+    Return unique edges from the Delaunay triangulation of ``pts``.
 
-    Optimized: uses the CSR-like neighbor representation from SciPy's Delaunay
-    (vertex_neighbor_vertices) to avoid materializing and uniquifying all
-    simplex edges, greatly reducing memory and time for large inputs.
+    The implementation leverages the CSR-like neighbour representation exposed
+    by SciPy to avoid creating and deduplicating all simplex edges explicitly.
 
     Args:
-        pts (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
+        pts (np.ndarray): Cartesian coordinates with shape ``(N, 3)``.
     Returns:
-        np.ndarray: Array of unique pairs (i,j) with i<j.
+        np.ndarray: Array of index pairs ``(i, j)`` with ``i < j``.
     """
     tri = Delaunay(pts)
     indptr, indices = tri.vertex_neighbor_vertices
@@ -83,17 +86,17 @@ def compute_delaunay_pairs(pts):
 
 def process_delaunay(pts, tids, is_data, iteration, tracer):
     """
-    Processes 3D coordinates to compute pairs, counts, and classification for a given iteration.
+    Generate pair and classification rows for a single tracer iteration.
 
     Args:
-    	pts (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
-    	tids (np.ndarray): Array of target IDs corresponding to the points.
-    	is_data (np.ndarray): Boolean array indicating whether each point is real data.
-    	iteration (int): Current iteration number for random data.
+        pts (np.ndarray): Cartesian coordinates with shape ``(N, 3)``.
+        tids (np.ndarray): Target identifiers aligned with ``pts``.
+        is_data (np.ndarray): Boolean mask identifying data rows.
+        iteration (int): Random iteration identifier.
+        tracer (str): Tracer prefix.
     Returns:
-    	tuple: Contains:
-    		- pair_rows (list): List of tuples representing pairs of target IDs and iteration.
-    		- class_rows (list): List of tuples for classification data.
+        tuple[list, list, dict]: Pair rows, classification rows, and per-target
+        random ``r`` updates.
     """
     pairs = compute_delaunay_pairs(pts)
     idx0, idx1 = pairs[:,0], pairs[:,1]
@@ -114,8 +117,8 @@ def process_delaunay(pts, tids, is_data, iteration, tracer):
 
     valid = np.nonzero(is_data & (total_count>0))[0]
     r_vals = (data_count[valid] - (total_count[valid] - data_count[valid])) / total_count[valid]
-    for i,r in zip(valid, r_vals):
-    	r_updates[int(tids[i])].append(float(r))
+    for i, r in zip(valid, r_vals):
+        r_updates[int(tids[i])].append(float(r))
 
     for i in range(n):
         class_rows.append((int(tids[i]), iteration, bool(is_data[i]),
@@ -127,14 +130,12 @@ def process_delaunay(pts, tids, is_data, iteration, tracer):
 
 def _gp_process_iter(j):
     """
-    Worker function to process a specific random iteration.
-    
+    Process a single random iteration within a worker process.
+
     Args:
-    	j (int): Random iteration index.
+        j (int): Random iteration identifier.
     Returns:
-    	tuple: Contains:
-    		- pair_rows (list): List of tuples representing pairs of target IDs and iteration.
-    		- class_rows (list): List of tuples for classification data.
+        tuple[list, list, dict]: Pair rows, classification rows, and ``r`` updates.
     """
     tids, rand_sub, coords, is_data, tracer = _GP_SHARED
     mask = is_data | (rand_sub == j)
@@ -145,32 +146,37 @@ def _gp_process_iter(j):
 
 def generate_pairs(tbl, n_random, n_jobs=None):
     """
-    Generates pairs of target IDs and classification data from the input table.
+    Run the pair-generation pipeline for all tracers in ``tbl``.
 
     Args:
-        tbl (Table): Astropy Table containing the data.
-        n_random (int): Number of random iterations to process.
+        tbl (Table): Input table containing data and random catalogues.
+        n_random (int): Total number of random iterations available.
+        n_jobs (int, optional): Parallel worker count; defaults to available CPUs.
     Returns:
-        tuple: Contains:
-            - pair_rows (list): List of tuples representing pairs of target IDs and iteration.
-            - class_rows (list): List of tuples for classification data.
-            - r_by_tid (defaultdict): Dictionary mapping target IDs to random values.
+        tuple[list, list, defaultdict]: Pair rows, classification rows, and
+        cached ``r`` updates keyed by target id.
     """
     pair_rows, class_rows = [], []
     r_by_tid = defaultdict(list)
 
     if n_jobs is None:
-        try:
-            cpu_env = int(os.environ.get('SLURM_CPUS_PER_TASK', '1'))
-        except Exception:
-            cpu_env = 1
+        env_val = os.environ.get('SLURM_CPUS_PER_TASK', '').strip()
+        if env_val:
+            try:
+                cpu_env = int(env_val)
+            except Exception:
+                cpu_env = 1
+        else:
+            cpu_env = os.cpu_count() or 1
         n_jobs = max(1, min(cpu_env, int(n_random)))
-        try:
-            cap = int(os.environ.get('PAIR_NJOBS_CAP', '0'))
-            if cap > 0:
-                n_jobs = max(1, min(n_jobs, cap))
-        except Exception:
-            pass
+        cap_val = os.environ.get('PAIR_NJOBS_CAP', '').strip()
+        if cap_val:
+            try:
+                cap = int(cap_val)
+                if cap > 0:
+                    n_jobs = max(1, min(n_jobs, cap))
+            except Exception:
+                pass
 
     blocks = extract_tracer_blocks(tbl)
     for tracer, data in blocks.items():
@@ -203,51 +209,56 @@ def generate_pairs(tbl, n_random, n_jobs=None):
 
 def build_pairs_table(rows):
     """
-    Builds a pairs table from the provided rows.
+    Construct a pairs table from ``rows``.
 
-	Args:
-		rows (list): List of tuples containing pairs data.
-	Returns:
-		Table: Astropy Table containing pairs data with columns:
-			- TARGETID1: First target ID in the pair
-			- TARGETID2: Second target ID in the pair
-			- RANDITER: Random iteration number
+    Args:
+        rows (list): Sequence of ``(targetid1, targetid2, iteration)`` tuples.
+    Returns:
+        Table: Table with ``TARGETID1``, ``TARGETID2``, and ``RANDITER`` columns.
     """
-    return Table(rows=rows, names=('TARGETID1','TARGETID2','RANDITER'),
-				 dtype=('i8','i8','i4'))
+
+    return Table(
+        rows=rows,
+        names=('TARGETID1', 'TARGETID2', 'RANDITER'),
+        dtype=('i8', 'i8', 'i4'),
+    )
 
 
-def save_pairs_fits(rows, output_path):
-	"""
-	Saves the pairs table to a FITS file.
+def save_pairs_fits(rows, output_path, meta=None):
+    """
+    Write the pairs table to ``output_path`` as a FITS file.
 
-	Args:
-		rows (list): List of tuples containing pairs data.
-		output_path (str): Path to save the FITS file.
-	"""
-	tbl = build_pairs_table(rows)
-	_tmp = f"{output_path}.tmp"
-	try:
-		tbl.write(_tmp, format='fits', overwrite=True)
-		os.replace(_tmp, output_path)
-	except Exception:
-		try:
-			if os.path.exists(_tmp):
-				os.remove(_tmp)
-		except Exception:
-			pass
-		raise
+    Args:
+        rows (list): Sequence of pair tuples.
+        output_path (str): Destination path for the FITS file.
+        meta (dict | None): Optional metadata inserted into the FITS header.
+    """
+    tbl = build_pairs_table(rows)
+    if meta:
+        for key, value in meta.items():
+            tbl.meta[key] = value
+    _tmp = f"{output_path}.tmp"
+    try:
+        tbl.write(_tmp, format='fits', overwrite=True)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except Exception:
+            pass
+        raise
 
 
 def load_pairs_fits(path):
     """
-    Load an existing pairs FITS file.
+    Load a previously written pairs FITS file.
 
     Args:
-        path (str): Path to the FITS file containing pairs with columns
-            TARGETID1, TARGETID2, RANDITER.
+        path (str): Path to the FITS file containing ``TARGETID1``, ``TARGETID2``,
+            and ``RANDITER`` columns.
     Returns:
-        Table: Astropy Table with the pairs data.
+        Table: Table with pair information.
     """
     try:
         return Table.read(path, memmap=True)
@@ -257,19 +268,14 @@ def load_pairs_fits(path):
 
 def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
     """
-    Rebuild classification rows (NDATA/NRAND counts) from an existing pairs table.
-
-    This avoids recomputing Delaunay triangulations when the pairs have already
-    been generated and saved. It uses the input raw table `tbl` to determine
-    which TARGETIDs are data (RANDITER == -1) and the TRACERTYPE of each
-    TARGETID, and uses the pairs to count per-iteration degrees.
+    Reconstruct classification rows from previously saved pairs.
 
     Args:
-        tbl (Table): Raw table with columns TARGETID, RANDITER, TRACERTYPE.
-        pairs_tbl (Table): Pairs table with TARGETID1, TARGETID2, RANDITER.
-        n_random (int): Number of random iterations used to generate pairs.
+        tbl (Table): Raw table with ``TARGETID``, ``RANDITER``, and ``TRACERTYPE``.
+        pairs_tbl (Table): Table containing pair information.
+        n_random (int): Number of random iterations present in the dataset.
     Returns:
-        list: Classification rows tuples (TARGETID, RANDITER, ISDATA, NDATA, NRAND, TRACERTYPE).
+        list[tuple]: Classification tuples ``(TARGETID, RANDITER, ISDATA, NDATA, NRAND, TRACERTYPE)``.
     """
     tids = np.asarray(tbl['TARGETID'], dtype=np.int64)
     randiter = np.asarray(tbl['RANDITER'], dtype=np.int32)
@@ -342,32 +348,36 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
 
 
 def build_class_table(rows):
-	"""
-	Builds a classification table from the provided rows.
-
-	Args:
-		rows (list): List of tuples containing classification data.
-	Returns:
-		Table: Astropy Table containing classification data with columns:
-			- TARGETID: Target ID
-			- RANDITER: Random iteration number
-			- ISDATA: Boolean indicating if the entry is real data
-			- NDATA: Number of real data points
-			- NRAND: Number of random points
-	"""
-	return Table(rows=rows, names=('TARGETID','RANDITER','ISDATA','NDATA','NRAND','TRACERTYPE'),
-                 dtype=('i8','i4','bool','i4','i4','U24'))
-
-
-def save_classification_fits(rows, output_path):
     """
-    Saves the classification table to a FITS file.
+    Construct the classification table from tuple rows.
 
-	Args:
-		rows (list): List of tuples containing classification data.
-		output_path (str): Path to save the FITS file.
-	"""
+    Args:
+        rows (list): Sequence of classification tuples.
+    Returns:
+        Table: Table with ``TARGETID``, ``RANDITER``, ``ISDATA``, ``NDATA``, ``NRAND``,
+        and ``TRACERTYPE`` columns.
+    """
+
+    return Table(
+        rows=rows,
+        names=('TARGETID', 'RANDITER', 'ISDATA', 'NDATA', 'NRAND', 'TRACERTYPE'),
+        dtype=('i8', 'i4', 'bool', 'i4', 'i4', 'U24'),
+    )
+
+
+def save_classification_fits(rows, output_path, meta=None):
+    """
+    Write the classification table to ``output_path`` as a FITS file.
+
+    Args:
+        rows (list): Classification tuples.
+        output_path (str): Destination path for the FITS file.
+        meta (dict | None): Optional metadata inserted into the FITS header.
+    """
     tbl = build_class_table(rows)
+    if meta:
+        for key, value in meta.items():
+            tbl.meta[key] = value
     _tmp = f"{output_path}.tmp"
     try:
         tbl.write(_tmp, format='fits', overwrite=True)
@@ -381,16 +391,21 @@ def save_classification_fits(rows, output_path):
         raise
 
 
-def build_probability_table(class_rows, r_limit=0.9):
+def build_probability_table(class_rows, r_lower=-0.9, r_upper=0.9):
     """
-    Builds a probability table from the classification rows.
+    Build a probability table from classification rows.
 
     Args:
-        class_rows (list): List of tuples containing classification data.
-        r_limit (float): Upper limit for the r value bins.
+        class_rows (list): Classification tuples.
+        r_lower (float): Lower ``r`` threshold (negative).
+        r_upper (float): Upper ``r`` threshold (positive).
     Returns:
-        Table: Astropy Table containing target IDs and their corresponding probabilities.
+        Table: Probability table containing ``PVOID``, ``PSHEET``, ``PFILAMENT``, ``PKNOT``.
+    Raises:
+        ValueError: If the thresholds do not straddle zero.
     """
+    if r_lower >= 0 or r_upper <= 0:
+        raise ValueError('r_lower must be negative and r_upper must be positive.')
     arr = np.asarray(class_rows, dtype=[('TARGETID','i8'), ('RANDITER','i4'),
                                         ('ISDATA','?'), ('NDATA','i4'),
                                         ('NRAND','i4'), ('TRACERTYPE','U24')])
@@ -405,7 +420,7 @@ def build_probability_table(class_rows, r_limit=0.9):
     r = np.zeros_like(denom, dtype=np.float64)
     np.divide(ndata - nrand, denom, out=r, where=(denom > 0))
 
-    classes = np.digitize(r, bins=[-r_limit, 0.0, r_limit])
+    classes = np.digitize(r, bins=[r_lower, 0.0, r_upper])
     keys = np.empty(tids.size, dtype=[('TARGETID','i8'),('TRACERTYPE','U24')])
     keys['TARGETID'] = tids
     keys['TRACERTYPE'] = trcs
@@ -422,25 +437,29 @@ def build_probability_table(class_rows, r_limit=0.9):
                   'PFILAMENT':probs[:, 2], 'PKNOT':probs[:, 3]})
 
 
-def save_probability_fits(class_rows, output_path, r_limit=0.9):
-	"""
-	Saves the probability table to a FITS file.
+def save_probability_fits(class_rows, output_path, r_lower=-0.9, r_upper=0.9, meta=None):
+    """
+    Saves the probability table to a FITS file.
 
-	Args:
-		class_rows (list): List of tuples containing classification data.
-		output_path (str): Path to save the FITS file.
-		r_limit (float, optional): Upper limit threshold used to bin r into
-		    classes when computing probabilities. Defaults to 0.9.
-	"""
-	tbl = build_probability_table(class_rows, r_limit=r_limit)
-	_tmp = f"{output_path}.tmp"
-	try:
-		tbl.write(_tmp, format='fits', overwrite=True)
-		os.replace(_tmp, output_path)
-	except Exception:
-		try:
-			if os.path.exists(_tmp):
-				os.remove(_tmp)
-		except Exception:
-			pass
-		raise
+    Args:
+        class_rows (list): List of tuples containing classification data.
+        output_path (str): Path to save the FITS file.
+        r_lower (float, optional): Lower ``r`` threshold (default: -0.9).
+        r_upper (float, optional): Upper ``r`` threshold (default: 0.9).
+        meta (dict | None): Optional metadata to inject into the FITS header.
+    """
+    tbl = build_probability_table(class_rows, r_lower=r_lower, r_upper=r_upper)
+    if meta:
+        for key, value in meta.items():
+            tbl.meta[key] = value
+    _tmp = f"{output_path}.tmp"
+    try:
+        tbl.write(_tmp, format='fits', overwrite=True)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except Exception:
+            pass
+        raise
