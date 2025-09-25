@@ -1,8 +1,8 @@
-import os, re, json, time, pathlib
+import os, re, json, time, pathlib, copy
 import shutil, pathlib, mimetypes
 from os.path import commonprefix, relpath
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 import requests
 
 
@@ -267,6 +267,72 @@ class ZenodoUploader:
         resp.raise_for_status()
         return resp.json()
 
+    def create_new_version(self, deposition_id: int) -> Dict[str, Any]:
+        """
+        Create a new draft version for an existing deposition.
+        
+        Args:
+            deposition_id (int): The ID of the existing deposition.
+        Returns:
+            Dict[str, Any]: The JSON response from Zenodo with the new draft version details.
+        """
+        url = f'{self.cfg.api}/deposit/depositions/{deposition_id}/actions/newversion'
+        resp = self._request('POST', url)
+        resp.raise_for_status()
+        data = resp.json()
+        latest_draft_url = data.get('links', {}).get('latest_draft')
+        if latest_draft_url:
+            latest_resp = self._request('GET', latest_draft_url)
+            latest_resp.raise_for_status()
+            return latest_resp.json()
+        return data
+
+    def update_deposition_metadata(self, deposition_id: int, meta: Union[DepositionMeta, Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Update metadata for an existing deposition draft.
+        
+        Args:
+            deposition_id (int): The ID of the deposition.
+            meta (Union[DepositionMeta, Dict[str, Any]]): The new metadata to set.
+        Returns:
+            Dict[str, Any]: The JSON response from Zenodo with updated deposition details.
+        """
+        url = f'{self.cfg.api}/deposit/depositions/{deposition_id}'
+        payload = meta.to_zenodo() if isinstance(meta, DepositionMeta) else meta
+        resp = self._request('PUT', url, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def delete_file(self, deposition_id: int, file_id: int) -> None:
+        """
+        Remove a file from a deposition draft.
+        
+        Args:
+            deposition_id (int): The ID of the deposition.
+            file_id (int): The ID of the file to delete.
+        Raises:
+            requests.HTTPError: If the deletion fails.
+        """
+        url = f'{self.cfg.api}/deposit/depositions/{deposition_id}/files/{file_id}'
+        resp = self._request('DELETE', url)
+        resp.raise_for_status()
+
+    def clear_deposition_files(self, deposition_id: int, files: Optional[List[Dict[str, Any]]]) -> None:
+        """
+        Delete all files listed from a deposition draft.
+        
+        Args:
+            deposition_id (int): The ID of the deposition.
+            files (Optional[List[Dict[str, Any]]]): List of file info dicts from Zenodo.
+        Raises:
+            requests.HTTPError: If any deletion fails.
+        """
+        for info in files or []:
+            file_id = info.get('id')
+            if file_id is None:
+                continue
+            self.delete_file(deposition_id, file_id)
+
     def get_deposition(self, deposition_id: int) -> Dict[str, Any]:
         """
         Retrieve details of an existing deposition by its ID.
@@ -320,10 +386,13 @@ def push_to_zenodo(token: str, base_url: str, files_on_disk: List[str], title: s
                    access_right: str = 'open', license_id: str = 'cc-by-4.0',
                    communities: Optional[List[str]] = None, publish: bool = False,
                    version: Optional[str] = None,
-                   related_identifiers: Optional[List[Dict[str, str]]] = None,) -> Dict[str, Any]:
+                   related_identifiers: Optional[List[Dict[str, str]]] = None,
+                   existing_deposition_id: Optional[int] = None,
+                   keep_existing_files: bool = False,
+                   reuse_metadata: bool = False,) -> Dict[str, Any]:
     """
     Push files to Zenodo with the given metadata.
-    
+
     Args:
         token (str): Zenodo API token.
         base_url (str): Base URL for Zenodo API (e.g., 'https://zenodo.org' or sandbox).
@@ -338,6 +407,9 @@ def push_to_zenodo(token: str, base_url: str, files_on_disk: List[str], title: s
         publish (bool): Whether to publish the deposition after upload.
         version (Optional[str]): Version string for the deposition.
         related_identifiers (Optional[List[Dict[str, str]]]): Related identifiers.
+        existing_deposition_id (Optional[int]): Existing deposition to create a new Zenodo version from.
+        keep_existing_files (bool): Keep files copied from the previous version.
+        reuse_metadata (bool): Reuse metadata already stored in the deposition.
     Returns:
         Dict[str, Any]: The JSON response from Zenodo with deposition details.
     """
@@ -349,13 +421,40 @@ def push_to_zenodo(token: str, base_url: str, files_on_disk: List[str], title: s
                           license=license_id, communities=communities, version=version,
                           related_identifiers=related_identifiers)
 
-    dep = up.create_deposition(meta)
-    bucket = dep['links']['bucket']
+    if existing_deposition_id:
+        dep = up.create_new_version(existing_deposition_id)
+        dep_id = dep.get('id')
+        if dep_id is None:
+            raise RuntimeError('Failed to create new Zenodo draft version.')
+        if reuse_metadata:
+            metadata = copy.deepcopy(dep.get('metadata') or {})
+            if not metadata:
+                raise RuntimeError('Existing deposition metadata missing; cannot reuse.')
+            metadata.pop('prereserve_doi', None)
+            metadata.pop('doi', None)
+            if version is not None:
+                metadata['version'] = version
+            meta_payload = {'metadata': metadata}
+        else:
+            meta_payload = meta
+        dep = up.update_deposition_metadata(dep_id, meta_payload)
+        if not keep_existing_files:
+            up.clear_deposition_files(dep_id, dep.get('files'))
+            dep = up.get_deposition(dep_id)
+    else:
+        dep = up.create_deposition(meta)
+        dep_id = dep.get('id')
+        if dep_id is None:
+            raise RuntimeError('Failed to create Zenodo deposition.')
+
+    bucket = dep.get('links', {}).get('bucket')
+    if not bucket:
+        raise RuntimeError('Zenodo response missing bucket upload URL.')
 
     for fpath in files_on_disk:
         up.upload_file_via_bucket(bucket, fpath)
 
     if publish:
-        dep = up.publish(dep['id'])
+        dep = up.publish(dep_id)
 
     return dep

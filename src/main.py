@@ -247,20 +247,20 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
                     ptbl = astra.load_pairs_fits(pairs_file)
                     cr = astra.build_class_rows_from_pairs(tbl, ptbl, n_random)
                     astra.save_classification_fits(cr, class_file, meta=meta)
-                    astra.save_probability_fits(cr, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                    astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
                 except Exception as e:
                     print(f'[classify] Warning: failed to read existing pairs ({e}); recomputing pairs for {prefix}')
                     pr, cr, _ = astra.generate_pairs(tbl, n_random)
                     astra.save_pairs_fits(pr, pairs_file, meta=meta)
                     astra.save_classification_fits(cr, class_file, meta=meta)
-                    astra.save_probability_fits(cr, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                    astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
             else:
                 print(f'[classify] Found class and probability files; skipping rebuild for {prefix}')
         else:
             pr, cr, _ = astra.generate_pairs(tbl, n_random)
             astra.save_pairs_fits(pr, pairs_file, meta=meta)
             astra.save_classification_fits(cr, class_file, meta=meta)
-            astra.save_probability_fits(cr, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+            astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
     except Exception as e:
         raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
     
@@ -524,7 +524,7 @@ def main():
             REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
             RANDOM_COLUMNS = REAL_COLUMNS
 
-            DEFAULT_CUTS = {'NGC1': {'RA_min':110, 'RA_max':260, 'DEC_min':-10, 'DEC_max':34},
+            DEFAULT_CUTS = {'NGC1': {'RA_min':110, 'RA_max':260, 'DEC_min':-10, 'DEC_max':8},
                             'NGC2': {'RA_min':180, 'RA_max':260, 'DEC_min':30, 'DEC_max':40}}
             if args.config: # load external config json if prov
                 with open(args.config, 'r') as f:

@@ -10,6 +10,45 @@ from scipy.spatial import Delaunay
 _GP_SHARED = None
 
 
+def _to_tracer_text(value):
+    """
+    Decode tracer values to plain Python strings.
+    
+    Args:
+        value: Input value, possibly bytes or bytearray.
+    Returns:
+        str: Decoded and stripped string, or empty string if input is None or empty.
+    Raises:
+        UnicodeDecodeError: If decoding fails for both UTF-8 and Latin-1.
+    """
+
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return value.decode('utf-8', errors='ignore').strip()
+        except Exception:
+            return value.decode('latin-1', errors='ignore').strip()
+    return str(value).strip()
+
+
+def _normalize_tracertype_label(value):
+    """
+    Normalize tracer type labels by removing '_DATA' or '_RAND' suffixes.
+    
+    Args:
+        value: Input tracer type label.
+    Returns:
+        str: Normalized tracer prefix without suffixes.
+    """
+
+    text = _to_tracer_text(value)
+    if not text:
+        return ''
+    head, sep, tail = text.rpartition('_')
+    if sep and tail.upper() in {'DATA', 'RAND'}:
+        return head
+    return text
+
+
 def _gp_init_worker(tids, rand_sub, coords, is_data, tracer):
     """
     Initialise shared worker state for multiprocessing jobs.
@@ -388,16 +427,17 @@ def save_classification_fits(rows, output_path, meta=None):
         raise
 
 
-def build_probability_table(class_rows, r_lower=-0.9, r_upper=0.9):
+def build_probability_table(class_rows, raw_table, r_lower=-0.9, r_upper=0.9):
     """
-    Build a probability table from classification rows.
+    Build a probability table aligned with the raw table rows.
 
     Args:
         class_rows (list): Classification tuples.
+        raw_table (Table): Raw table used to generate ``class_rows``.
         r_lower (float): Lower ``r`` threshold (negative).
         r_upper (float): Upper ``r`` threshold (positive).
     Returns:
-        Table: Probability table containing ``PVOID``, ``PSHEET``, ``PFILAMENT``, ``PKNOT``.
+        Table: Probability table containing probabilities for each row in ``raw_table``.
     Raises:
         ValueError: If the thresholds do not straddle zero.
     """
@@ -407,34 +447,95 @@ def build_probability_table(class_rows, r_lower=-0.9, r_upper=0.9):
                                         ('ISDATA','?'), ('NDATA','i4'),
                                         ('NRAND','i4'), ('TRACERTYPE','U24')])
 
-    m = arr['ISDATA']
-    tids = arr['TARGETID'][m]
-    trcs = arr['TRACERTYPE'][m].astype('U24')
-    ndata = arr['NDATA'][m].astype(np.float64, copy=False)
-    nrand = arr['NRAND'][m].astype(np.float64, copy=False)
+    raw_len = len(raw_table)
+    target_raw = np.asarray(raw_table['TARGETID'], dtype=np.int64)
+    randiter_raw = (np.asarray(raw_table['RANDITER'], dtype=np.int32)
+                    if 'RANDITER' in raw_table.colnames
+                    else np.full(raw_len, -1, dtype=np.int32))
+    tracers_raw = np.array([_to_tracer_text(v) for v in raw_table['TRACERTYPE']], dtype='U32') if raw_len else np.asarray([], dtype='U32')
+    isdata_raw = randiter_raw == -1
 
+    if arr.size == 0:
+        zeros = np.zeros(raw_len, dtype=np.float32)
+        return Table({'TARGETID': target_raw,
+                      'RANDITER': randiter_raw,
+                      'ISDATA': isdata_raw,
+                      'TRACERTYPE': tracers_raw,
+                      'PVOID': zeros.copy(),
+                      'PSHEET': zeros.copy(),
+                      'PFILAMENT': zeros.copy(),
+                      'PKNOT': zeros.copy()})
+
+    ndata = arr['NDATA'].astype(np.float64, copy=False)
+    nrand = arr['NRAND'].astype(np.float64, copy=False)
     denom = ndata + nrand
     r = np.zeros_like(denom, dtype=np.float64)
     np.divide(ndata - nrand, denom, out=r, where=(denom > 0))
 
     classes = np.digitize(r, bins=[r_lower, 0.0, r_upper])
-    keys = np.empty(tids.size, dtype=[('TARGETID','i8'),('TRACERTYPE','U24')])
-    keys['TARGETID'] = tids
-    keys['TRACERTYPE'] = trcs
-    uniq, inv = np.unique(keys, return_inverse=True)
-    counts = np.zeros((uniq.size, 4), dtype=np.int64)
-    np.add.at(counts, (inv, classes), 1)
+    classes = np.clip(classes, 0, 3)
 
-    total = counts.sum(axis=1, keepdims=True).astype(np.float32)
-    probs = counts.astype(np.float32)
-    np.divide(probs, total, out=probs, where=(total > 0))
+    mask_data = arr['ISDATA']
 
-    return Table({'TARGETID': uniq['TARGETID'], 'TRACERTYPE': uniq['TRACERTYPE'],
-                  'PVOID':probs[:, 0], 'PSHEET':probs[:, 1],
-                  'PFILAMENT':probs[:, 2], 'PKNOT':probs[:, 3]})
+    data_map = {}
+    if mask_data.any():
+        data_keys = np.empty(mask_data.sum(), dtype=[('TARGETID','i8'), ('TRACERTYPE','U24')])
+        data_keys['TARGETID'] = arr['TARGETID'][mask_data]
+        data_keys['TRACERTYPE'] = arr['TRACERTYPE'][mask_data]
+        uniq_data, inv_data = np.unique(data_keys, return_inverse=True)
+        counts_data = np.zeros((uniq_data.size, 4), dtype=np.int64)
+        np.add.at(counts_data, (inv_data, classes[mask_data]), 1)
+        totals_data = counts_data.sum(axis=1, keepdims=True).astype(np.float32)
+        probs_data = counts_data.astype(np.float32)
+        np.divide(probs_data, totals_data, out=probs_data, where=(totals_data > 0))
+        data_map = {(int(tid), _to_tracer_text(tracer)): probs_data[idx]
+                    for idx, (tid, tracer) in enumerate(zip(uniq_data['TARGETID'], uniq_data['TRACERTYPE']))}
+
+    mask_rand = ~mask_data
+    rand_map = {}
+    if mask_rand.any():
+        rand_keys = np.empty(mask_rand.sum(), dtype=[('TARGETID','i8'), ('TRACERTYPE','U24'), ('RANDITER','i4')])
+        rand_keys['TARGETID'] = arr['TARGETID'][mask_rand]
+        rand_keys['TRACERTYPE'] = arr['TRACERTYPE'][mask_rand]
+        rand_keys['RANDITER'] = arr['RANDITER'][mask_rand]
+        uniq_rand, inv_rand = np.unique(rand_keys, return_inverse=True)
+        counts_rand = np.zeros((uniq_rand.size, 4), dtype=np.int64)
+        np.add.at(counts_rand, (inv_rand, classes[mask_rand]), 1)
+        totals_rand = counts_rand.sum(axis=1, keepdims=True).astype(np.float32)
+        probs_rand = counts_rand.astype(np.float32)
+        np.divide(probs_rand, totals_rand, out=probs_rand, where=(totals_rand > 0))
+        rand_map = {(int(tid), _to_tracer_text(tracer), int(rj)): probs_rand[idx]
+                    for idx, (tid, tracer, rj) in enumerate(zip(uniq_rand['TARGETID'],
+                                                               uniq_rand['TRACERTYPE'],
+                                                               uniq_rand['RANDITER']))}
+
+    pvoid = np.zeros(raw_len, dtype=np.float32)
+    psheet = np.zeros(raw_len, dtype=np.float32)
+    pfilament = np.zeros(raw_len, dtype=np.float32)
+    pknot = np.zeros(raw_len, dtype=np.float32)
+
+    for idx in range(raw_len):
+        tid = int(target_raw[idx])
+        tracer_full = tracers_raw[idx]
+        base = _normalize_tracertype_label(tracer_full)
+        if isdata_raw[idx]:
+            probs = data_map.get((tid, base))
+        else:
+            probs = rand_map.get((tid, base, int(randiter_raw[idx])))
+        if probs is not None:
+            pvoid[idx], psheet[idx], pfilament[idx], pknot[idx] = probs
+
+    return Table({'TARGETID': target_raw,
+                  'RANDITER': randiter_raw,
+                  'ISDATA': isdata_raw,
+                  'TRACERTYPE': tracers_raw,
+                  'PVOID': pvoid,
+                  'PSHEET': psheet,
+                  'PFILAMENT': pfilament,
+                  'PKNOT': pknot})
 
 
-def save_probability_fits(class_rows, output_path, r_lower=-0.9, r_upper=0.9, meta=None):
+def save_probability_fits(class_rows, raw_table, output_path, r_lower=-0.9, r_upper=0.9, meta=None):
     """
     Saves the probability table to a FITS file.
 
@@ -445,7 +546,7 @@ def save_probability_fits(class_rows, output_path, r_lower=-0.9, r_upper=0.9, me
         r_upper (float, optional): Upper ``r`` threshold (default: 0.9).
         meta (dict | None): Optional metadata to inject into the FITS header.
     """
-    tbl = build_probability_table(class_rows, r_lower=r_lower, r_upper=r_upper)
+    tbl = build_probability_table(class_rows, raw_table, r_lower=r_lower, r_upper=r_upper)
     if meta:
         for key, value in meta.items():
             tbl.meta[key] = value

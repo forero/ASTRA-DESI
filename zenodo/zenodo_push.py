@@ -28,6 +28,12 @@ def parse_args():
     p.add_argument('--license', default='cc-by-4.0')
     p.add_argument('--version', default=None)
     p.add_argument('--related-identifiers-json', default=None, help='Json for other identifiers')
+    p.add_argument('--existing-deposition-id', type=int, default=None,
+                   help='Existing Zenodo deposition ID to create a new version')
+    p.add_argument('--keep-existing-files', action='store_true',
+                   help='Keep files carried over from the previous version when using --existing-deposition-id')
+    p.add_argument('--reuse-metadata', action='store_true',
+                   help='Reuse metadata already stored in the existing deposition')
 
     p.add_argument('--publish', action='store_true', help='Publish record after uploading')
     p.add_argument('--sandbox', action='store_true', help='Use https://sandbox.zenodo.org')
@@ -229,7 +235,8 @@ def main():
                          title=args.title, description=description, creators=creators,
                          keywords=args.keywords, access_right=args.access_right, license_id=args.license,
                          communities=args.communities, publish=args.publish, version=args.version,
-                         related_identifiers=related)
+                         related_identifiers=related, existing_deposition_id=args.existing_deposition_id,
+                         keep_existing_files=args.keep_existing_files, reuse_metadata=args.reuse_metadata)
 
     out = {'staging_dir': staging_dir,
            'deposition_id': dep.get('id'),

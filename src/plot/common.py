@@ -110,12 +110,13 @@ def load_raw_dataframe(raw_path):
     return frame
 
 
-def load_probability_dataframe(prob_path):
+def load_probability_dataframe(prob_path, include_random=False):
     """
     Load the probability FITS table into a pandas DataFrame.
-    
+
     Args:
         prob_path (str): Path to the probability FITS file.
+        include_random (bool): Whether to retain random rows and duplicates.
     Returns:
         pd.DataFrame: DataFrame containing the probability table with columns:
             'TARGETID' (int64), 'PVOID' (float), 'PSHEET' (float),
@@ -123,10 +124,18 @@ def load_probability_dataframe(prob_path):
     """
     table = Table.read(prob_path, memmap=True)
     frame = table.to_pandas()
+    if not include_random:
+        if 'ISDATA' in frame.columns:
+            frame = frame[frame['ISDATA'] == True]
+        if 'TARGETID' in frame.columns:
+            frame = frame.drop_duplicates(subset=['TARGETID'], keep='first')
     for column in ('TARGETID', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT'):
         if column not in frame.columns:
             frame[column] = 0.0 if column != 'TARGETID' else frame.get('TARGETID', pd.Series(dtype=np.int64))
     frame['TARGETID'] = frame['TARGETID'].astype(np.int64, copy=False)
+    if include_random:
+        cols = [c for c in ('TARGETID', 'TRACERTYPE', 'RANDITER', 'ISDATA', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT') if c in frame.columns]
+        return frame[cols]
     return frame[['TARGETID', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']]
 
 

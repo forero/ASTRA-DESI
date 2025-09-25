@@ -10,6 +10,16 @@ if [[ "${INCLUDE_FIGS:-0}" == "1" ]]; then
   EXTRA_FLAGS+=(--include-figs)
 fi
 
+if [[ -n "${EXISTING_DEPOSITION_ID:-}" ]]; then
+  EXTRA_FLAGS+=(--existing-deposition-id "${EXISTING_DEPOSITION_ID}")
+  if [[ "${KEEP_EXISTING_FILES:-0}" == "1" ]]; then
+    EXTRA_FLAGS+=(--keep-existing-files)
+  fi
+  if [[ "${REUSE_METADATA:-0}" == "1" ]]; then
+    EXTRA_FLAGS+=(--reuse-metadata)
+  fi
+fi
+
 PSCRATCH_DIR=${PSCRATCH_DIR:-/pscratch/sd/v/vtorresg/cosmic-web}
 
 RELEASE_VERSION=${RELEASE_VERSION:-v1.0}
@@ -21,6 +31,10 @@ KEYWORDS=("ASTRA" "DESI" "cosmic-web" "LSS" "DR1")
 KEYWORD_ARGS=()
 if ((${#KEYWORDS[@]} > 0)); then
   KEYWORD_ARGS=(--keywords "${KEYWORDS[@]}")
+fi
+
+if [[ -n "${ZENODO_VERSION:-}" ]]; then
+  EXTRA_FLAGS+=(--version "${ZENODO_VERSION}")
 fi
 
 python "${SCRIPT_DIR}/zenodo_push.py" \
