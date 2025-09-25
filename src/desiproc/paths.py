@@ -1,22 +1,20 @@
 import os, re
 
-__all__ = [
-    "zone_tag",
-    "safe_tag",
-    "tracer_tag",
-    "zone_prefix",
-    "classification_filename",
-    "probability_filename",
-    "pairs_filename",
-    "classification_path",
-    "probability_path",
-    "pairs_path",
-    "ensure_release_subdirs",
-    "locate_classification_file",
-    "locate_probability_file",
-    "locate_pairs_file",
-    "normalize_release_dir",
-]
+__all__ = ["zone_tag",
+           "safe_tag",
+           "tracer_tag",
+           "zone_prefix",
+           "classification_filename",
+           "probability_filename",
+           "pairs_filename",
+           "classification_path",
+           "probability_path",
+           "pairs_path",
+           "ensure_release_subdirs",
+           "locate_classification_file",
+           "locate_probability_file",
+           "locate_pairs_file",
+           "normalize_release_dir"]
 
 
 _SAFE_PATTERN = re.compile(r"[^A-Za-z0-9_\\-\\.\\+]+")
@@ -90,7 +88,9 @@ def classification_filename(zone, tag=None):
     Returns:
         str: Classification filename.
     """
-    return f"zone_{zone_tag(zone)}_{tracer_tag(tag)}_classified.fits.gz"
+    tracer = tracer_tag(tag)
+    suffix = '' if tracer == 'combined' else f'_{tracer}'
+    return f"zone_{zone_tag(zone)}{suffix}_classified.fits.gz"
 
 
 def probability_filename(zone, tag=None):

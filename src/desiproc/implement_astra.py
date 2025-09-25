@@ -358,11 +358,8 @@ def build_class_table(rows):
         and ``TRACERTYPE`` columns.
     """
 
-    return Table(
-        rows=rows,
-        names=('TARGETID', 'RANDITER', 'ISDATA', 'NDATA', 'NRAND', 'TRACERTYPE'),
-        dtype=('i8', 'i4', 'bool', 'i4', 'i4', 'U24'),
-    )
+    return Table(rows=rows, names=('TARGETID', 'RANDITER', 'ISDATA', 'NDATA', 'NRAND', 'TRACERTYPE'),
+                 dtype=('i8', 'i4', 'bool', 'i4', 'i4', 'U24'))
 
 
 def save_classification_fits(rows, output_path, meta=None):

@@ -5,14 +5,21 @@ from typing import List, Dict, Optional
 
 from zenodo_upl import (ensure_pscratch_copy, push_to_zenodo, slugify)
 
+DEFAULT_RELEASE_SUBDIRS = ('raw', 'classification', 'probabilities', 'pairs', 'groups')
+
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--paths', nargs='+', required=True,help='Absolute path for files')
+    p.add_argument('--paths', nargs='+', help='Absolute path for files or directories to upload')
+    p.add_argument('--release-root', default=None,
+                   help='Base directory containing the standard EDR layout (raw/, classification/, probabilities/, pairs/, groups/)')
+    p.add_argument('--include-figs', action='store_true',
+                   help='Include the figs/ subdirectory when --release-root is provided and the folder exists')
     p.add_argument('--pscratch-dir', required=True, help='Nersc base at /pscratch to create temp folder')
-    p.add_argument('--keep-tree', action='store_true', help='Preserve nersc structure (raw/, class/, ...).')
+    p.add_argument('--keep-tree', action='store_true', help='Preserve directory structure (e.g., raw/, classification/, probabilities/).')
     p.add_argument('--title', required=True, help='Zenodo record title')
-    p.add_argument('--description', required=True, help='Record description')
+    p.add_argument('--description', default=None, help='Record description (plain text or HTML)')
+    p.add_argument('--description-file', default=None, help='Path to a file containing the record description (overrides --description)')
     p.add_argument('--creators-json', required=True, help='Json of members info or path')
 
     p.add_argument('--keywords', nargs='*', default=None)
@@ -29,7 +36,12 @@ def parse_args():
     p.add_argument('--token-env', default='ZENODO_TOKEN', help='Env variable for token')
     p.add_argument('--token-file', default=None, help='Plain text file with token')
 
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.paths and not args.release_root:
+        p.error('specify --paths and/or --release-root to select content to upload')
+    if not args.description and not args.description_file:
+        p.error('provide --description and/or --description-file for the Zenodo record')
+    return args
 
 
 def _make_folder_tarballs(staging_dir: str) -> List[str]:
@@ -103,6 +115,68 @@ def _get_token(env_name: str, token_file: Optional[str]) -> str:
     raise SystemExit(f'ERROR: not a valid token. Define venv {env_name} or --token-file PATH.')
 
 
+def _resolve_description(text: Optional[str], path: Optional[str]) -> str:
+    """
+    Resolve the description text from a string or a file path.
+    
+    Args:
+        text (Optional[str]): The description text.
+        path (Optional[str]): The path to a file containing the description.
+    Returns:
+        str: The resolved description text.
+    Raises:
+        SystemExit: If neither the text nor the file provides a valid description.
+    """
+    if path:
+        file_path = Path(path).expanduser().resolve()
+        if not file_path.exists():
+            raise SystemExit(f'ERROR: description file not found: {file_path}')
+        return file_path.read_text(encoding='utf-8')
+    if text:
+        return text
+    raise SystemExit('ERROR: description text not provided. Use --description or --description-file.')
+
+
+def _collect_release_paths(release_root: str, include_figs: bool) -> List[str]:
+    """
+    Collect the paths to the release subdirectories to include in the upload.
+    
+    Args:
+        release_root (str): The root directory of the release.
+        include_figs (bool): Whether to include the 'figs' subdirectory if it exists.
+    Returns:
+        List[str]: A list of paths to the selected subdirectories.
+    Raises:
+        FileNotFoundError: If the release root directory does not exist.
+    """
+    root = Path(release_root).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f'Release root not found: {root}')
+
+    selected: List[str] = []
+    missing = []
+    for sub in DEFAULT_RELEASE_SUBDIRS:
+        candidate = root / sub
+        if candidate.exists():
+            selected.append(str(candidate))
+        else:
+            missing.append(candidate)
+
+    if missing:
+        print('WARNING: missing release subdirectories:')
+        for m in missing:
+            print(f' - {m}')
+
+    if include_figs:
+        figs_dir = root / 'figs'
+        if figs_dir.exists():
+            selected.append(str(figs_dir))
+        else:
+            print(f'WARNING: figs directory requested but not found: {figs_dir}')
+
+    return selected
+
+
 def main():
     args = parse_args()
 
@@ -111,7 +185,18 @@ def main():
     init_t = time.time()
 
     staging_name = slugify(args.title)
-    staging_dir, copied_paths = ensure_pscratch_copy(source_paths=args.paths,
+    description = _resolve_description(args.description, args.description_file)
+    release_paths = _collect_release_paths(args.release_root, args.include_figs) if args.release_root else []
+    manual_paths = args.paths or []
+    source_paths = list(dict.fromkeys(release_paths + manual_paths))
+    if not source_paths:
+        raise SystemExit('ERROR: no valid source paths to stage. Check --paths/--release-root inputs.')
+
+    print('- Source paths selected:')
+    for src in source_paths:
+        print(f'  - {src}')
+
+    staging_dir, copied_paths = ensure_pscratch_copy(source_paths=source_paths,
                                                      pscratch_base_dir=args.pscratch_dir,
                                                      staging_name=staging_name,
                                                      keep_tree=args.keep_tree)
@@ -141,7 +226,7 @@ def main():
     related = _load_json_or_string(args.related_identifiers_json)
 
     dep = push_to_zenodo(token=token, base_url=base_url, files_on_disk=tar_paths,
-                         title=args.title, description=args.description, creators=creators,
+                         title=args.title, description=description, creators=creators,
                          keywords=args.keywords, access_right=args.access_right, license_id=args.license,
                          communities=args.communities, publish=args.publish, version=args.version,
                          related_identifiers=related)

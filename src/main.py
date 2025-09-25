@@ -1,4 +1,4 @@
-import os, argparse, json, time, numpy as np
+import os, glob, argparse, json, time, numpy as np
 from astropy.table import vstack, join, Table
 
 from desiproc.read_data import *
@@ -304,6 +304,159 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
     plot_wedges(jtbl, tracers, z, args.webtype, out_png, args.plot_smin, args.plot_max_z, connect_lines=args.connect_lines)
 
 
+def _base_tracer_labels(tracer_col):
+    """
+    Return base tracer labels (e.g., 'LRG', 'ELG_LOPnotqso') from a TRACERTYPE column.
+
+    Args:
+        tracer_col (iterable): Sequence of TRACERTYPE values (strings or bytes).
+    Returns:
+        set[str]: Set of upper-case tracer identifiers without the DATA/RAND suffix.
+    """
+    if tracer_col is None:
+        return set()
+    labels = set()
+    for raw in tracer_col:
+        name = str(raw)
+        if not name:
+            continue
+        base = name.rsplit('_', 1)[0]
+        labels.add(base.upper())
+    return labels
+
+
+def _stack_tables(parts):
+    """
+    Vertically stack astropy tables ignoring ``None`` entries.
+
+    Args:
+        parts (list[Table | None]): Tables to stack.
+    Returns:
+        Table | None: Stacked table or ``None`` when no parts are left.
+    """
+    valid = [t for t in parts if t is not None]
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return valid[0]
+    return vstack(valid, metadata_conflicts='silent')
+
+
+def _read_table_if_exists(path):
+    """
+    Read astropy table if exists.
+    
+    Args:
+        path (str or None): Path to the FITS file.
+    Returns:
+        Table | None: Table read from the file or ``None`` if the file does not exist.
+    Raises:
+        Exception: If reading the file fails for reasons other than non-existence.
+    """
+    if path is None or not os.path.exists(path):
+        return None
+    try:
+        return Table.read(path, memmap=True)
+    except TypeError:
+        return Table.read(path)
+
+
+def _write_table_with_meta(tbl, path, zone, release_tag):
+    """
+    Persist ``tbl`` to ``path`` ensuring standard metadata is present.
+    
+    Args:
+        tbl (Table | None): Table to write.
+        path (str): Output FITS file path.
+        zone (int | str): Zone identifier for metadata.
+        release_tag (str | None): Release label for metadata.
+    Returns:
+        None
+    """
+    if tbl is None:
+        return
+    tbl.meta['ZONE'] = zone_tag(zone)
+    tbl.meta['RELEASE'] = str(release_tag) if release_tag is not None else ''
+    tmp = f'{path}.tmp'
+    tbl.write(tmp, format='fits', overwrite=True)
+    os.replace(tmp, path)
+
+
+def combine_zone_products(zone, args, release_tag):
+    """
+    Merge all existing per-tracer outputs for ``zone`` into the shared EDR-style files.
+
+    Args:
+        zone (int | str): Zone identifier being processed.
+        args (argparse.Namespace): Parsed CLI arguments.
+        release_tag (str): Release label stored in FITS headers.
+    """
+    ztag = zone_tag(zone)
+    base_prefix = f'zone_{ztag}'
+
+    def _collect_paths(directory, suffix):
+        if not directory or not os.path.isdir(directory):
+            return []
+        paths = []
+        for ext in ('.fits.gz', '.fits'):
+            pattern = os.path.join(directory, f'{base_prefix}_*{suffix}{ext}')
+            paths.extend(sorted(glob.glob(pattern)))
+        return paths
+
+    raw_paths = _collect_paths(args.raw_out, '')
+    if not raw_paths:
+        return
+
+    raw_tables = [_read_table_if_exists(path) for path in raw_paths]
+    merged_raw = _stack_tables(raw_tables)
+    if merged_raw is not None:
+        combined_raw_path = os.path.join(args.raw_out, f'{zone_prefix(zone)}.fits.gz')
+        _write_table_with_meta(merged_raw, combined_raw_path, zone, release_tag)
+
+    class_dir = os.path.join(args.class_out, 'classification')
+    class_paths = _collect_paths(class_dir, '_classified')
+    if class_paths:
+        class_tables = [_read_table_if_exists(path) for path in class_paths]
+        merged_class = _stack_tables(class_tables)
+        if merged_class is not None:
+            combined_class_path = classification_path(args.class_out, zone, None)
+            _write_table_with_meta(merged_class, combined_class_path, zone, release_tag)
+
+    prob_dir = os.path.join(args.class_out, 'probabilities')
+    prob_paths = _collect_paths(prob_dir, '_probability')
+    if prob_paths:
+        prob_tables = [_read_table_if_exists(path) for path in prob_paths]
+        merged_prob = _stack_tables(prob_tables)
+        if merged_prob is not None:
+            combined_prob_path = probability_path(args.class_out, zone, None)
+            _write_table_with_meta(merged_prob, combined_prob_path, zone, release_tag)
+
+    pairs_dir = os.path.join(args.class_out, 'pairs')
+    pairs_paths = _collect_paths(pairs_dir, '_pairs')
+    if pairs_paths:
+        pairs_tables = [_read_table_if_exists(path) for path in pairs_paths]
+        merged_pairs = _stack_tables(pairs_tables)
+        if merged_pairs is not None:
+            combined_pairs_path = pairs_path(args.class_out, zone, None)
+            _write_table_with_meta(merged_pairs, combined_pairs_path, zone, release_tag)
+
+    groups_paths = []
+    if os.path.isdir(args.groups_out):
+        suffix = f'_groups_fof_{args.webtype}'
+        for ext in ('.fits.gz', '.fits'):
+            pattern = os.path.join(args.groups_out, f'{base_prefix}_*{suffix}{ext}')
+            groups_paths.extend(sorted(glob.glob(pattern)))
+    if groups_paths:
+        groups_tables = [_read_table_if_exists(path) for path in groups_paths]
+        merged_groups = _stack_tables(groups_tables)
+        if merged_groups is not None:
+            combined_groups_path = os.path.join(args.groups_out, f'{base_prefix}{suffix}.fits.gz')
+            _write_table_with_meta(merged_groups, combined_groups_path, zone, release_tag)
+
+    tracers_list = ', '.join(sorted(_base_tracer_labels(merged_raw['TRACERTYPE'])) if merged_raw is not None else [])
+    print(f'[combine] zone {ztag}: combined raw tables from tracers {tracers_list or "unknown"}')
+
+
 def main():
     try:
         p = argparse.ArgumentParser()
@@ -321,7 +474,8 @@ def main():
                        help='Upper r threshold used to classify web types (default: 0.9)')
         p.add_argument('--r-limit', type=float, default=None,
                        help='[Deprecated] Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
-        p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}', help='JSON-type dict of linking lengths per tracer')
+        p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}',
+                       help='JSON-type dict of linking lengths per tracer')
 
         p.add_argument('--zone', type=int, default=None, help='Single zone to run (0...19)')
         p.add_argument('--plot', action='store_true', help='Generate wedge plots after grouping')
@@ -331,12 +485,15 @@ def main():
         p.add_argument('--plot-max-z', type=float, default=None, help='Max redshift to include in plot')
         p.add_argument('--connect-lines', action='store_true', help='Connect points in groups plot')
         p.add_argument('--only-plot', action='store_true', help='Skip preproc and only plot')
+        p.add_argument('--combine-only', action='store_true', help='Skip processing and only merge per-tracer outputs into combined files')
         p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames (e.g., tracer)')
-        p.add_argument('--tracers', nargs='+', default=None, help='Process only these tracers (e.g., BGS_ANY ELG LRG QSO for EDR; BGS_BRIGHT ELG_LOPnotqso LRG QSO for DR1)')
+        p.add_argument('--tracers', nargs='+', default=None,
+                       help='Process only these tracers (e.g., BGS_ANY ELG LRG QSO for EDR; BGS_BRIGHT ELG_LOPnotqso LRG QSO for DR1)')
 
         p.add_argument('--release', choices=['EDR','DR1'], default='EDR', help='Data release: EDR (by rosette) or DR1 (by NGC/SGC)')
         p.add_argument('--region', choices=['N','S'], default='N', help='Region for DR1 (N=NGC, S=SGC). Ignored for EDR.')
-        p.add_argument('--zones', nargs='+', type=str, default=None, help='For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.')
+        p.add_argument('--zones', nargs='+', type=str, default=None,
+                       help='For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.')
         p.add_argument('--config', type=str, default=None, help='Optional JSON file with cuts per label for DR1 (keys like NGC1/NGC2).')
 
         args = p.parse_args()
@@ -399,7 +556,7 @@ def main():
         else:
             SEL_TRACERS = TRACERS
 
-        if not args.only_plot and not args.base_dir:
+        if not args.only_plot and not args.combine_only and not args.base_dir:
             raise RuntimeError('--base-dir is required unless --only-plot is specified')
 
         release_tag = str(args.release).upper()
@@ -416,7 +573,8 @@ def main():
         os.makedirs(plot_dir, exist_ok=True)
 
         print(f'--- [pipeline] Starting release {args.release.upper()} with tracers: {", ".join(SEL_TRACERS)}')
-        i_t = time.time()
+        pipeline_start = time.time()
+        stage_start = pipeline_start
 
         if args.release.upper() == 'EDR':
             zones = [args.zone] if args.zone is not None else range(N_ZONES)
@@ -426,7 +584,13 @@ def main():
         if args.only_plot:
             for z in zones:
                 plot_zone_wedges_for_args(z, args, plot_dir)
-            print(f'--- [pipeline] only-plot elapsed t {time.time()-i_t:.2f} s')
+            print(f'--- [pipeline] only-plot elapsed t {time.time()-pipeline_start:.2f} s')
+            return
+
+        if args.combine_only:
+            for z in zones:
+                combine_zone_products(z, args, release_tag)
+            print(f'--- [pipeline] combine-only elapsed t {time.time()-pipeline_start:.2f} s')
             return
 
         real_tables, random_tables = preload_all_tables(args.base_dir, SEL_TRACERS,
@@ -437,6 +601,7 @@ def main():
         linklen_map = json.loads(args.linking)
 
         for z in zones:
+            stage_start = time.time()
             if args.release.upper() == 'EDR':
                 tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out,
                                       args.n_random, SEL_TRACERS, NORTH_ROSETTES,
@@ -447,34 +612,36 @@ def main():
                 tbl = build_raw_region(str(z), cuts, 'ALL', SEL_TRACERS, real_tables, random_tables,
                                        args.raw_out, args.n_random, zone_value,
                                        out_tag=args.out_tag, release_tag=release_tag)
-            print(f'-- [pipeline] Built raw zone {z} with {len(tbl)} rows in {time.time()-i_t:.2f} s')
-            
-            i_t = time.time()
+            print(f'-- [pipeline] Built raw zone {z} with {len(tbl)} rows in {time.time()-stage_start:.2f} s')
+
+            stage_start = time.time()
             classify_zone(z, tbl, args.class_out, args.n_random,
                           args.r_lower, args.r_upper,
                           out_tag=args.out_tag, release_tag=release_tag)
-            print(f'-- [pipeline] Classified zone {z} in {time.time()-i_t:.2f} s')
+            print(f'-- [pipeline] Classified zone {z} in {time.time()-stage_start:.2f} s')
 
-            i_t = time.time()
+            stage_start = time.time()
             out_groups = process_zone(z, args.raw_out, args.class_out,
                                       args.groups_out, args.webtype, args.source,
                                       linklen_map, args.r_lower, args.r_upper,
                                       release_tag=release_tag, out_tag=args.out_tag)
-            print(f'-- [pipeline] Grouped zone {z} in {time.time()-i_t:.2f} s')
-            
-            i_t = time.time()
+            print(f'-- [pipeline] Grouped zone {z} in {time.time()-stage_start:.2f} s')
+
+            combine_zone_products(z, args, release_tag)
+
             if out_groups is not None:
                 tag = f'{z:02d}' if isinstance(z, int) else str(z)
                 if args.plot:
+                    stage_start = time.time()
                     plot_zone_wedges_for_args(z, args, plot_dir)
-                    print(f'--- [pipeline] Plotted zone {tag} in {time.time()-i_t:.2f} s')
+                    print(f'--- [pipeline] Plotted zone {tag} in {time.time()-stage_start:.2f} s')
             else:
                 tag = f'{z:02d}' if isinstance(z, int) else str(z)
             
     except Exception as e:
         raise RuntimeError(f'Pipeline failed with: {e}') from e
 
-    print(f'Pipeline -> elapsed t {time.time()-i_t:.2f} s')
+    print(f'Pipeline -> elapsed t {time.time()-pipeline_start:.2f} s')
 
 
 if __name__=="__main__":

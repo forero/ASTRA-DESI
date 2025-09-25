@@ -2,9 +2,9 @@ from astropy.table import Table, vstack
 import glob
 
 base = "/global/cfs/cdirs/desi/public/dr1/vac/dr1/lss/guadalupe/v1.0/LSScats/clustering"
-tracers = ["BGS_BRIGHT","ELG_LOPnotqso","LRG","QSO"]
-ngc1 = dict(RA_min=110, RA_max=260, DEC_min=-10, DEC_max=33, zmin=0.4, zmax=0.9)
-ngc2 = dict(RA_min=180, RA_max=260, DEC_min=30, DEC_max=40, zmin=0.4, zmax=0.9)
+tracers = ["BGS_BRIGHT","LRG","ELG_LOPnotqso","QSO"]
+ngc1 = dict(RA_min=110, RA_max=260, DEC_min=-10, DEC_max=8)
+ngc2 = dict(RA_min=180, RA_max=260, DEC_min=30, DEC_max=40)
 
 for tr in tracers:
     a = Table.read(f"{base}/{tr}_S_clustering.dat.fits")

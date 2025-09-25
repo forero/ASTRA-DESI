@@ -91,9 +91,9 @@ python src/main.py \
   --groups-out /path/to/work/dr1/groups \
   --plot-output /path/to/work/dr1/figs \
   --zones NGC1 NGC2 \
-  --tracers BGS_BRIGHT ELG_LOPnotqso \
+  --tracers BGS_BRIGHT ELG \
   --n-random 100 \
-  --r-lower -0.8 --r-upper 0.95 \
+  --r-lower -0.9 --r-upper 0.9 \
   --plot
 ```
 
@@ -154,7 +154,7 @@ Zenodo:
   inputs (creators/related identifiers), and optional publication.
 - `zenodo_upl.py`: lower-level helpers used by `zenodo_push.py` (copying staging trees,
   slugifying titles, etc.).
-- `post_edr.sh`: example shell wrapper invoking `zenodo_push.py` for the EDR products.
+- `post_edr.sh` and `post_dr1.sh`: example shell wrappers invoking `zenodo_push.py` for the EDR and DR1 products.
 - `json/members.json`: sample metadata template for Zenodo creators.
 
 Basic usage (sandbox upload):

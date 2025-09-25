@@ -35,15 +35,15 @@ CLUSTER_DIR="/global/cfs/cdirs/desi/public/dr1/vac/dr1/lss/guadalupe/v1.0/LSScat
 SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr1"
 
 RAW_OUT="${SCRATCH_ROOT}/raw"
-CLASS_ROOT="${SCRATCH_ROOT}/class"
+CLASS_ROOT="${SCRATCH_ROOT}"
 GROUPS_OUT="${SCRATCH_ROOT}/groups"
 PLOTS_OUT="${SCRATCH_ROOT}/figs"
 LOGDIR="${SCRATCH_ROOT}/logs"
 
 mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}"
 
-ZLABELS=("NGC1")
-TRACERS_BY_ZONE=("BGS_BRIGHT")
+ZLABELS=("NGC2")
+TRACERS_BY_ZONE=("QSO")
 CONFIG_JSON=${CONFIG_JSON:-}
 
 if (( SLURM_ARRAY_TASK_ID >= ${#ZLABELS[@]} )); then

@@ -91,26 +91,66 @@ def _load_or_build_df(cache_dir, key, source_paths, builder, progress=False):
 
 
 def _zone_cache_key(kind, zone, tag_list):
+    """
+    Create a cache key for a zone and list of tags.
+    
+    Args:
+        kind (str): Kind of data (e.g., 'raw', 'class', 'r').
+        zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
+        tag_list (list[str]): List of out-tags ('' represents the combined run).
+    Returns:
+        str: Cache key string.
+    """
     tag_suffix = ''.join(safe_tag(t) for t in tag_list if t)
     return f'{kind}_zone_{zone_tag(zone)}{tag_suffix}'
 
 
 
 def get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
-    """Return the paths to raw and classification files for ``zone``."""
-
+    """
+    Get the paths to raw and classification files for a specific zone.
+    
+    Args:
+        raw_dir (str): Path to the raw data directory.
+        class_dir (str): Path to the classification directory.
+        zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
+        out_tag (str|None): Optional output tag for the files.
+    Returns:
+        tuple[str, str]: Paths to the raw and classification files.
+    """
     raw_path = resolve_raw_path(raw_dir, zone, out_tag)
     class_path = resolve_class_path(class_dir, zone, out_tag)
     return raw_path, class_path
 
 
 def get_prob_path(raw_dir, class_dir, zone, out_tag=None):
-    """Return the path to the probability FITS file for ``zone``."""
-
+    """
+    Get the path to the probability file for a specific zone.
+    
+    Args:
+        raw_dir (str): Path to the raw data directory.
+        class_dir (str): Path to the classification directory.
+        zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
+        out_tag (str|None): Optional output tag for the file.
+    Returns:
+        str: Path to the probability file.
+    """
     return resolve_probability_path(class_dir, zone, out_tag)
 
 
 def _expected_class_path(class_dir, zone, tag):
+    """
+    Get the expected classification file path, handling legacy layout.
+    
+    Args:
+        class_dir (str): Release directory containing the `classification` subfolder.
+        zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
+        tag (str|None): Optional output tag for the file.
+    Returns:
+        str: Path to the classification file.
+    Raises:
+        FileNotFoundError: If the classification file cannot be found.
+    """
     try:
         return locate_classification_file(class_dir, zone, tag)
     except FileNotFoundError:
@@ -118,6 +158,18 @@ def _expected_class_path(class_dir, zone, tag):
 
 
 def _expected_prob_path(class_dir, zone, tag):
+    """
+    Get the expected probability file path, handling legacy layout.
+    
+    Args:
+        class_dir (str): Release directory containing the `classification` subfolder.
+        zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
+        tag (str|None): Optional output tag for the file.
+    Returns:
+        str: Path to the probability file.
+    Raises:
+        FileNotFoundError: If the probability file cannot be found.
+    """
     try:
         return locate_probability_file(class_dir, zone, tag)
     except FileNotFoundError:
@@ -125,6 +177,18 @@ def _expected_prob_path(class_dir, zone, tag):
 
 
 def _raw_candidate(raw_dir, zone, tag):
+    """
+    Get the candidate raw file path, handling legacy layout.
+    
+    Args:
+        raw_dir (str): Raw directory path (used to validate raw files exist).
+        zone (int|str): Zone identifier (e.g., 0 or 'NGC1').
+        tag (str|None): Optional output tag for the file.
+    Returns:
+        str: Path to the raw file.
+    Raises:
+        FileNotFoundError: If the raw file cannot be found.
+    """
     try:
         return resolve_raw_path(raw_dir, zone, tag)
     except FileNotFoundError:
@@ -149,14 +213,14 @@ def list_zone_out_tags(raw_dir, class_dir, zone):
     if not os.path.isdir(class_root):
         return []
 
-    pattern = re.compile(rf'^zone_{re.escape(ztag)}_(?P<tag>.+)_classified\.fits\.gz$')
+    pattern = re.compile(rf'^zone_{re.escape(ztag)}(?:_(?P<tag>.+))?_classified\.fits\.gz$')
     discovered = []
     for fname in os.listdir(class_root):
         match = pattern.match(fname)
         if not match:
             continue
-        tag_part = match.group('tag')
-        tag = '' if tag_part == 'combined' else tag_part
+        tag_part = match.group('tag') or ''
+        tag = '' if tag_part in {'', 'combined'} else tag_part
         raw_path = _raw_candidate(raw_dir, zone, tag or None)
         if os.path.exists(raw_path):
             discovered.append(tag)
@@ -231,8 +295,14 @@ def make_output_dirs(base):
 
 
 def load_raw_df(path):
-    """Load raw data from FITS file into a pandas DataFrame."""
-
+    """
+    Load raw data from FITS file into a pandas DataFrame.
+    
+    Args:
+        path (str): Path to the FITS file.
+    Returns:
+        pd.DataFrame: DataFrame containing the raw data.
+    """
     return load_raw_dataframe(path)
 
 
@@ -254,7 +324,14 @@ def load_class_df(path):
 
 
 def load_prob_df(path):
-    """Load probability data from FITS file into a pandas DataFrame."""
+    """
+    Load probability data from FITS file into a pandas DataFrame.
+    
+    Args:
+        path (str): Path to the FITS file.
+    Returns:
+        pd.DataFrame: DataFrame containing the probability data with CLASS column.
+    """
 
     frame = load_probability_dataframe(path)
     prob_cols = ['PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']
@@ -263,6 +340,15 @@ def load_prob_df(path):
 
 
 def _concat_existing(paths, loader):
+    """
+    Concatenate DataFrames loaded from existing files in *paths* using *loader*.
+    
+    Args:
+        paths (list[str]): List of file paths.
+        loader (callable): Function that takes a file path and returns a pd.DataFrame.
+    Returns:
+        pd.DataFrame: Concatenated DataFrame from existing files.
+    """
     dfs = []
     for p in paths:
         if os.path.exists(p):
@@ -399,7 +485,8 @@ def plot_cdf(df_r, zone, tracers, out_dir):
     plt.close(fig)
 
 
-def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=400, subsample_per_zone=None, progress=False, out_tags=None, cache_dir=None, tags_map=None):
+def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=400,
+                        subsample_per_zone=None, progress=False, out_tags=None, cache_dir=None, tags_map=None):
     """
     Plot the dispersion (percentile band) of CDFs over multiple zones in one figure.
     
@@ -1119,7 +1206,8 @@ def _process_zone(zone, config):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/raw')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1', help='Release directory containing classification/probabilities/pairs subfolders')
+    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1',
+                   help='Release directory containing classification/probabilities/pairs subfolders')
     p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/figs')
 
     p.add_argument('--zones', nargs='+', default=None)
@@ -1137,14 +1225,19 @@ def parse_args():
     p.add_argument('--all', action='store_true', help='Enable all plots (careful: heavy)')
     p.add_argument('--usetex', action='store_true', help='Use LaTeX text rendering (heavy)')
     p.add_argument('--dpi', type=int, default=100, help='Figure DPI')
-    p.add_argument('--xbins', type=int, default=200, help='Number of x grid points for CDF interpolation (default: 200)')
-    p.add_argument('--subsample-per-zone', type=int, default=10000, help='Max samples per (zone,tracer,real/rand) for dispersion plot')
+    p.add_argument('--xbins', type=int, default=200,
+                   help='Number of x grid points for CDF interpolation (default: 200)')
+    p.add_argument('--subsample-per-zone', type=int, default=10000,
+                   help='Max samples per (zone,tracer,real/rand) for dispersion plot')
     p.add_argument('--progress', action='store_true', default=False, help='Print simple progress logs')
-    p.add_argument('--out-tags', nargs='*', default=None, help='Limit to these out-tags (e.g., LRG ELG). If omitted, auto-discovers tags per zone.')
+    p.add_argument('--out-tags', nargs='*', default=None,
+                   help='Limit to these out-tags (e.g., LRG ELG). If omitted, auto-discovers tags per zone.')
 
     default_workers = os.cpu_count()
-    p.add_argument('--workers', type=int, default=default_workers, help='Number of worker processes for per-zone plots (default: CPU count - 1)')
-    p.add_argument('--cache-dir', default=None, help='Directory for cached intermediate data (defaults to <output>/_cache)')
+    p.add_argument('--workers', type=int, default=default_workers,
+                   help='Number of worker processes for per-zone plots (default: CPU count - 1)')
+    p.add_argument('--cache-dir', default=None,
+                   help='Directory for cached intermediate data (defaults to <output>/_cache)')
     p.add_argument('--no-cache', action='store_true', help='Disable on-disk caching of intermediate data')
 
     return p.parse_args()
@@ -1189,24 +1282,22 @@ def main():
             pretty = ','.join(non_empty) if non_empty else '(legacy single-file)'
             print(f'[plot] zone {zone}: tags={pretty}')
 
-    zone_config = {
-        'raw_dir': args.raw_dir,
-        'class_dir': args.class_dir,
-        'output': args.output,
-        'outdirs': outdirs,
-        'bins': args.bins,
-        'tracers': args.tracers,
-        'plot_z': args.plot_z,
-        'plot_radial': args.plot_radial,
-        'plot_cdf': args.plot_cdf,
-        'plot_wedges': args.plot_wedges,
-        'plot_wedges_slice': args.plot_wedges_slice,
-        'plot_wedges_grouped': args.plot_wedges_grouped,
-        'need_prob': args.plot_wedges or args.plot_wedges_slice,
-        'progress': args.progress,
-        'cache_dir': cache_dir,
-        'tags_map': tags_map,
-    }
+    zone_config = {'raw_dir': args.raw_dir,
+                   'class_dir': args.class_dir,
+                   'output': args.output,
+                   'outdirs': outdirs,
+                   'bins': args.bins,
+                   'tracers': args.tracers,
+                   'plot_z': args.plot_z,
+                   'plot_radial': args.plot_radial,
+                   'plot_cdf': args.plot_cdf,
+                   'plot_wedges': args.plot_wedges,
+                   'plot_wedges_slice': args.plot_wedges_slice,
+                   'plot_wedges_grouped': args.plot_wedges_grouped,
+                   'need_prob': args.plot_wedges or args.plot_wedges_slice,
+                   'progress': args.progress,
+                   'cache_dir': cache_dir,
+                   'tags_map': tags_map,}
 
     has_zone_work = any((args.plot_z, args.plot_radial, args.plot_cdf, args.plot_wedges, args.plot_wedges_slice))
     zone_results = []
@@ -1239,7 +1330,6 @@ def main():
         plot_pdf_entropy(args.raw_dir, args.class_dir, zones, args.tracers, args.output, args.bins,
                          cache_dir=cache_dir, tags_map=tags_map)
         print(f'Plotted PDF of entropy for zones: {list(zones)}')
-
 
 
 if __name__ == '__main__':

@@ -25,6 +25,7 @@ def slugify(text: str) -> str:
 def timestamp_compact() -> str:
     """
     Returns a compact timestamp string: YYYYMMDDTHHMM
+   
     Returns:
         str: The compact timestamp.
     """
