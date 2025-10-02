@@ -17,7 +17,7 @@
       <li><strong>classification/</strong> – neighbour count summaries per tracer and random iteration.</li>
       <li><strong>probabilities/</strong> – web-type membership probabilities derived from the classification counts.</li>
       <li><strong>pairs/</strong> – sparse list of target pairs used when counting neighbours.</li>
-      <li><strong>groups/</strong> – FoF group catalogues for objects classified as filaments (one file per zone).</li>
+      <li><strong>groups/</strong> – FoF group catalogues for objects classified as filaments and voids.</li>
     </ul>
 
     <hr>
@@ -29,6 +29,7 @@
       <li><code>probabilities/zone_XX_probability.fits.gz</code> – per-object web-type probabilities.</li>
       <li><code>pairs/zone_XX_pairs.fits.gz</code> – neighbour pairs for the zone.</li>
       <li><code>groups/zone_XX_groups_fof_filament.fits.gz</code> – filament FoF groups restricted to data targets.</li>
+      <li><code>groups/zone_XX_randiterYY_groups_fof_void.fits.gz</code> – void FoF groups for the random catalogue iteration YY written one file per iteration (100 iterations, zero-padded).</li>
     </ul>
 
     <hr>
@@ -102,14 +103,15 @@
         <tr><td>TRACERTYPE</td><td>string</td><td>Tracer family with <code>_DATA</code>/<code>_RAND</code> suffix.</td></tr>
         <tr><td>TARGETID</td><td>int64</td><td>Member identifier.</td></tr>
         <tr><td>RANDITER</td><td>int32</td><td>-1 for data members, otherwise random catalogue index.</td></tr>
-        <tr><td>WEBTYPE</td><td>string</td><td>Cosmic web class. For the EDR groups this is always <code>filament</code>.</td></tr>
+        <tr><td>WEBTYPE</td><td>string</td><td>Cosmic web class (<code>filament</code> for data, <code>void</code> for random groups).</td></tr>
         <tr><td>GROUPID</td><td>int32</td><td>FoF group label unique within each (zone, tracer).</td></tr>
         <tr><td>NPTS</td><td>int32</td><td>Number of members in the group.</td></tr>
         <tr><td>XCM, YCM, ZCM</td><td>float64</td><td>Group barycentre in comoving Cartesian coordinates (Mpc).</td></tr>
         <tr><td>A, B, C</td><td>float64</td><td>Semi-axis lengths of the inertia ellipsoid (Mpc) ordered A≥B≥C.</td></tr>
       </tbody>
     </table>
-    <p>The group finder is executed separately for each tracer. The EDR deliverable contains only data groups (<code>RANDITER=-1</code>).</p>
+    <p>The group finder is executed separately for each tracer. For this Zenodo bundle we provide filament groups for data (single file) and void groups for random catalogues
+      (one FITS per iteration, <code>RANDITER &ge; 0</code>).</p>
 
     <hr>
     

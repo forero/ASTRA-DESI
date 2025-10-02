@@ -8,6 +8,7 @@ import pandas as pd
 from astropy.cosmology import Planck18
 from astropy.table import Table
 from matplotlib.lines import Line2D
+matplotlib.rcParams['text.usetex'] = True
 
 from desiproc.paths import ( classification_path, normalize_release_dir, probability_path,
                             safe_tag, zone_tag,)

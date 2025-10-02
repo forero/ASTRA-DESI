@@ -1,13 +1,24 @@
-import argparse, glob, os
+import argparse, glob, os, sys
 
 import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
 from astropy.cosmology import Planck18
 from astropy.table import Table, join, vstack
 from matplotlib.lines import Line2D
 
-from desiproc.paths import safe_tag, zone_tag
-from .common import resolve_raw_path
+from pathlib import Path
+
+if __package__ is None or __package__ == '':
+    src_root = Path(__file__).resolve().parents[1]
+    if str(src_root) not in sys.path:
+        sys.path.append(str(src_root))
+    from desiproc.paths import safe_tag, zone_tag
+    from plot.common import resolve_raw_path
+else:
+    from desiproc.paths import safe_tag, zone_tag
+    from .common import resolve_raw_path
+matplotlib.rcParams['text.usetex'] = True
 
 plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
                      'xtick.labelsize': 20, 'ytick.labelsize': 20, 'legend.fontsize': 10})
@@ -599,7 +610,7 @@ def parse_args():
     p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/raw', help='Raw data dir')
     p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/class', help='Classification dir')
     p.add_argument('--groups-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/groups', help='Output groups dir')
-    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/figs/wedges/filaments')
+    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/figs/wedges/filaments', help='Output file path')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames (e.g., tracer)')
     p.add_argument('--zone', type=str, default='NGC1', help='EDR: 0..19 or 00..19; DR1: NGC1/NGC2')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')

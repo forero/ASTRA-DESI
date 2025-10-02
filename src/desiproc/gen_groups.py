@@ -1,6 +1,5 @@
 import argparse
 import gzip
-import json
 import os
 import shutil
 import time as t
@@ -8,9 +7,10 @@ import time as t
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table, join, vstack
+from scipy.spatial import ConvexHull, QhullError
 from sklearn.cluster import DBSCAN
 
-from .paths import locate_classification_file, safe_tag, zone_tag
+from paths import locate_classification_file, safe_tag, zone_tag
 
 
 RAW_COLS = ['TRACERTYPE','RANDITER','TARGETID','XCART','YCART','ZCART']
@@ -125,6 +125,31 @@ def _split_blocks(raw_sub):
         ttype = tr[idxs[0]]
         randit = int(ri[idxs[0]])
         yield ttype, randit, idxs
+
+
+def lenght(data_raw):
+    """
+    Estimate a linking length based on the convex hull of the points.
+    
+    Args:
+        data_raw (Table): Table containing the raw data with 'XCART', 'YCART', 'ZCART' columns.
+    Returns:
+        float: Estimated linking length, or 0.0 if it cannot be computed.
+    """
+    coords = np.column_stack([np.asarray(data_raw[col], dtype=float) for col in ('XCART','YCART','ZCART')])
+    try:
+        hull = ConvexHull(coords)
+        vol = float(hull.volume)
+    except QhullError:
+        diffs = coords[:, None, :] - coords[None, :, :]
+        return float(np.max(np.linalg.norm(diffs, axis=-1)))
+
+    if vol <= 0:
+        diffs = coords[:, None, :] - coords[None, :, :]
+        return float(np.max(np.linalg.norm(diffs, axis=-1)))
+
+    num_galaxies = coords.shape[0]
+    return float(np.cbrt(vol / num_galaxies))
 
 
 def _dbscan_labels(coords, eps):
@@ -276,7 +301,7 @@ def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None, release_tag=None):
     return compressed
 
 
-def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map,
+def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
                  r_lower, r_upper, release_tag=None, out_tag=None):
     """
     Generate group catalogues for a zone.
@@ -288,14 +313,13 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
         out_dir (str): Destination directory for groups.
         webtype (str): Desired cosmic web type (e.g., ``'filament'``).
         source (str): Source selection (``'data'``, ``'rand'``, or ``'both'``).
-        linklen_map (dict): Mapping of tracer to linking length.
         r_lower (float): Lower threshold applied when classifying by ``r``.
         r_upper (float): Upper threshold applied when classifying by ``r``.
         release_tag (str, optional): Release label stored in output metadata.
         out_tag (str, optional): Tag appended to filenames.
     Returns:
-        str | None: Path to the generated groups FITS file, or ``None`` when no
-        objects meet the criteria.
+        list[str]: Paths to generated groups FITS files. Empty when no objects
+        meet the criteria.
     """
     raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
     raw_tbl, cls_tbl = _read_zone_tables(raw_path, class_path)
@@ -303,44 +327,78 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source, linklen_map
 
     ids_web = np.asarray(cls_tbl['TARGETID'][cls_tbl['WEBTYPE'] == webtype], dtype=np.int64)
     if ids_web.size == 0:
-        return None
+        return []
     mask_web = np.isin(raw_tbl['TARGETID'], ids_web, assume_unique=False)
     raw_sub = raw_tbl[mask_web]
     if len(raw_sub) == 0:
-        return None
+        return []
 
-    tid_all = np.asarray(raw_sub['TARGETID'], dtype=np.int64)
-    x = np.asarray(raw_sub['XCART'], dtype=float)
-    y = np.asarray(raw_sub['YCART'], dtype=float)
-    z = np.asarray(raw_sub['ZCART'], dtype=float)
-
-    blocks = []
+    data_blocks = []
+    rand_blocks = {}
 
     for ttype, randit, idxs in _split_blocks(raw_sub):
         is_data = (randit == -1)
         if (source == 'data' and not is_data) or (source == 'rand' and is_data):
             continue
 
-        tracer = ttype.split('_', 1)[0]
-        eps = float(linklen_map.get(tracer, linklen_map.get('default', 30.0)))
+        block_data = raw_sub[idxs]
+        eps = float(lenght(block_data))
+        if not np.isfinite(eps) or eps < 0.0:
+            eps = 0.0
 
-        coords = np.column_stack((x[idxs], y[idxs], z[idxs]))
+        coords = np.column_stack([
+            np.asarray(block_data[col], dtype=float)
+            for col in ('XCART', 'YCART', 'ZCART')
+        ])
         labels = _dbscan_labels(coords, eps)  # FoF is the same as DBSCAN with min_samples=1
         labs, counts, xcm, ycm, zcm, A, B, C = _group_inertia(coords, labels)
 
+        tids = np.asarray(block_data['TARGETID'], dtype=np.int64)
         block_tbl = _build_block_tables(
             ttype, randit, webtype,
-            tids=tid_all[idxs],
+            tids=tids,
             labels=labels, labs=labs, counts=counts,
             xcm=xcm, ycm=ycm, zcm=zcm, A=A, B=B, C=C
         )
-        blocks.append(block_tbl)
+        if is_data:
+            data_blocks.append(block_tbl)
+        else:
+            rand_blocks.setdefault(randit, []).append(block_tbl)
 
-    if blocks:
-        merged = vstack(blocks, metadata_conflicts='silent')
-        return write_fits_gz(merged, out_dir, zone, webtype,
-                             out_tag=out_tag, release_tag=release_tag)
-    return None
+    outputs = []
+
+    if data_blocks:
+        merged = vstack(data_blocks, metadata_conflicts='silent')
+        outputs.append(write_fits_gz(merged, out_dir, zone, webtype,
+                                     out_tag=out_tag, release_tag=release_tag))
+
+    if rand_blocks:
+        for randit, tables in sorted(rand_blocks.items()):
+            merged = vstack(tables, metadata_conflicts='silent')
+            merged.meta['RANDITER'] = int(randit)
+            if out_tag is None:
+                iter_tag = f'{randit:02d}'
+            else:
+                iter_tag = f'{out_tag}_{randit:02d}'
+            outputs.append(write_fits_gz(merged, out_dir, zone, webtype,
+                                         out_tag=iter_tag, release_tag=release_tag))
+
+    return outputs
+
+
+def _default_zones_for_release(release_tag):
+    """
+    Get default zones for a given release tag.
+    
+    Args:
+        release_tag (str): Release tag (e.g., 'dr1').
+    Returns:
+        list[str]: Default zone labels.
+    """
+    rel = str(release_tag).lower()
+    if rel.startswith('dr') or 'ngc' in rel:
+        return ['NGC1', 'NGC2']
+    return [f"{i:02d}" for i in range(20)]
 
 
 def parse_args():
@@ -353,24 +411,22 @@ def parse_args():
                    help='Release dir containing classification/probabilities/pairs')
     p.add_argument('--groups-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'groups'),
                    help='Output groups dir')
-    p.add_argument('--zones', nargs='+', type=str, default=[f"{i:02d}" for i in range(20)],
+    p.add_argument('--zones', nargs='+', type=str, default=_default_zones_for_release(release_default),
                    help='Zone numbers or labels (e.g., 00 01 ... or NGC1 NGC2)')
-    p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
-    p.add_argument('--source', choices=['data','rand','both'], default='data')
+    p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='void')
+    p.add_argument('--source', choices=['data','rand','both'], default='rand')
     p.add_argument('--r-lower', type=float, default=-0.9,
                    help='Lower r threshold used to classify web types (default: -0.9)')
     p.add_argument('--r-upper', type=float, default=0.9,
                    help='Upper r threshold used to classify web types (default: 0.9)')
     p.add_argument('--r-limit', type=float, default=None,
-                   help='[Deprecated] Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
+                   help='Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')
-    p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"ELG":10,"LRG":10,"QSO":10,"default":10}')
     p.add_argument('--release', default=release_default.upper(), help='Release tag stored in FITS metadata')
     return p.parse_args()
 
 def main():
     args = parse_args()
-    linklen_map = json.loads(args.linking)
     if args.r_limit is not None:
         sym = float(abs(args.r_limit))
         args.r_lower = -sym
@@ -380,14 +436,15 @@ def main():
     release_tag = str(args.release).upper()
     init = t.time()
     for z in args.zones:
-        out = process_zone(z, raw_dir=args.raw_dir, class_dir=args.class_dir,
-                           out_dir=args.groups_dir, webtype=args.webtype,
-                           source=args.source, linklen_map=linklen_map,
-                           r_lower=args.r_lower, r_upper=args.r_upper,
-                           release_tag=release_tag,
-                           out_tag=args.out_tag)
-        if out is not None:
-            print(f'---- zone {z} done: {out}')
+        outputs = process_zone(z, raw_dir=args.raw_dir, class_dir=args.class_dir,
+                               out_dir=args.groups_dir, webtype=args.webtype,
+                               source=args.source,
+                               r_lower=args.r_lower, r_upper=args.r_upper,
+                               release_tag=release_tag,
+                               out_tag=args.out_tag)
+        if outputs:
+            for out in outputs:
+                print(f'---- zone {z} done: {out}')
         else:
             print(f'---- zone {z} no objects with WEBTYPE={args.webtype} for "{args.source}".')
     print(f'Elapsed: {(t.time() - init)/60:.2f} min')

@@ -474,8 +474,6 @@ def main():
                        help='Upper r threshold used to classify web types (default: 0.9)')
         p.add_argument('--r-limit', type=float, default=None,
                        help='[Deprecated] Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
-        p.add_argument('--linking', type=str, default='{"BGS_ANY":10,"LRG":20,"ELG":20,"QSO":55,"default":10}',
-                       help='JSON-type dict of linking lengths per tracer')
 
         p.add_argument('--zone', type=int, default=None, help='Single zone to run (0...19)')
         p.add_argument('--plot', action='store_true', help='Generate wedge plots after grouping')
@@ -598,8 +596,6 @@ def main():
                                                         REAL_COLUMNS, RANDOM_COLUMNS,
                                                         N_RANDOM_FILES)
 
-        linklen_map = json.loads(args.linking)
-
         for z in zones:
             stage_start = time.time()
             if args.release.upper() == 'EDR':
@@ -621,15 +617,15 @@ def main():
             print(f'-- [pipeline] Classified zone {z} in {time.time()-stage_start:.2f} s')
 
             stage_start = time.time()
-            out_groups = process_zone(z, args.raw_out, args.class_out,
-                                      args.groups_out, args.webtype, args.source,
-                                      linklen_map, args.r_lower, args.r_upper,
-                                      release_tag=release_tag, out_tag=args.out_tag)
+            outputs = process_zone(z, args.raw_out, args.class_out,
+                                   args.groups_out, args.webtype, args.source,
+                                   args.r_lower, args.r_upper,
+                                   release_tag=release_tag, out_tag=args.out_tag)
             print(f'-- [pipeline] Grouped zone {z} in {time.time()-stage_start:.2f} s')
 
             combine_zone_products(z, args, release_tag)
 
-            if out_groups is not None:
+            if outputs:
                 tag = f'{z:02d}' if isinstance(z, int) else str(z)
                 if args.plot:
                     stage_start = time.time()
