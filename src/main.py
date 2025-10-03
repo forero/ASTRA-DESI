@@ -162,6 +162,66 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
         raise RuntimeError(f'Error building raw table for region {zone_label}: {e}') from e
 
 
+def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_raw,
+                       n_random, zone_value, out_tag=None, release_tag=None):
+    """
+    Build a raw table for a DR2 zone split by RA (NGC or SGC).
+
+    Args:
+        zone_label (str): Zone label ('NGC' or 'SGC').
+        tracers (list[str]): Tracer identifiers to process.
+        real_tables (dict): Preloaded real tables keyed by tracer and zone label.
+        random_tables (dict): Preloaded random tables keyed by tracer and zone label.
+        output_raw (str): Output directory for raw tables.
+        n_random (int): Number of random realisations per real sample.
+        zone_value (int): Value stored in the ``ZONE`` column metadata.
+    Returns:
+        Table: Combined table with real and random data for the specified DR2 zone.
+    Raises:
+        RuntimeError: If building or saving the raw table fails.
+    """
+    try:
+        parts = []
+        skipped = []
+        for tr in tracers:
+            try:
+                rt = process_real_dr2(real_tables, tr, zone_label, zone_value=zone_value)
+            except ValueError as e:
+                print(f'[warn] {tr} empty in DR2 zone {zone_label}: {e}')
+                skipped.append(tr)
+                continue
+            parts.append(rt)
+            count = len(rt)
+            rpt = generate_randoms_dr2(random_tables, tr, zone_label, n_random, count, zone_value=zone_value)
+            parts.append(rpt)
+
+        if not parts:
+            raise ValueError(f'No data in DR2 zone {zone_label} (tracers tried: {tracers})')
+
+        tbl = vstack(parts)
+        if 'RANDITER' in tbl.colnames:
+            tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
+
+        tsuf = safe_tag(out_tag)
+        out = os.path.join(output_raw, f'zone_{zone_label}{tsuf}.fits.gz')
+        tmp = out + '.tmp'
+
+        tbl_out = tbl.copy()
+        if 'ZONE' in tbl_out.colnames:
+            tbl_out.remove_column('ZONE')
+
+        tbl_out.meta['ZONE'] = zone_tag(zone_label)
+        tbl_out.meta['RELEASE'] = str(release_tag) if release_tag is not None else 'UNKNOWN'
+
+        tbl_out.write(tmp, format='fits', overwrite=True)
+        os.replace(tmp, out)
+        if skipped:
+            print(f'[info] In DR2 {zone_label} skipped tracers (empty): {", ".join(skipped)}')
+        return tbl
+    except Exception as e:
+        raise RuntimeError(f'Error building DR2 raw table for zone {zone_label}: {e}') from e
+
+
 def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, tracers, north_rosettes,
                     out_tag=None, release_tag=None):
     """
@@ -488,7 +548,8 @@ def main():
         p.add_argument('--tracers', nargs='+', default=None,
                        help='Process only these tracers (e.g., BGS_ANY ELG LRG QSO for EDR; BGS_BRIGHT ELG_LOPnotqso LRG QSO for DR1)')
 
-        p.add_argument('--release', choices=['EDR','DR1'], default='EDR', help='Data release: EDR (by rosette) or DR1 (by NGC/SGC)')
+        p.add_argument('--release', choices=['EDR','DR1','DR2'], default='EDR',
+                       help='Data release: EDR (rosettes), DR1 (NGC1/NGC2 boxes), DR2 (full-sky NGC/SGC split)')
         p.add_argument('--region', choices=['N','S'], default='N', help='Region for DR1 (N=NGC, S=SGC). Ignored for EDR.')
         p.add_argument('--zones', nargs='+', type=str, default=None,
                        help='For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.')
@@ -503,7 +564,9 @@ def main():
         if args.r_lower >= 0 or args.r_upper <= 0:
             raise ValueError('--r-lower must be negative and --r-upper must be positive.')
 
-        if args.release.upper() == 'EDR':
+        release = args.release.upper()
+
+        if release == 'EDR':
             TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
             REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
             RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
@@ -512,8 +575,8 @@ def main():
             NORTH_ROSETTES = {3, 6, 7, 11, 12, 13, 14, 15, 18, 19}
             REAL_COLUMNS = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
             RANDOM_COLUMNS = REAL_COLUMNS
-        else:
-            # DR1 or DR2
+            tracer_alias = {'bgs': 'BGS_ANY', 'elg': 'ELG', 'lrg': 'LRG', 'qso': 'QSO'}
+        elif release == 'DR1':
             TRACERS = ['BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
             REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
             RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
@@ -528,15 +591,24 @@ def main():
                 with open(args.config, 'r') as f:
                     user_cuts = json.load(f)
                 DEFAULT_CUTS.update(user_cuts)
+            tracer_alias = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso', 'lrg': 'LRG', 'qso': 'QSO'}
+        elif release == 'DR2':
+            TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
+            N_RANDOM_FILES = 18
+            REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
+            RANDOM_COLUMNS = REAL_COLUMNS
+            REAL_SUFFIX = RANDOM_SUFFIX = None  # not used for DR2
+            DR2_RA_MIN = 90.0
+            DR2_RA_MAX = 300.0
+            DR2_ZONE_VALUES = {'NGC': 2001, 'SGC': 2002}
+            if args.config:
+                raise RuntimeError('--config is not supported for DR2; RA split is fixed at 90 <= RA <= 300 for NGC.')
+            tracer_alias = {'bgs': 'BGS_ANY', 'elg': 'ELG', 'lrg': 'LRG', 'qso': 'QSO'}
+        else:
+            raise RuntimeError(f"Unsupported release '{args.release}'")
 
         if args.tracers is not None:
             req = [str(t).strip() for t in args.tracers]
-            rel = args.release.upper()
-            alias = {}
-            if rel == 'EDR':
-                alias = {'bgs': 'BGS_ANY', 'elg': 'ELG', 'lrg': 'LRG', 'qso': 'QSO'}
-            else:
-                alias = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso', 'lrg': 'LRG', 'qso': 'QSO'}
             norm = []
             for t in req:
                 t_low = t.lower()
@@ -544,8 +616,8 @@ def main():
                     norm.append(t)
                 elif t.upper() in TRACERS:
                     norm.append(t.upper())
-                elif t_low in alias:
-                    norm.append(alias[t_low])
+                elif t_low in tracer_alias:
+                    norm.append(tracer_alias[t_low])
                 else:
                     raise RuntimeError(f"Unknown tracer '{t}'. Available: {', '.join(TRACERS)}")
 
@@ -557,7 +629,7 @@ def main():
         if not args.only_plot and not args.combine_only and not args.base_dir:
             raise RuntimeError('--base-dir is required unless --only-plot is specified')
 
-        release_tag = str(args.release).upper()
+        release_tag = release
 
         os.makedirs(args.raw_out, exist_ok=True)
         class_root = normalize_release_dir(args.class_out)
@@ -574,10 +646,12 @@ def main():
         pipeline_start = time.time()
         stage_start = pipeline_start
 
-        if args.release.upper() == 'EDR':
+        if release == 'EDR':
             zones = [args.zone] if args.zone is not None else range(N_ZONES)
-        else:
+        elif release == 'DR1':
             zones = args.zones if args.zones is not None else ['NGC1', 'NGC2']
+        else:  # DR2
+            zones = args.zones if args.zones is not None else ['NGC', 'SGC']
 
         if args.only_plot:
             for z in zones:
@@ -591,23 +665,36 @@ def main():
             print(f'--- [pipeline] combine-only elapsed t {time.time()-pipeline_start:.2f} s')
             return
 
-        real_tables, random_tables = preload_all_tables(args.base_dir, SEL_TRACERS,
-                                                        REAL_SUFFIX, RANDOM_SUFFIX,
-                                                        REAL_COLUMNS, RANDOM_COLUMNS,
-                                                        N_RANDOM_FILES)
+        if release == 'DR2':
+            real_tables, random_tables = preload_dr2_tables(args.base_dir, SEL_TRACERS,
+                                                            REAL_COLUMNS, RANDOM_COLUMNS,
+                                                            N_RANDOM_FILES,
+                                                            ra_min=DR2_RA_MIN, ra_max=DR2_RA_MAX)
+        else:
+            real_tables, random_tables = preload_all_tables(args.base_dir, SEL_TRACERS,
+                                                            REAL_SUFFIX, RANDOM_SUFFIX,
+                                                            REAL_COLUMNS, RANDOM_COLUMNS,
+                                                            N_RANDOM_FILES)
 
         for z in zones:
             stage_start = time.time()
-            if args.release.upper() == 'EDR':
+            if release == 'EDR':
                 tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out,
                                       args.n_random, SEL_TRACERS, NORTH_ROSETTES,
                                       out_tag=args.out_tag, release_tag=release_tag)
-            else:
-                zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(str(z), 9999)
-                cuts = DEFAULT_CUTS[str(z)]
-                tbl = build_raw_region(str(z), cuts, 'ALL', SEL_TRACERS, real_tables, random_tables,
+            elif release == 'DR1':
+                zone_label = str(z)
+                zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(zone_label, 9999)
+                cuts = DEFAULT_CUTS[zone_label]
+                tbl = build_raw_region(zone_label, cuts, 'ALL', SEL_TRACERS, real_tables, random_tables,
                                        args.raw_out, args.n_random, zone_value,
                                        out_tag=args.out_tag, release_tag=release_tag)
+            else:  # DR2
+                zone_label = str(z).upper()
+                zone_value = DR2_ZONE_VALUES.get(zone_label, 2999)
+                tbl = build_raw_dr2_zone(zone_label, SEL_TRACERS, real_tables, random_tables,
+                                         args.raw_out, args.n_random, zone_value,
+                                         out_tag=args.out_tag, release_tag=release_tag)
             print(f'-- [pipeline] Built raw zone {z} with {len(tbl)} rows in {time.time()-stage_start:.2f} s')
 
             stage_start = time.time()

@@ -1,27 +1,31 @@
 import argparse, os, re
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import numpy as np
+import pandas as pd
+from astropy.table import Table
 
 import matplotlib
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-from astropy.cosmology import Planck18
-from astropy.table import Table
-from matplotlib.lines import Line2D
 matplotlib.rcParams['text.usetex'] = True
 
-from desiproc.paths import ( classification_path, normalize_release_dir, probability_path,
-                            safe_tag, zone_tag,)
-from .common import ( load_probability_dataframe, load_raw_dataframe, resolve_class_path,
-                     resolve_probability_path, resolve_raw_path,)
+from desiproc.paths import (classification_path, locate_classification_file, locate_probability_file,
+                            normalize_release_dir, probability_path, safe_tag, zone_tag)
+
+try:
+    from .common import (load_probability_dataframe, load_raw_dataframe, resolve_class_path,
+                         resolve_probability_path, resolve_raw_path)
+except ImportError:
+    import sys
+    from pathlib import Path
+
+    src_root = Path(__file__).resolve().parents[1]
+    if str(src_root) not in sys.path:
+        sys.path.append(str(src_root))
+    from plot.common import (load_probability_dataframe, load_raw_dataframe, resolve_class_path,
+                             resolve_probability_path, resolve_raw_path)
 
 PLOT_DPI = 360
 CACHE_VERSION = 'v1'
-CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
-CLASS_ZORDER = {'void':0, 'sheet':1, 'filament':2, 'knot':3}
-
-# plt.rcParams.update({'axes.labelsize': 12, 'xtick.labelsize': 10,
-#                      'ytick.labelsize': 10, 'legend.fontsize': 10,})
 
 
 def _max_mtime(paths):
@@ -572,9 +576,9 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
     fig, ax = plt.subplots(figsize=(9, 7))
     ax.grid(linewidth=0.7)
 
+    tracer_color_map = {'BGS_BRIGHT': 'blue', 'ELG': 'red', 'LRG': 'green', 'QSO': 'orange'}
+
     for tr in tracers:
-        color = CLASS_COLORS.get('sheet', 'C0')
-        tracer_color_map = {'BGS_BRIGHT':'blue','ELG':'red','LRG':'green','QSO':'purple'}
         color = tracer_color_map.get(tr, 'black')
 
         if len(per_tracer_real[tr]) > 0:
@@ -598,404 +602,6 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
     path = os.path.join(out_dir, 'cdf/cdf_dispersion_zones.png')
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fig.savefig(path, dpi=PLOT_DPI)
-    plt.close(fig)
-
-
-def _prepare_real(raw_df, prob_df):
-    """
-    Merge raw and prob DataFrames, filter to real data only.
-
-    Args:
-        raw_df (pd.DataFrame): Raw data DataFrame.
-        prob_df (pd.DataFrame): Probability data DataFrame.
-    Returns:
-        pd.DataFrame: Merged DataFrame with only real data.
-    """
-    df = raw_df.merge(prob_df, on='TARGETID', how='left')
-    return df[df['ISDATA']]
-
-
-def _compute_bounds(sub, z_lo=0.7, z_hi=None, offset=0, use_intersection=False):
-    """
-    Compute RA/DEC center, z limits, and half-width for wedge plotting.
-
-    Args:
-        sub (pd.DataFrame): Subset DataFrame for a specific tracer.
-        z_lo (float or None): Lower z limit. If None, computed from data.
-        z_hi (float or None): Upper z limit. If None, computed from data.
-        offset (float): Symmetric padding applied when inferring limits from data.
-        use_intersection (bool): If True, use the overlapping z-range across BASE groups
-            before applying the offset (used by wedge slices).
-    Returns:
-        tuple: (ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-    """
-    if sub.empty:
-        raise ValueError('Cannot compute bounds for empty subset.')
-
-    z_vals = sub['Z'].to_numpy(dtype=float, copy=False)
-    z_vals = z_vals[np.isfinite(z_vals)]
-    if z_vals.size == 0:
-        raise ValueError('No finite redshift values available to compute bounds.')
-
-    data_min = float(z_vals.min())
-    data_max = float(z_vals.max())
-
-    if use_intersection:
-        grouped = sub.groupby('BASE')['Z']
-        gmins = grouped.min().to_numpy(dtype=float, copy=False)
-        gmaxs = grouped.max().to_numpy(dtype=float, copy=False)
-        lower = np.nanmax(gmins) if gmins.size else data_min
-        upper = np.nanmin(gmaxs) if gmaxs.size else data_max
-        z_lo_eff = lower - offset
-        z_hi_eff = upper + offset
-    else:
-        if z_lo is None:
-            z_lo_eff = data_min
-        else:
-            z_lo_eff = float(z_lo)
-        if z_hi is None:
-            z_hi_eff = data_max * 1.02
-        else:
-            z_hi_eff = float(z_hi)
-
-        if offset:
-            z_lo_eff = z_lo_eff - offset
-            z_hi_eff = z_hi_eff + offset
-
-    if not np.isfinite(z_lo_eff):
-        z_lo_eff = data_min
-    if not np.isfinite(z_hi_eff):
-        z_hi_eff = data_max
-
-    z_lo_eff = max(0.0, z_lo_eff)
-
-    if z_hi_eff <= z_lo_eff:
-        z_hi_eff = z_lo_eff + max(1e-3, 0.02 * max(1.0, abs(z_lo_eff)))
-
-    ra_min = sub['RA'].min(skipna=True)
-    ra_max = sub['RA'].max(skipna=True)
-    ra_ctr = 0.5 * (ra_min + ra_max)
-    dec_min = sub['DEC'].min(skipna=True)
-    dec_max = sub['DEC'].max(skipna=True)
-    dec_ctr = 0.5 * (dec_min + dec_max)
-
-    Dc = Planck18.comoving_distance(z_hi_eff).value
-    half_w = Dc * np.deg2rad(ra_max - ra_ctr) * np.cos(np.deg2rad(dec_ctr))
-
-    return ra_ctr, dec_ctr, z_lo_eff, z_hi_eff, half_w
-
-
-def _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z):
-    """
-    Draw grid lines for constant z and RA on the wedge plot.
-
-    Args:
-        ax (matplotlib.axes.Axes): Axes to draw on.
-        ra_ctr (float): Central RA in degrees.
-        dec_ctr (float): Central DEC in degrees.
-        z_lo (float): Lower z limit.
-        z_hi (float): Upper z limit.
-        half_w (float): Half-width of the wedge at z_hi.
-        n_ra (int): Number of RA ticks.
-        n_z (int): Number of z ticks.
-    Returns:
-        tuple: (z_ticks, ra_ticks)
-    """
-    zs = np.linspace(z_lo, z_hi, 300)
-    z_ticks = np.linspace(z_lo, z_hi, n_z) if n_z > 0 else np.asarray([])
-    Dc_hi = Planck18.comoving_distance(z_hi).value
-    cos_dec = np.cos(np.deg2rad(dec_ctr))
-    denom = Dc_hi * cos_dec
-    if n_ra > 0 and np.isfinite(denom) and denom != 0:
-        half_w_ang = half_w / denom * (180/np.pi)
-        ra_ticks = np.linspace(ra_ctr - half_w_ang, ra_ctr + half_w_ang, n_ra)
-    else:
-        ra_ticks = np.asarray([])
-
-    span = z_hi - z_lo
-    if not np.isfinite(span) or span == 0:
-        span = np.finfo(float).eps
-
-    for z0 in z_ticks:
-        w0 = half_w * ((z0 - z_lo) / span)
-        ax.hlines(z0, -w0, w0, color='gray', lw=0.5, alpha=0.5)
-
-    if ra_ticks.size:
-        Dc_zs = Planck18.comoving_distance(zs).value
-        base = Dc_zs * cos_dec
-        for rt in ra_ticks[::4]:
-            delta = np.deg2rad(rt - ra_ctr)
-            ax.plot(base * delta, zs, color='gray', lw=0.5, alpha=0.5)
-
-    ax.set_xlim(-half_w, half_w)
-    ax.set_ylim(z_lo, z_hi)
-    return z_ticks, ra_ticks
-
-
-def _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w):
-    """
-    Plot points colored by CLASS on the wedge plot.
-
-    Args:
-        ax (matplotlib.axes.Axes): Axes to draw on.
-        sub (pd.DataFrame): Subset DataFrame for a specific tracer.
-        ra_ctr (float): Central RA in degrees.
-        dec_ctr (float): Central DEC in degrees.
-        z_lo (float): Lower z limit.
-        z_hi (float): Upper z limit.
-        half_w (float): Half-width of the wedge at z_hi.
-    """
-    if sub.empty:
-        return
-
-    cos_dec = np.cos(np.deg2rad(dec_ctr))
-    z = sub['Z'].to_numpy(dtype=float, copy=False)
-    ra = sub['RA'].to_numpy(dtype=float, copy=False)
-    classes = sub['CLASS'].to_numpy(copy=False)
-    Dc_vals = Planck18.comoving_distance(z).value
-    x_all = Dc_vals * np.deg2rad(ra - ra_ctr) * cos_dec
-    y_all = z
-
-    span = z_hi - z_lo
-    if not np.isfinite(span) or span == 0:
-        span = np.finfo(float).eps
-
-    base_mask = np.isfinite(x_all) & np.isfinite(y_all)
-    base_mask &= np.abs(x_all) <= half_w * ((y_all - z_lo) / span)
-
-    for cls, color in CLASS_COLORS.items():
-        cls_mask = base_mask & (classes == cls)
-        if not np.any(cls_mask):
-            continue
-        size = 5 if cls in ('void', 'knot') else 1
-        ax.scatter(x_all[cls_mask], y_all[cls_mask], s=size, c=color,
-                   zorder=CLASS_ZORDER[cls])
-
-
-def _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w):
-    """
-    Plot points on the wedge plot without class distinction.
-
-    Args:
-        ax (matplotlib.axes.Axes): Axes to draw on.
-        sub (pd.DataFrame): Subset DataFrame for a specific tracer.
-        ra_ctr (float): Central RA in degrees.
-        dec_ctr (float): Central DEC in degrees.
-        z_lo (float): Lower z limit.
-        z_hi (float): Upper z limit.
-        half_w (float): Half-width of the wedge at z_hi.
-    """
-    if sub.empty:
-        return
-
-    cos_dec = np.cos(np.deg2rad(dec_ctr))
-    z = sub['Z'].to_numpy(dtype=float, copy=False)
-    ra = sub['RA'].to_numpy(dtype=float, copy=False)
-    Dc_vals = Planck18.comoving_distance(z).value
-    x = Dc_vals * np.deg2rad(ra - ra_ctr) * cos_dec
-
-    span = z_hi - z_lo
-    if not np.isfinite(span) or span == 0:
-        span = np.finfo(float).eps
-
-    mask = np.isfinite(x) & np.isfinite(z)
-    mask &= np.abs(x) <= half_w * ((z - z_lo) / span)
-    ax.scatter(x[mask], z[mask], s=0.001, c='black')
-
-
-
-def _draw_border(ax, half_w, z_lo, z_hi):
-    """
-    Draw border lines of the wedge plot.
-
-    Args:
-        ax (matplotlib.axes.Axes): Axes to draw on.
-        half_w (float): Half-width of the wedge at z_hi.
-        z_lo (float): Lower z limit.
-        z_hi (float): Upper z limit.
-    """
-    ax.plot([-half_w, 0], [z_hi, z_lo], 'k-', lw=1.5)
-    ax.plot([ half_w, 0], [z_hi, z_lo], 'k-', lw=1.5)
-
-
-def _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='right'):
-    """
-    Write z tick labels along the slanted wedge border.
-
-    Args:
-        ax (matplotlib.axes.Axes): Axes to draw on.
-        z_ticks (np.ndarray): Array of z tick positions to annotate.
-        half_w (float): Half-width of the wedge at z_hi.
-        z_lo (float): Lower z limit.
-        z_hi (float): Upper z limit.
-        side (str): Which slanted side to annotate: 'right' or 'left'.
-    """
-    if not np.isfinite(half_w) or (z_hi - z_lo) <= 0:
-        return
-
-    angle_deg = np.degrees(np.arctan2((z_hi - z_lo), half_w))
-    offset = 0.05 * abs(half_w)
-
-    for z0 in np.asarray(z_ticks, dtype=float):
-        if not np.isfinite(z0):
-            continue
-        s = (z0 - z_lo) / (z_hi - z_lo)
-        s = np.clip(s, 0.0, 1.0)
-
-        if side == 'right':
-            x_border = half_w * s
-            x_text = x_border + offset
-            rot = angle_deg
-            ha = 'left'
-        else:
-            x_border = -half_w * s
-            x_text = x_border - offset
-            rot = -angle_deg
-            ha = 'right'
-        ax.text(x_text, z0, f'{z0:.2f}', rotation=rot, ha=ha, va='center', fontsize=15)
-
-
-def _configure_axes(ax, side='right'):
-    """
-    Configure the axes for the wedge plot.
-
-    Args:
-        ax (matplotlib.axes.Axes): Axes to configure.
-        side (str): (kept for API compatibility; no effect on tick placement)
-    """
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    ax.set_frame_on(False)
-    ax.set_yticks([])
-    ax.tick_params(left=False, right=False, labelleft=False, labelright=False)
-    ax.set_xticks([])
-
-
-def plot_wedges(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, grouped=False):
-    """
-    Plot and save wedges for all tracers in a given zone.
-
-    Args:
-        raw_df (pd.DataFrame): Raw data DataFrame.
-        prob_df (pd.DataFrame): Probability data DataFrame.
-        zone (int): Zone number for title and filename.
-        output_dir (str): Output directory to save the plots.
-        n_ra (int): Number of RA ticks.
-        n_z (int): Number of z ticks.
-    """
-    real = _prepare_real(raw_df, prob_df)
-    tracers = ['BGS_BRIGHT', 'LRG', 'ELG', 'QSO']
-    fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers), 20), gridspec_kw={'wspace': 0.5})
-    axes = axes.flatten()
-
-    for ax, tracer in zip(axes, tracers):
-        tr_prefix = 'BGS' if tracer == 'BGS_BRIGHT' else tracer
-        sub = real[real['BASE'].str.startswith(tr_prefix)]
-        _configure_axes(ax, side='right')
-        ax.set_title(tracer.replace('_BRIGHT',''), fontsize=16, y=1.05)
-        if sub.empty:
-            print(f'No data for tracer {tracer} in zone {zone}, skipping plot.')
-            continue
-
-        ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(sub)
-        z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
-        if grouped:
-            _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        else:
-            _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        _draw_border(ax, half_w, z_lo, z_hi)
-        _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='right')
-
-        Dc_hi = Planck18.comoving_distance(z_hi).value
-        cos_dec = np.cos(np.deg2rad(dec_ctr))
-        denom = Dc_hi * cos_dec
-        sec = ax.secondary_xaxis('top',
-            functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
-                       lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
-        sec.set_xticks(ra_ticks[::4])
-        sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
-        sec.set_xlabel('$RA$ [deg]', fontsize=14, labelpad=13)
-
-        if ax is axes[0]:
-            ax.set_ylabel('$z$', fontsize=20, labelpad=15)
-    if grouped:
-        handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
-                for k,c in CLASS_COLORS.items()]
-        fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
-               ncol=len(CLASS_COLORS), fontsize=14)
-
-    plt.suptitle(f'Zone {zone_tag(zone)}', fontsize=18)
-    os.makedirs(os.path.join(output_dir, 'wedges/complete'), exist_ok=True)
-    fig.savefig(os.path.join(output_dir, f'wedges/complete/wedge_zone_{zone_tag(zone)}.png'), dpi=PLOT_DPI)
-    plt.close(fig)
-
-
-def plot_wedges_slice(raw_df, prob_df, zone, output_dir, n_ra=15, n_z=10, offset=0.3, grouped=False):
-    """
-    Plot and save wedges for all tracers in a given zone, slicing z by BASE type.
-
-    Args:
-        raw_df (pd.DataFrame): Raw data DataFrame.
-        prob_df (pd.DataFrame): Probability data DataFrame.
-        zone (int): Zone number for title and filename.
-        output_dir (str): Output directory to save the plots.
-        n_ra (int): Number of RA ticks.
-        n_z (int): Number of z ticks.
-        offset (float): Offset to apply when slicing by BASE.
-    """
-    real = _prepare_real(raw_df, prob_df)
-    tracers = ['BGS_BRIGHT', 'LRG', 'ELG', 'QSO']
-    fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers), 20), sharex=True, sharey=True,
-                             gridspec_kw={'wspace': 0.5})
-    axes = axes.flatten()
-
-    if real.empty:
-        print(f'No real data for zone {zone}, skipping slice wedges.')
-        plt.close(fig)
-        return
-
-    ra_ctr, dec_ctr, z_lo, z_hi, half_w = _compute_bounds(real, z_lo=None, z_hi=None,
-                                                          offset=offset, use_intersection=True)
-
-    for ax, tracer in zip(axes, tracers):
-        tr_prefix = 'BGS' if tracer == 'BGS_BRIGHT' else tracer
-        sub = real[real['BASE'].str.startswith(tr_prefix)]
-        _configure_axes(ax, side='left')
-        ax.set_title(tracer.replace('_ANY',''), fontsize=16, y=1.05)
-
-        if sub.empty:
-            print(f'No data for tracer {tracer} in zone {zone}, skipping plot.')
-            continue
-
-        z_ticks, ra_ticks = _draw_grid(ax, ra_ctr, dec_ctr, z_lo, z_hi, half_w, n_ra, n_z)
-        if grouped:
-            _plot_classes(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        else:
-            _plot_simple(ax, sub, ra_ctr, dec_ctr, z_lo, z_hi, half_w)
-        _draw_border(ax, half_w, z_lo, z_hi)
-        _annotate_z_side(ax, z_ticks, half_w, z_lo, z_hi, side='left')
-
-        Dc_hi = Planck18.comoving_distance(z_hi).value
-        cos_dec = np.cos(np.deg2rad(dec_ctr))
-        denom = Dc_hi * cos_dec
-        sec = ax.secondary_xaxis('top',
-            functions=(lambda x, _den=denom: ra_ctr + np.rad2deg(x / _den),
-                       lambda r, _den=denom: _den * np.deg2rad(r - ra_ctr)))
-        sec.set_xticks(ra_ticks[::4])
-        sec.set_xticklabels([f'{rt:.0f}' for rt in ra_ticks[::4]], fontsize=13)
-        sec.set_xlabel('$RA$ [deg]', fontsize=14, labelpad=13)
-
-        if ax is axes[0]:
-            ax.set_ylabel('$z$', fontsize=20, labelpad=15)
-    if grouped:
-        handles = [Line2D([], [], marker='o', color=c, linestyle='', markersize=8, label=k)
-                for k,c in CLASS_COLORS.items()]
-        fig.legend(handles, CLASS_COLORS.keys(), bbox_to_anchor=(0.5,0.965), loc='upper center',
-                ncol=len(CLASS_COLORS), fontsize=14)
-
-    plt.suptitle(f'Zone {zone_tag(zone)}', fontsize=18)
-    os.makedirs(os.path.join(output_dir, 'wedges/slice'), exist_ok=True)
-    fig.savefig(os.path.join(output_dir, f'wedges/slice/wedge_slice_zone_{zone_tag(zone)}.png'), dpi=PLOT_DPI)
     plt.close(fig)
 
 
@@ -1143,7 +749,6 @@ def _process_zone(zone, config):
         dict: Summary of processing results.
     """
     tag_list = config['tags_map'][zone]
-    ztag = zone_tag(zone)
     raw_paths = [_raw_candidate(config['raw_dir'], zone, t or None) for t in tag_list]
     cls_paths = [_expected_class_path(config['class_dir'], zone, t or None) for t in tag_list]
     progress = config['progress']
@@ -1171,14 +776,6 @@ def _process_zone(zone, config):
     if progress:
         print(f'Zone {zone}: {len(r_df)} total objects after merging raw and class data')
 
-    prob_df = None
-    if config['need_prob']:
-        prob_paths = [_expected_prob_path(config['class_dir'], zone, t or None) for t in tag_list]
-        prob_df = _load_or_build_df(cache_dir, _zone_cache_key('prob', zone, tag_list), prob_paths,
-                                    lambda: _concat_existing(prob_paths, load_prob_df), progress=progress)
-        if progress:
-            print(f'Zone {zone}: {len(prob_df)} total objects in probability data')
-
     if config['plot_z']:
         plot_z_histogram(raw_df, zone, config['bins'], config['outdirs']['z'])
         if progress:
@@ -1191,24 +788,15 @@ def _process_zone(zone, config):
         plot_radial_distribution(raw_df, zone, config['tracers'], config['outdirs']['radial'], config['bins'])
         if progress:
             print(f'Zone {zone}: plotted radial distribution')
-    if config['plot_wedges'] and prob_df is not None:
-        plot_wedges(raw_df, prob_df, zone, config['output'], grouped=config['plot_wedges_grouped'])
-        if progress:
-            print(f'Zone {zone}: plotted wedges')
-    if config['plot_wedges_slice'] and prob_df is not None:
-        plot_wedges_slice(raw_df, prob_df, zone, config['output'], grouped=config['plot_wedges_grouped'])
-        if progress:
-            print(f'Zone {zone}: plotted wedges slice')
 
     return {'zone': zone, 'raw_rows': len(raw_df), 'class_rows': len(cls_df), 'r_rows': len(r_df),
-            'prob_rows': len(prob_df) if prob_df is not None else None, 'tags': tag_list}
+            'tags': tag_list}
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/raw')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1',
-                   help='Release directory containing classification/probabilities/pairs subfolders')
+    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1')
     p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/figs')
 
     p.add_argument('--zones', nargs='+', default=None)
@@ -1219,13 +807,10 @@ def parse_args():
     p.add_argument('--plot-radial', action='store_true', default=False)
     p.add_argument('--plot-cdf', action='store_true', default=False)
     p.add_argument('--plot-cdf-dispersion', action='store_true', default=False)
-    p.add_argument('--plot-wedges', action='store_true', default=False)
-    p.add_argument('--plot-wedges-slice', action='store_true', default=False)
-    p.add_argument('--plot-wedges-grouped', action='store_true', default=False)
     p.add_argument('--plot-entropy-cdf', action='store_true', default=False)
-    p.add_argument('--all', action='store_true', help='Enable all plots (careful: heavy)')
+    p.add_argument('--all', action='store_true', help='Enable all plots (heavy)')
     p.add_argument('--usetex', action='store_true', help='Use LaTeX text rendering (heavy)')
-    p.add_argument('--dpi', type=int, default=100, help='Figure DPI')
+    p.add_argument('--dpi', type=int, default=50, help='Figure DPI')
     p.add_argument('--xbins', type=int, default=200,
                    help='Number of x grid points for CDF interpolation (default: 200)')
     p.add_argument('--subsample-per-zone', type=int, default=10000,
@@ -1258,9 +843,6 @@ def main():
         args.plot_radial = True
         args.plot_cdf = True
         args.plot_cdf_dispersion = True
-        args.plot_wedges = True
-        args.plot_wedges_slice = True
-        args.plot_wedges_grouped = True
         args.plot_entropy_cdf = True
 
     zones = infer_zones(args.raw_dir, args.zones)
@@ -1285,22 +867,17 @@ def main():
 
     zone_config = {'raw_dir': args.raw_dir,
                    'class_dir': args.class_dir,
-                   'output': args.output,
                    'outdirs': outdirs,
                    'bins': args.bins,
                    'tracers': args.tracers,
                    'plot_z': args.plot_z,
                    'plot_radial': args.plot_radial,
                    'plot_cdf': args.plot_cdf,
-                   'plot_wedges': args.plot_wedges,
-                   'plot_wedges_slice': args.plot_wedges_slice,
-                   'plot_wedges_grouped': args.plot_wedges_grouped,
-                   'need_prob': args.plot_wedges or args.plot_wedges_slice,
                    'progress': args.progress,
                    'cache_dir': cache_dir,
-                   'tags_map': tags_map,}
+                   'tags_map': tags_map}
 
-    has_zone_work = any((args.plot_z, args.plot_radial, args.plot_cdf, args.plot_wedges, args.plot_wedges_slice))
+    has_zone_work = any((args.plot_z, args.plot_radial, args.plot_cdf))
     zone_results = []
     workers = max(1, args.workers)
     if zones:

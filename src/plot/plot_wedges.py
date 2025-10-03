@@ -1,8 +1,8 @@
 import argparse, glob, os, sys
+import numpy as np
 
 import matplotlib.pyplot as plt
 import matplotlib
-import numpy as np
 from astropy.cosmology import Planck18
 from astropy.table import Table, join, vstack
 from matplotlib.lines import Line2D
@@ -14,26 +14,24 @@ if __package__ is None or __package__ == '':
     if str(src_root) not in sys.path:
         sys.path.append(str(src_root))
     from desiproc.paths import safe_tag, zone_tag
-    from plot.common import resolve_raw_path
+    from desiproc.gen_groups import classify_by_probability
+    from plot.common import resolve_raw_path, resolve_probability_path
 else:
     from desiproc.paths import safe_tag, zone_tag
-    from .common import resolve_raw_path
+    from desiproc.gen_groups import classify_by_probability
+    from .common import resolve_raw_path, resolve_probability_path
 matplotlib.rcParams['text.usetex'] = True
 
-plt.rcParams.update({'font.family': 'serif', 'font.size': 20, 'axes.labelsize': 20,
-                     'xtick.labelsize': 20, 'ytick.labelsize': 20, 'legend.fontsize': 10})
 
-CLASS_COLORS = {'void': 'red', 'sheet': '#9ecae1', 'filament': '#3182bd', 'knot': 'navy'}
-CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
+CLASS_COLORS = {'void': 'crimson', 'sheet': 'orange', 'filament': 'cornflowerblue', 'knot': 'midnightblue'}
+CLASS_ZORDER = {'void': 3, 'sheet': 0, 'filament': 1, 'knot': 2}
+ALL_WEBTYPES = tuple(CLASS_COLORS.keys())
 ORDERED_TRACERS = ['BGS', 'LRG', 'ELG', 'QSO']
 TRACER_ZLIMS = {'BGS': 0.45, 'LRG': 1.0, 'ELG': 1.4, 'QSO': 2.2}
 
 RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS','XCM','YCM','ZCM']
 main_color, sec_color = 'black', 'gray'
-# main_color, sec_color = 'white', 'gainsboro' #for dark background
-# plt.style.use('dark_background')
-
 
 
 def read_groups(groups_dir, zone, webtype, out_tag=None):
@@ -151,6 +149,113 @@ def mask_source(randiter, source):
     return is_data if source == 'data' else (~is_data if source == 'rand' else np.ones_like(is_data, dtype=bool))
 
 
+def filter_randiters(table, iterations):
+    """
+    Return ``table`` filtered to the requested ``RANDITER`` values.
+
+    Args:
+        table (Table): Astropy table containing a ``RANDITER`` column.
+        iterations (Iterable[int] | None): Accepted iteration identifiers.
+    Returns:
+        Table: Filtered table (or the original table when ``iterations`` is falsy).
+    """
+
+    if not iterations:
+        return table
+
+    arr = np.asarray(table['RANDITER'])
+    keep = np.isin(arr, np.asarray(list(iterations), dtype=arr.dtype))
+    return table[keep]
+
+
+def classify_webtypes(prob_df):
+    """
+    Classify most likely web type per row from probability dataframe.
+    
+    Args:
+        prob_df (pd.DataFrame): DataFrame containing probability scores for each web type.
+    Returns:
+        np.ndarray: Array of classified web types.
+    """
+
+    if prob_df.empty:
+        return np.empty(0, dtype='U8')
+
+    cols = ['PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']
+    missing = [col for col in cols if col not in prob_df.columns]
+    if missing:
+        raise ValueError(f'Probability table missing columns: {missing}')
+
+    arr = prob_df[cols].to_numpy(dtype=np.float64, copy=True)
+    arr = np.nan_to_num(arr, nan=-np.inf)
+    idx = np.argmax(arr, axis=1)
+    mapping = np.array(['void', 'sheet', 'filament', 'knot'], dtype='U8')
+    out = mapping[idx]
+    bad = ~np.isfinite(arr).any(axis=1)
+    if np.any(bad):
+        out[bad] = ''
+    return out
+
+
+def resolve_zones(release, zone_arg):
+    """
+    Resolve the list of zones to process based on the release and CLI input.
+
+    EDR accepts integers 0..19 or the token ``all`` (default). DR1 requires an
+    explicit zone name (e.g., ``NGC1``).
+    
+    Args:
+        release (str): The release version (e.g., "EDR" or "DR1").
+        zone_arg (str | list): The zone(s) to process, can be a single zone name or a list of names.
+    Returns:
+        list: A list of resolved zone identifiers.
+    """
+
+    release = str(release).upper()
+
+    def _tokenize(value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            tokens = []
+            for item in value:
+                tokens.extend(str(item).replace(',', ' ').split())
+            return tokens
+        return str(value).replace(',', ' ').split()
+
+    tokens = _tokenize(zone_arg)
+
+    if release == 'EDR':
+        if not tokens:
+            return list(range(20))
+        zones = []
+        for tok in tokens:
+            if str(tok).lower() == 'all':
+                return list(range(20))
+            try:
+                val = int(tok)
+            except ValueError:
+                raise ValueError(f'Invalid EDR zone "{tok}" (expected integer 0-19 or "all")')
+            if not (0 <= val <= 19):
+                raise ValueError(f'EDR zone {val} outside [0, 19]')
+            zones.append(val)
+        return sorted(set(zones)) if zones else list(range(20))
+
+    if not tokens:
+        raise ValueError('DR1 release requires specifying --zone (e.g., NGC1).')
+
+    zones = []
+    for tok in tokens:
+        tok = str(tok).strip().upper()
+        if tok == 'ALL':
+            raise ValueError('DR1 does not support the "all" zone selector.')
+        zones.append(tok)
+
+    if len(zones) != 1:
+        raise ValueError('DR1 plotting expects a single zone name (e.g., NGC1).')
+    return zones
+
+
 def tracer_prefixes(tr_types):
     """
     Extracts the tracer prefixes from the TRACERTYPE strings.
@@ -203,7 +308,7 @@ def _init_ax(ax, title):
         ax (matplotlib.axes.Axes): The axis to initialize.
         title (str): The title for the plot.
     """
-    ax.set_title(title, fontsize=24, y=1.05)
+    ax.set_title(title, fontsize=18, y=1.09)
     for sp in ax.spines.values():
         sp.set_visible(False)
     ax.set_xticks([]); ax.set_yticks([])
@@ -220,8 +325,18 @@ def _compute_zone_params(ravec, zvec, z_lim):
     Returns:
         tuple: A tuple containing the computed parameters (ra_min, ra_max, ra_ctr, Dc, half_w, zmax).
     """
-    zmax_data = float(np.nanmax(zvec)) * 1.02
-    zmax = min(zmax_data, z_lim) if z_lim is not None else zmax_data
+    if zvec.size:
+        zmax_data = float(np.nanmax(zvec)) * 1.02
+    else:
+        zmax_data = 0.0
+    if z_lim is not None:
+        zmax = float(z_lim)
+        if zmax <= 0:
+            zmax = zmax_data
+        else:
+            zmax = max(zmax, 1e-8)
+    else:
+        zmax = zmax_data
     ra_min, ra_max = float(np.nanmin(ravec)), float(np.nanmax(ravec))
     ra_ctr = 0.5 * (ra_min + ra_max)
     Dc = Planck18.comoving_distance(zmax).value
@@ -294,8 +409,8 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc, y_max):
     top4 = np.linspace(ra_ticks.min(), ra_ticks.max(), 4)
     x_top = Dc * np.deg2rad(top4 - ra_ctr)
     for xt, rt in zip(x_top, top4):
-        ax.text(xt, y_max + 0.01*y_max, f'{rt:.0f}', ha='center', va='bottom', fontsize=20)
-    ax.text(0, y_max + 0.03*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=20)
+        ax.text(xt, y_max + 0.01*y_max, f'{rt:.0f}', ha='center', va='bottom', fontsize=19)
+    ax.text(0, y_max + 0.05*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=19)
 
 
 def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
@@ -310,70 +425,99 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
         idx (int): Index of the current subplot.
         ylabel (str): Label for the y-axis.
     """
-    for z0 in z_ticks:
+    for idx_tick, z0 in enumerate(z_ticks):
         x0r = half_w * (z0 / y_max) if y_max > 0 else 0
         angle = np.degrees(np.arctan2(-z0, -x0r)) if y_max > 0 else 0
-        offset = np.sign(x0r) * half_w * 0.11
+        offset = np.sign(x0r) * half_w * 0.11 if np.abs(x0r) > 1e-6 else half_w * 0.11
         ax.text(x0r + offset, z0, f'{z0:.2f}', ha='left', va='center', rotation=angle + 180, fontsize=20)
     if idx == 0:
-        ax.set_ylabel(ylabel, fontsize=25, labelpad=15)
+        ax.set_ylabel(ylabel, fontsize=30, labelpad=15)
 
 
 def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z',
                 connect_lines=False, line_min_npts=2,
                 min_npts=2, top_groups=None, max_points=None,
                 z_range=None, ra_range=None,
-                use_presets=False, highlight_longest=None, highlight_connect=False):
-    """
-    Plots the wedge diagrams for the given tracers and zone.
+                use_presets=False, highlight_longest=None, highlight_connect=False,
+                *, color_mode='group', title=None, webtype_order=None, mono_color='black',
+                per_tracer_caps=None):
+    """Plot wedge diagrams for the requested tracers.
 
-    Args:
-        joined (pd.DataFrame): The joined data containing tracer information.
-        tracers (list): List of tracer types to plot.
-        zone (int): The zone number to plot.
-        webtype (str): The type of web to plot.
-        out_png (str): Output file path for the plot.
-        smin (float): Minimum marker size.
-        max_z (float): Global maximum redshift cap. Per-tracer limits (TRACER_ZLIMS) are applied and this
-                       value acts as an additional upper bound.
-        n_ra (int): Number of RA ticks to draw.
-        n_z (int): Number of redshift ticks to draw.
-        coord (str): Coordinate system being used ('z' or 'dc').
-        connect_lines (bool): Whether to connect points in the same group with lines.
-        line_min_npts (int): Minimum number of points in a group to draw connecting lines.
+    Supports three colouring modes:
+      - ``group`` (default): reuse the historical palette keyed by GROUPID.
+      - ``webtype``: colour by the WEBTYPE column (void/sheet/filament/knot).
+      - ``mono``: draw all points with a single colour (structure overview).
     """
+
+    color_mode = str(color_mode or 'group').lower()
+    if color_mode not in {'group', 'webtype', 'mono'}:
+        raise ValueError(f'Unsupported color_mode={color_mode}')
+
     tracers = [str(t).split('_', 1)[0].upper() for t in tracers]
     tracers = [t for t in ORDERED_TRACERS if t in tracers]
+
+    if per_tracer_caps:
+        caps_map = {str(k).split('_', 1)[0].upper(): float(v) for k, v in per_tracer_caps.items() if v is not None}
+    else:
+        caps_map = {}
 
     tr_types = np.asarray(joined['TRACERTYPE']).astype(str)
     ravec = np.asarray(joined['RA'], float)
     zvec = np.asarray(joined['Z'], float)
-    gids = np.asarray(joined['GROUPID'], int)
-    npts = np.asarray(joined['NPTS'], int) if 'NPTS' in joined.colnames else np.ones_like(gids)
+
+    if 'GROUPID' in joined.colnames:
+        gids = np.asarray(joined['GROUPID'], dtype=np.int64)
+    else:
+        gids = None
+    npts = np.asarray(joined['NPTS'], int) if 'NPTS' in joined.colnames else np.ones(tr_types.size, dtype=int)
+
+    webtypes = None
+    if color_mode == 'webtype':
+        if 'WEBTYPE' not in joined.colnames:
+            raise ValueError('WEBTYPE column required for color_mode="webtype"')
+        webtypes = np.char.lower(np.asarray(joined['WEBTYPE']).astype(str))
 
     tr_pref = tracer_prefixes(tr_types)
 
     nrows, ncols = subplot_grid(len(tracers))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 30*nrows), sharex=False, sharey=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15,11), sharex=False, sharey=False,
+                             gridspec_kw={'wspace': 0.5, 'hspace': 0.})
+    fig.subplots_adjust(top=0.85)
     axes = np.atleast_1d(axes).ravel()
-    plt.suptitle(f'{webtype.capitalize()}s in zone {zone_tag(zone)}', fontsize=27, y=1.01)
+
+    default_title = f'{webtype.capitalize()}s in zone {zone_tag(zone)}'
+    if color_mode == 'webtype':
+        sp_t = 1.04
+    else:
+        sp_t = 0.97
+    plt.suptitle(title or default_title, fontsize=22, y=sp_t)
 
     cmap = plt.get_cmap('tab20')
     palette = np.asarray(cmap.colors)
+    point_size = max(int(smin or 1), 5)
 
-    for i, tr in enumerate(tracers):
+    if webtype_order is None:
+        webtype_order = list(ALL_WEBTYPES)
+    webtype_order = [str(w).lower() for w in webtype_order]
+    used_webtypes = set()
+
+    has_groups = gids is not None
+
+    for idx_ax, tr in enumerate(tracers):
         tr = str(tr)
-        ax = axes[i]
+        ax = axes[idx_ax]
         _init_ax(ax, tr)
 
         m = (tr_pref == tr)
-        if use_presets:
+        if color_mode == 'group':
+            local_min_npts = 0
+        elif use_presets:
             preset_min = {'BGS': 8, 'LRG': 12, 'ELG': 8, 'QSO': 6}.get(tr, min_npts)
             local_min_npts = max(int(min_npts or 0), int(preset_min or 0))
         else:
             local_min_npts = int(min_npts or 0)
 
-        if local_min_npts > 1:
+        if has_groups and local_min_npts > 1:
             m &= (npts >= local_min_npts)
 
         if z_range is not None and len(z_range) == 2:
@@ -383,7 +527,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
             rlo, rhi = float(ra_range[0]), float(ra_range[1])
             m &= (ravec >= rlo) & (ravec <= rhi)
 
-        if top_groups is not None and int(top_groups) > 0:
+        if has_groups and top_groups is not None and int(top_groups) > 0:
             tg = gids[m]
             tn = npts[m]
             if tg.size > 0:
@@ -392,12 +536,20 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                 order = np.argsort(-g_sizes)
                 keep_g = set(uniq_g[order][:int(top_groups)].tolist())
                 m &= np.isin(gids, list(keep_g))
-        tr_key = str(tr).split('_', 1)[0].upper()
-        z_cap = TRACER_ZLIMS.get(tr_key, None)
-        if max_z is not None:
-            z_cap = min(z_cap, max_z) if z_cap is not None else max_z
-        if z_cap is not None:
+
+        tr_key = tr.split('_', 1)[0].upper()
+        z_cap = None
+        if tr_key in caps_map:
+            z_cap = float(caps_map[tr_key])
             m &= (zvec <= z_cap)
+        elif max_z is not None:
+            z_cap = float(max_z)
+            m &= (zvec <= z_cap)
+        else:
+            z_cap = TRACER_ZLIMS.get(tr_key, None)
+            if z_cap is not None:
+                z_cap = float(z_cap)
+                m &= (zvec <= z_cap)
 
         if not np.any(m):
             ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes, fontsize=16)
@@ -408,12 +560,15 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
 
         ra = ravec[m]
         yvals = zvec[m] if coord == 'z' else Planck18.comoving_distance(zvec[m]).value
-        gid = gids[m]
+        gid = gids[m] if has_groups else None
+        wt_local = webtypes[m] if webtypes is not None else None
 
         z_ticks, ra_ticks = _draw_grid(ax, ra_min, ra_max, ra_ctr, Dc_maxz, half_w, y_max, n_ra, n_z, coord)
 
-        _, color_idx = np.unique(gid, return_inverse=True)
-        idx_mod = color_idx % palette.shape[0]
+        idx_mod = None
+        if color_mode == 'group' and has_groups:
+            _, color_idx = np.unique(gid, return_inverse=True)
+            idx_mod = color_idx % palette.shape[0]
 
         scale = yvals / y_max
         x = scale * (Dc_maxz * np.deg2rad(ra - ra_ctr))
@@ -429,24 +584,66 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                 mask_sel[sel_idx[take]] = True
                 mclip = mask_sel
 
-        if connect_lines:
-            ci_sub = idx_mod[mclip]
+        x_sel = x[mclip]
+        y_sel = yvals[mclip]
+
+        if connect_lines and has_groups:
             gid_sub = gid[mclip]
-            x_sub = x[mclip]
-            y_sub = yvals[mclip]
+            x_sub = x_sel
+            y_sub = y_sel
 
-            for g in np.unique(gid_sub):
-                selg = (gid_sub == g)
-                if np.count_nonzero(selg) < line_min_npts:
+            if color_mode == 'group' and idx_mod is not None:
+                ci_sub = idx_mod[mclip]
+                for gval in np.unique(gid_sub):
+                    selg = (gid_sub == gval)
+                    if np.count_nonzero(selg) < line_min_npts:
+                        continue
+                    order = np.argsort(y_sub[selg])
+                    xs = x_sub[selg][order]
+                    ys = y_sub[selg][order]
+                    ax.plot(xs, ys, lw=0.5, alpha=0.9,
+                            color=palette[int(ci_sub[selg][0])], zorder=0)
+            elif color_mode == 'webtype' and wt_local is not None:
+                wt_sub = wt_local[mclip]
+                for gval in np.unique(gid_sub):
+                    selg = (gid_sub == gval)
+                    if np.count_nonzero(selg) < line_min_npts:
+                        continue
+                    order = np.argsort(y_sub[selg])
+                    xs = x_sub[selg][order]
+                    ys = y_sub[selg][order]
+                    wt_g = str(wt_sub[selg][0])
+                    ax.plot(xs, ys, lw=0.5, alpha=0.9,
+                            color=CLASS_COLORS.get(wt_g, 'gray'), zorder=CLASS_ZORDER.get(wt_g, 1))
+            elif color_mode == 'mono':
+                for gval in np.unique(gid_sub):
+                    selg = (gid_sub == gval)
+                    if np.count_nonzero(selg) < line_min_npts:
+                        continue
+                    order = np.argsort(y_sub[selg])
+                    xs = x_sub[selg][order]
+                    ys = y_sub[selg][order]
+                    ax.plot(xs, ys, lw=0.5, alpha=0.6, color=mono_color, zorder=0)
+
+        if color_mode == 'group' and idx_mod is not None:
+            ax.scatter(x_sel, y_sel, s=point_size, edgecolor='k', lw=0.15,
+                       c=palette[idx_mod[mclip]], alpha=1.0)
+        elif color_mode == 'webtype' and wt_local is not None:
+            wt_sel = wt_local[mclip]
+            for wt in webtype_order:
+                sel = (wt_sel == wt)
+                if not np.any(sel):
                     continue
-                order = np.argsort(y_sub[selg])
-                xs = x_sub[selg][order]
-                ys = y_sub[selg][order]
-                ax.plot(xs, ys, lw=0.5, alpha=0.9, color=palette[int(ci_sub[selg][0])], zorder=0)
+                used_webtypes.add(wt)
+                ax.scatter(x_sel[sel], y_sel[sel], s=point_size,
+                        c=CLASS_COLORS.get(wt, 'gray'), alpha=1.0,
+                        zorder=2 + CLASS_ZORDER.get(wt, 0),
+                        edgecolor='k', lw=0.15,)
+        else:  # mono
+            ax.scatter(x_sel, y_sel, s=point_size, c=mono_color,
+                       alpha=0.65, edgecolor='none')
 
-        ax.scatter(x[mclip], yvals[mclip], s=max(smin, 2), c=palette[idx_mod[mclip]], alpha=0.6)
-
-        if highlight_longest is not None and int(highlight_longest) > 0:
+        if has_groups and highlight_longest is not None and int(highlight_longest) > 0:
             gid_all = gid
             x_all = x
             y_all = yvals
@@ -471,10 +668,11 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                     top_idx = np.argsort(-lengths)[:k]
                     top_g = set(uniq_g[top_idx].tolist())
                     mh = mclip & np.isin(gid_all, list(top_g))
-                    ax.scatter(x_all[mh], y_all[mh], s=16, facecolors='none', edgecolors='black', linewidths=0.6, zorder=5)
+                    ax.scatter(x_all[mh], y_all[mh], s=point_size*1.8, facecolors='none',
+                               edgecolors='black', linewidths=0.6, zorder=5)
                     if highlight_connect:
-                        for g in top_g:
-                            selg = (gid_all == g) & mclip
+                        for gval in top_g:
+                            selg = (gid_all == gval) & mclip
                             if np.count_nonzero(selg) < max(2, line_min_npts):
                                 continue
                             order2 = np.argsort(y_all[selg])
@@ -484,13 +682,26 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
 
         _draw_borders(ax, half_w, y_max)
         _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc_maxz, y_max)
-        _annotate_y_side(ax, z_ticks, half_w, y_max, i, 'z' if coord == 'z' else r'$D_c$ [Mpc]')
+        _annotate_y_side(ax, z_ticks, half_w, y_max, idx_ax, 'z' if coord == 'z' else r'$D_c$ [Mpc]')
 
-    for j in range(i+1, len(axes)):
+    for j in range(len(tracers), len(axes)):
         axes[j].axis('off')
 
-    fig.tight_layout()    
+    legend_handles = None
+    if color_mode == 'webtype' and used_webtypes:
+        order = [wt for wt in webtype_order if wt in used_webtypes]
+        handles = [Line2D([], [], marker='o', linestyle='', markersize=10,
+                          markerfacecolor=CLASS_COLORS.get(wt, 'gray'), markeredgecolor='none',
+                          label=wt.capitalize()) for wt in order]
+        if handles:
+            legend_handles = handles
+
+    if legend_handles:
+        fig.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, 1.012),
+                   ncol=min(len(legend_handles), 4), frameon=True, fontsize=20,)
+
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
+    print(out_png)
     plt.close(fig)
     return out_png
 
@@ -565,7 +776,7 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
     y_max = Planck18.comoving_distance(z_cap).value if coord == 'dc' else z_cap
 
     nrows, ncols = subplot_grid(len(tracers))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 30*nrows), sharex=False, sharey=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(10,15), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
     plt.suptitle(f'{webtype.capitalize()} groups (centers) in zone {zone_tag(zone)}', fontsize=27, y=1.01)
 
@@ -600,22 +811,23 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
+    print(out_png)
     plt.close(fig)
     return out_png
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--release', choices=['EDR','DR1'], default='DR1', help='Dataset release: EDR (zones 00..19) or DR1 (NGC1/NGC2)')
-    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/raw', help='Raw data dir')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/class', help='Classification dir')
-    p.add_argument('--groups-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/groups', help='Output groups dir')
-    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/figs/wedges/filaments', help='Output file path')
+    p.add_argument('--release', choices=['EDR','DR1'], default='edr', help='Dataset release: EDR (zones 00..19) or DR1 (NGC1/NGC2)')
+    p.add_argument('--base-dir', default='/pscratch/sd/v/vtorresg/cosmic-web', help='Root directory containing release subdirectories (e.g., edr/raw, edr/groups, edr/probabilities)')
+    p.add_argument('--output', default=None, help='Output directory for figures (defaults to {base}/{release}/figs/{mode})')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames (e.g., tracer)')
-    p.add_argument('--zone', type=str, default='NGC1', help='EDR: 0..19 or 00..19; DR1: NGC1/NGC2')
-    p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
+    p.add_argument('--zone', type=str, default='all', help='EDR: 0..19 or "all" (default processes every zone); DR1: NGC1/NGC2')
+    p.add_argument('--webtype', choices=['void','sheet','filament','knot','all'], default='filament', help='Web classification to load ("all" when plotting types)')
+    p.add_argument('--mode', choices=['groups','types','structure'], default='groups', help='Plot style: group colours, web-type colours, or monochrome structure overview')
     p.add_argument('--tracers', nargs='*', default=None)
     p.add_argument('--source', choices=['data','rand','both'], default='data')
+    p.add_argument('--randiters', nargs='*', type=int, default=None, metavar='ITER', help='Restrict to specific RANDITER values (e.g., -1 for data, 0 for first random iteration)')
     p.add_argument('--smin', type=int, default=1)
     p.add_argument('--max-z', type=float, default=None)
     p.add_argument('--coord', choices=['z','dc'], default='z', help='Y-axis coordinate: redshift z (default) or comoving distance Dc')
@@ -638,53 +850,218 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if args.release.upper() == 'EDR':
-        try:
-            zone = int(args.zone)
-        except Exception:
-            zone = int(str(args.zone))
+    mode = args.mode.lower()
+    webtype_arg = str(args.webtype).lower()
+    if mode == 'groups' and webtype_arg == 'all':
+        raise ValueError('Use --mode types to plot all web classifications together.')
+
+    base_dir = os.path.abspath(str(args.base_dir))
+    release_token = str(args.release).lower()
+    release_dir = os.path.join(base_dir, release_token)
+    raw_dir = os.path.join(release_dir, 'raw')
+    groups_dir = os.path.join(release_dir, 'groups')
+    prob_root = release_dir
+    if args.output:
+        output_dir = os.path.abspath(str(args.output))
     else:
-        zone = str(args.zone)
+        output_dir = os.path.join(release_dir, 'figs', mode)
 
-    os.makedirs(args.output, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    groups = read_groups(args.groups_dir, zone, args.webtype, out_tag=args.out_tag)
-    gm = mask_source(np.asarray(groups['RANDITER']), args.source)
-    groups = groups[gm]
+    release = args.release.upper()
+    zones = resolve_zones(release, args.zone)
 
-    raw = read_raw_min(args.raw_dir, args.class_dir, zone, out_tag=args.out_tag)
-    rm = mask_source(np.asarray(raw['RANDITER']), args.source)
-    raw = raw[rm]
+    for zone in zones:
+        raw = read_raw_min(raw_dir, release_dir, zone, out_tag=args.out_tag)
+        rm = mask_source(np.asarray(raw['RANDITER']), args.source)
+        raw = raw[rm]
+        raw = filter_randiters(raw, args.randiters)
 
-    joined = join(groups, raw, keys=['TARGETID','TRACERTYPE','RANDITER'], join_type='inner')
+        if len(raw) == 0:
+            print(f'Skipping zone {zone_tag(zone)}: raw catalogue empty after filters.', file=sys.stderr)
+            continue
 
-    available = tracer_prefixes(np.asarray(joined['TRACERTYPE']).astype(str))
-    avail_set = set(map(str, available))
+        zone_z = np.asarray(raw['Z'], dtype=float)
+        if zone_z.size == 0:
+            print(f'Skipping zone {zone_tag(zone)}: no Z values available.', file=sys.stderr)
+            continue
 
-    if args.tracers:
-        tokens = []
-        for t in args.tracers:
-            tokens.extend(str(t).replace(',', ' ').split())
-        req_pref = [tok.split('_', 1)[0].upper() for tok in tokens]
-        req_set = set(req_pref)
-        tracers = [t for t in ORDERED_TRACERS if (t in req_set) and (t in avail_set)]
-    else:
-        tracers = [t for t in ORDERED_TRACERS if t in avail_set]
+        if args.max_z is not None:
+            global_z_cap = float(args.max_z)
+        else:
+            global_z_cap = float(np.nanmax(zone_z)) * 1.02
 
-    tag = zone_tag(zone)
-    tsuf = safe_tag(args.out_tag)
-    out_png = os.path.join(args.output, f'groups_wedges_zone_{tag}{tsuf}_{args.webtype}_{args.coord}.png')
-    path = plot_wedges(joined, tracers, args.zone, args.webtype, out_png, args.smin, args.max_z,
-                       n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines,
-                       line_min_npts=args.line_min_npts,
-                       min_npts=args.min_npts, top_groups=args.top_groups, max_points=args.max_points,
-                       z_range=args.z_range, ra_range=args.ra_range,
-                       use_presets=args.use_presets, highlight_longest=args.highlight_longest,
-                       highlight_connect=args.highlight_connect)
-    if args.plot_centers:
-        out_cent = os.path.join(args.output, f'groups_centers_zone_{tag}{tsuf}_{args.webtype}_{args.coord}.png')
-        plot_group_centers(joined, tracers, args.zone, args.webtype, out_cent, min_npts=args.center_min_npts,
-                           max_z=args.max_z, n_ra=args.bins, n_z=args.bins, coord=args.coord)
+        if args.z_range is not None and len(args.z_range) == 2:
+            try:
+                z_hi = float(args.z_range[1])
+                global_z_cap = min(global_z_cap, z_hi)
+            except Exception:
+                pass
+
+        raw_tr_pref = tracer_prefixes(np.asarray(raw['TRACERTYPE']).astype(str))
+        tracer_caps = {}
+        for tr in ORDERED_TRACERS:
+            mask_tr = (raw_tr_pref == tr)
+            if not np.any(mask_tr):
+                continue
+            zvals_tr = zone_z[mask_tr]
+            if zvals_tr.size == 0:
+                continue
+            tracer_caps[tr] = float(np.nanmax(zvals_tr)) * 1.02
+        if tracer_caps:
+            for key, val in list(tracer_caps.items()):
+                if args.z_range is not None and len(args.z_range) == 2:
+                    try:
+                        z_hi = float(args.z_range[1])
+                        tracer_caps[key] = min(val, z_hi)
+                    except Exception:
+                        pass
+                if args.max_z is not None:
+                    tracer_caps[key] = min(tracer_caps[key], float(args.max_z))
+            global_z_cap = max(tracer_caps.values())
+
+        joined = None
+        plot_table = raw
+        legend_types = []
+
+        if mode == 'groups':
+            requested_webtypes = [webtype_arg]
+            group_tables = []
+            missing_webtypes = []
+            active_webtypes = []
+            for wtype in requested_webtypes:
+                try:
+                    g = read_groups(groups_dir, zone, wtype, out_tag=args.out_tag)
+                except FileNotFoundError:
+                    missing_webtypes.append(wtype)
+                    continue
+                gm = mask_source(np.asarray(g['RANDITER']), args.source)
+                g = g[gm]
+                g = filter_randiters(g, args.randiters)
+                if len(g) == 0:
+                    continue
+                if wtype not in active_webtypes:
+                    active_webtypes.append(wtype)
+                g = g.copy()
+                g['WEBTYPE'] = np.array([wtype] * len(g), dtype='U8')
+                group_tables.append(g)
+
+            if missing_webtypes:
+                missing = ', '.join(sorted(missing_webtypes))
+                raise RuntimeError(f'No groups files found for zone {zone_tag(zone)} and webtype(s): {missing}')
+
+            if not group_tables:
+                print(f'Skipping zone {zone_tag(zone)}: no groups available after filters.', file=sys.stderr)
+                continue
+
+            groups = group_tables[0] if len(group_tables) == 1 else vstack(group_tables, metadata_conflicts='silent')
+            joined = join(groups, raw, keys=['TARGETID','TRACERTYPE','RANDITER'], join_type='inner')
+            if len(joined) == 0:
+                print(f'Skipping zone {zone_tag(zone)}: join between groups and raw catalog returned no rows.', file=sys.stderr)
+                continue
+            plot_table = joined
+            legend_types = active_webtypes or requested_webtypes
+
+        elif mode == 'types':
+            try:
+                prob_path = resolve_probability_path(prob_root, zone, out_tag=args.out_tag)
+            except FileNotFoundError:
+                print(f'Skipping zone {zone_tag(zone)}: probability file not found.', file=sys.stderr)
+                continue
+
+            prob_tbl = Table.read(prob_path, memmap=True)
+            prob_tbl = classify_by_probability(prob_tbl)
+
+            if args.source == 'data':
+                prob_tbl = prob_tbl[prob_tbl['ISDATA'] == True]
+            elif args.source == 'rand':
+                prob_tbl = prob_tbl[prob_tbl['ISDATA'] == False]
+
+            if len(prob_tbl) == 0:
+                print(f'Skipping zone {zone_tag(zone)}: probability table empty after source filter.', file=sys.stderr)
+                continue
+
+            if args.randiters is not None:
+                mask_iters = np.isin(np.asarray(prob_tbl['RANDITER'], dtype=np.int64),
+                                     np.asarray(list(args.randiters), dtype=np.int64))
+                prob_tbl = prob_tbl[mask_iters]
+                if len(prob_tbl) == 0:
+                    print(f'Skipping zone {zone_tag(zone)}: no rows left after RANDITER filter.', file=sys.stderr)
+                    continue
+
+            good = prob_tbl['WEBTYPE'] != ''
+            prob_tbl = prob_tbl[good]
+            if len(prob_tbl) == 0:
+                print(f'Skipping zone {zone_tag(zone)}: no valid classifications after filtering.', file=sys.stderr)
+                continue
+
+            keep_cols = [col for col in ('TARGETID','RANDITER','WEBTYPE','ISDATA') if col in prob_tbl.colnames]
+            prob_keep = prob_tbl[keep_cols]
+
+            joined_types = join(raw, prob_keep, keys=['TARGETID','RANDITER'], join_type='inner')
+            if len(joined_types) == 0:
+                print(f'Skipping zone {zone_tag(zone)}: no overlap between raw and probability tables.', file=sys.stderr)
+                continue
+
+            plot_table = joined_types
+            present = np.char.lower(np.unique(np.asarray(plot_table['WEBTYPE']).astype(str)))
+            legend_types = [wt for wt in ALL_WEBTYPES if wt in present]
+
+        else:
+            legend_types = []
+
+        available = tracer_prefixes(np.asarray(plot_table['TRACERTYPE']).astype(str))
+        avail_set = set(map(str, available))
+
+        if args.tracers:
+            tokens = []
+            for t in args.tracers:
+                tokens.extend(str(t).replace(',', ' ').split())
+            req_pref = [tok.split('_', 1)[0].upper() for tok in tokens]
+            req_set = set(req_pref)
+            tracers = [t for t in ORDERED_TRACERS if (t in req_set) and (t in avail_set)]
+        else:
+            tracers = [t for t in ORDERED_TRACERS if t in avail_set]
+
+        if not tracers:
+            raise RuntimeError(f'None of the requested tracers are present after filtering for zone {zone_tag(zone)}.')
+
+        tag = zone_tag(zone)
+        tsuf = safe_tag(args.out_tag)
+
+        if mode == 'groups':
+            out_png = os.path.join(output_dir, f'groups_zone_{tag}{tsuf}_{webtype_arg}_{args.coord}.png')
+        elif mode == 'types':
+            out_png = os.path.join(output_dir, f'webtypes_zone_{tag}{tsuf}_{webtype_arg}_{args.coord}.png')
+        else:
+            out_png = os.path.join(output_dir, f'data_zone_{tag}{tsuf}_{webtype_arg}_{args.coord}.png')
+
+        zone_label = tag
+        legend_order = legend_types
+        mode_kwargs = {
+            'groups': dict(color_mode='group', title=f"{webtype_arg.capitalize()}s in zone {int(zone_label)}"),
+            'types': dict(color_mode='webtype', title=f"Web types in zone {int(zone_label)}", webtype_order=legend_order),
+            'structure': dict(color_mode='mono', title=f"Zone {int(zone_label)}")
+        }
+
+        mode_args = mode_kwargs[mode]
+        webtype_for_plot = 'all' if mode == 'types' else webtype_arg
+        plot_wedges(plot_table, tracers, zone, webtype_for_plot, out_png, args.smin, global_z_cap,
+                    n_ra=args.bins, n_z=args.bins, coord=args.coord, connect_lines=args.connect_lines,
+                    line_min_npts=args.line_min_npts,
+                    min_npts=args.min_npts, top_groups=args.top_groups, max_points=args.max_points,
+                    z_range=args.z_range, ra_range=args.ra_range,
+                    use_presets=args.use_presets, highlight_longest=args.highlight_longest,
+                    highlight_connect=args.highlight_connect, per_tracer_caps=tracer_caps, **mode_args)
+
+        if args.plot_centers:
+            if joined is None:
+                print(f'Skipping group centers for zone {zone_label}: no group catalogue available.', file=sys.stderr)
+            else:
+                center_label = 'types' if mode == 'types' else webtype_arg
+                out_cent = os.path.join(output_dir, f'groups_centers_zone_{tag}{tsuf}_{center_label}_{args.coord}.png')
+                plot_group_centers(joined, tracers, zone, center_label, out_cent, min_npts=args.center_min_npts,
+                                   max_z=global_z_cap, n_ra=args.bins, n_z=args.bins, coord=args.coord)
 
 
 if __name__ == '__main__':

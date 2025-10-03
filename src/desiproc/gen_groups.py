@@ -2,7 +2,9 @@ import argparse
 import gzip
 import os
 import shutil
+import sys
 import time as t
+from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
@@ -10,11 +12,17 @@ from astropy.table import Table, join, vstack
 from scipy.spatial import ConvexHull, QhullError
 from sklearn.cluster import DBSCAN
 
-from paths import locate_classification_file, safe_tag, zone_tag
+if __package__ is None or __package__ == '':
+    pkg_root = Path(__file__).resolve().parent
+    if str(pkg_root) not in sys.path:
+        sys.path.append(str(pkg_root))
+    from paths import locate_probability_file, safe_tag, zone_tag
+else:
+    from .paths import locate_probability_file, safe_tag, zone_tag
 
 
 RAW_COLS = ['TRACERTYPE','RANDITER','TARGETID','XCART','YCART','ZCART']
-CLASS_COLS = ['TARGETID','RANDITER','NDATA','NRAND']
+PROB_COLS = ['TARGETID','RANDITER','ISDATA','PVOID','PSHEET','PFILAMENT','PKNOT']
 
 
 def _read_fits_columns(path, cols):
@@ -55,11 +63,11 @@ def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     else:
         raise FileNotFoundError(f'Raw table not found for zone {zone} with tag {out_tag}')
 
-    class_path = locate_classification_file(class_dir, zone, out_tag)
-    return raw_path, class_path
+    prob_path = locate_probability_file(class_dir, zone, out_tag)
+    return raw_path, prob_path
 
 
-def _read_zone_tables(raw_path, class_path):
+def _read_zone_tables(raw_path, prob_path):
     """
     Read the raw and class tables for a given zone.
     
@@ -70,41 +78,47 @@ def _read_zone_tables(raw_path, class_path):
         Tuple[Table, Table]: Tuple containing the raw and classification tables.
     """
     raw = _read_fits_columns(raw_path, RAW_COLS)
-    klass = _read_fits_columns(class_path, CLASS_COLS)
-    return raw, klass
+    prob = _read_fits_columns(prob_path, PROB_COLS)
+    return raw, prob
 
 
-def classify_by_r(klass, r_lower, r_upper):
+def classify_by_probability(prob_tbl):
     """
-    Classify rows according to the ratio of real to random counts.
-
+    Assign WEBTYPE per row using the maximum of the probability columns.
+    
     Args:
-        klass (Table): Classification table with ``NDATA`` and ``NRAND`` columns.
-        r_lower (float): Lower threshold (should be negative).
-        r_upper (float): Upper threshold (should be positive).
+        prob_tbl (Table): Table containing probability columns.
     Returns:
-        Table: Classification table with an updated ``WEBTYPE`` column.
-    Raises:
-        ValueError: If the thresholds do not straddle zero.
+        Table: Updated table with a new 'WEBTYPE' column.
     """
+    prob_tbl = prob_tbl.copy()
 
-    if r_lower >= 0 or r_upper <= 0:
-        raise ValueError('r_lower must be negative and r_upper must be positive.')
+    if 'RANDITER' not in prob_tbl.colnames:
+        prob_tbl['RANDITER'] = np.full(len(prob_tbl), -1, dtype=np.int32)
+    prob_tbl['RANDITER'] = np.asarray(prob_tbl['RANDITER'], dtype=np.int32)
 
-    ndata = np.asarray(klass['NDATA'], float)
-    nrand = np.asarray(klass['NRAND'], float)
-    denom = ndata + nrand
-    r = np.divide(ndata - nrand, denom, out=np.zeros_like(denom, dtype=float),
-                  where=denom > 0,)
+    if 'ISDATA' not in prob_tbl.colnames:
+        prob_tbl['ISDATA'] = (np.asarray(prob_tbl['RANDITER']) == -1)
 
-    web = np.empty(r.size, dtype='U8')
-    web[r <= r_lower] = 'void'
-    web[(r > r_lower) & (r < 0.0)] = 'sheet'
-    web[(r >= 0.0) & (r < r_upper)] = 'filament'
-    web[r >= r_upper] = 'knot'
+    if 'TARGETID' not in prob_tbl.colnames:
+        raise KeyError('Probability table missing TARGETID column')
 
-    klass['WEBTYPE'] = web
-    return klass
+    prob_tbl['TARGETID'] = np.asarray(prob_tbl['TARGETID'], dtype=np.int64)
+
+    columns = []
+    for name in ('PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT'):
+        if name in prob_tbl.colnames:
+            columns.append(np.asarray(prob_tbl[name], dtype=float))
+        else:
+            columns.append(np.zeros(len(prob_tbl), dtype=float))
+
+    arr = np.vstack(columns).T if columns else np.zeros((len(prob_tbl), 4), dtype=float)
+    arr = np.nan_to_num(arr, nan=-np.inf)
+    idx = np.argmax(arr, axis=1)
+    mapping = np.array(['void', 'sheet', 'filament', 'knot'], dtype='U8')
+    prob_tbl['WEBTYPE'] = mapping[idx]
+
+    return prob_tbl
 
 
 def _split_blocks(raw_sub):
@@ -302,7 +316,7 @@ def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None, release_tag=None):
 
 
 def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
-                 r_lower, r_upper, release_tag=None, out_tag=None):
+                 release_tag=None, out_tag=None):
     """
     Generate group catalogues for a zone.
 
@@ -313,25 +327,45 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
         out_dir (str): Destination directory for groups.
         webtype (str): Desired cosmic web type (e.g., ``'filament'``).
         source (str): Source selection (``'data'``, ``'rand'``, or ``'both'``).
-        r_lower (float): Lower threshold applied when classifying by ``r``.
-        r_upper (float): Upper threshold applied when classifying by ``r``.
         release_tag (str, optional): Release label stored in output metadata.
         out_tag (str, optional): Tag appended to filenames.
     Returns:
         list[str]: Paths to generated groups FITS files. Empty when no objects
         meet the criteria.
     """
-    raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
-    raw_tbl, cls_tbl = _read_zone_tables(raw_path, class_path)
-    cls_tbl = classify_by_r(cls_tbl, r_lower, r_upper)
+    raw_path, prob_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
+    raw_tbl, prob_tbl = _read_zone_tables(raw_path, prob_path)
+    prob_tbl = classify_by_probability(prob_tbl)
 
-    ids_web = np.asarray(cls_tbl['TARGETID'][cls_tbl['WEBTYPE'] == webtype], dtype=np.int64)
-    if ids_web.size == 0:
+    if source == 'data':
+        prob_tbl = prob_tbl[prob_tbl['ISDATA'] == True]
+    elif source == 'rand':
+        prob_tbl = prob_tbl[prob_tbl['ISDATA'] == False]
+
+    if len(prob_tbl) == 0:
         return []
-    mask_web = np.isin(raw_tbl['TARGETID'], ids_web, assume_unique=False)
-    raw_sub = raw_tbl[mask_web]
-    if len(raw_sub) == 0:
+
+    prob_tbl = prob_tbl[prob_tbl['WEBTYPE'] == webtype]
+    if len(prob_tbl) == 0:
         return []
+
+    keep_cols = ['TARGETID','RANDITER','WEBTYPE','ISDATA']
+    extra_cols = [c for c in prob_tbl.colnames if c in keep_cols]
+    prob_keep = prob_tbl[extra_cols]
+
+    joined = join(raw_tbl, prob_keep, keys=['TARGETID','RANDITER'], join_type='inner')
+    if len(joined) == 0:
+        return []
+
+    if source == 'data':
+        joined = joined[joined['ISDATA'] == True]
+    elif source == 'rand':
+        joined = joined[joined['ISDATA'] == False]
+
+    if len(joined) == 0:
+        return []
+
+    raw_sub = joined
 
     data_blocks = []
     rand_blocks = {}
@@ -402,7 +436,7 @@ def _default_zones_for_release(release_tag):
 
 
 def parse_args():
-    release_default = os.environ.get('RELEASE', 'edr')
+    release_default = os.environ.get('RELEASE', 'dr1')
 
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'raw'),
@@ -415,31 +449,18 @@ def parse_args():
                    help='Zone numbers or labels (e.g., 00 01 ... or NGC1 NGC2)')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='void')
     p.add_argument('--source', choices=['data','rand','both'], default='rand')
-    p.add_argument('--r-lower', type=float, default=-0.9,
-                   help='Lower r threshold used to classify web types (default: -0.9)')
-    p.add_argument('--r-upper', type=float, default=0.9,
-                   help='Upper r threshold used to classify web types (default: 0.9)')
-    p.add_argument('--r-limit', type=float, default=None,
-                   help='Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')
     p.add_argument('--release', default=release_default.upper(), help='Release tag stored in FITS metadata')
     return p.parse_args()
 
 def main():
     args = parse_args()
-    if args.r_limit is not None:
-        sym = float(abs(args.r_limit))
-        args.r_lower = -sym
-        args.r_upper = sym
-    if args.r_lower >= 0 or args.r_upper <= 0:
-        raise ValueError('r_lower must be negative and r_upper must be positive.')
     release_tag = str(args.release).upper()
     init = t.time()
     for z in args.zones:
         outputs = process_zone(z, raw_dir=args.raw_dir, class_dir=args.class_dir,
                                out_dir=args.groups_dir, webtype=args.webtype,
                                source=args.source,
-                               r_lower=args.r_lower, r_upper=args.r_upper,
                                release_tag=release_tag,
                                out_tag=args.out_tag)
         if outputs:

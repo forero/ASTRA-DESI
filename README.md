@@ -25,8 +25,7 @@ per-zone classifications of the cosmic web into **voids, sheets, filaments, and 
   - `paths.py`: canonical naming helpers for raw/classification/probability/pairs files
 - **`src/plot/`** – Visualisation entry points
   - `common.py`: shared loaders and path resolvers used by all plotting scripts
-  - `plot_wedge.py`: tracer-by-zone wedge plots for raw classifications
-  - `plot_groups.py`: FoF group wedges and diagnostics
+  - `plot_wedges.py`: tracer-by-zone wedge plots for raw classifications, including FoF groups
   - `plot_extra.py`: histograms, CDFs, and supplementary wedges
 - **`src/main.py`** – Command-line driver that orchestrates preprocessing, pair generation,
   classification, probabilities, and group finding (EDR or DR1)
@@ -135,9 +134,7 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
 The plotting scripts under `src/plot/` share the loaders defined in `src/plot/common.py`.
 Key entry points:
 
-- `plot_wedge.py`: raw-classification wedges by tracer. Accepts the same release/tag
-  layout as the main pipeline.
-- `plot_groups.py`: FoF group wedges with additional diagnostics.
+- `plot_wedges.py`: raw-classification wedges by tracer and FoF groups. Accepts the same release/tag layout as the main pipeline.
 - `plot_extra.py`: CDFs, histograms, and supplemental wedges. Supports on-disk caching
   (`--cache-dir`) to avoid repeated I/O.
 

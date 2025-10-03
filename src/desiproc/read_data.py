@@ -1,3 +1,4 @@
+import os
 import random
 import warnings
 
@@ -350,3 +351,133 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
         raise
     except Exception as e:
         raise RuntimeError(f'Error generating randoms for tracer {tracer} in region {region}: {e}') from e
+
+
+def _split_table_by_ra(tbl, ra_min, ra_max, include_edges=True):
+    """Split a table into two subsets based on an RA window.
+
+    Args:
+        tbl (Table): Input table containing an ``RA`` column in degrees.
+        ra_min (float): Lower bound of the window assigned to the first subset.
+        ra_max (float): Upper bound of the window assigned to the first subset.
+        include_edges (bool): When ``True``, boundary values belong to the first subset.
+    Returns:
+        tuple[Table, Table]: Subsets inside and outside the RA window.
+    Raises:
+        RuntimeError: If the RA column cannot be processed.
+    """
+    try:
+        ra = np.asarray(tbl['RA'], dtype=float)
+    except Exception as e:
+        raise RuntimeError(f"Error accessing RA column for RA split: {e}") from e
+
+    if include_edges:
+        mask = (ra >= ra_min) & (ra <= ra_max)
+    else:
+        mask = (ra > ra_min) & (ra < ra_max)
+
+    return tbl[mask], tbl[~mask]
+
+
+def preload_dr2_tables(base_dir, tracers, real_columns, random_columns, n_random_files,
+                       ra_min=90.0, ra_max=300.0, include_edges=True):
+    """Preload DR2 full catalogues and split them into NGC/SGC by RA.
+
+    Args:
+        base_dir (str): Directory containing DR2 catalogues.
+        tracers (list[str]): Tracer identifiers to load.
+        real_columns (list[str]): Columns to load from real catalogues.
+        random_columns (list[str]): Columns to load from random catalogues.
+        n_random_files (int): Number of random catalogues per tracer.
+        ra_min (float): Minimum RA assigned to the NGC subset.
+        ra_max (float): Maximum RA assigned to the NGC subset.
+        include_edges (bool): When ``True``, boundary values belong to NGC.
+    Returns:
+        tuple[dict, dict]: Real and random table dictionaries keyed by tracer and zone label.
+    Raises:
+        RuntimeError: If any catalogue fails to load or split.
+    """
+    try:
+        real_tables = {t: {'NGC': None, 'SGC': None} for t in tracers}
+        rand_tables = {t: {'NGC': {}, 'SGC': {}} for t in tracers}
+
+        for tracer in tracers:
+            real_path = os.path.join(base_dir, f'{tracer}_full.dat.fits')
+            real_tbl = load_table(real_path, real_columns)
+            ngc_real, sgc_real = _split_table_by_ra(real_tbl, ra_min, ra_max, include_edges=include_edges)
+            real_tables[tracer]['NGC'] = ngc_real
+            real_tables[tracer]['SGC'] = sgc_real
+
+            for idx in range(n_random_files):
+                rand_path = os.path.join(base_dir, f'{tracer}_{idx}_full.ran.fits')
+                rand_tbl = load_table(rand_path, random_columns)
+                ngc_rand, sgc_rand = _split_table_by_ra(rand_tbl, ra_min, ra_max, include_edges=include_edges)
+                rand_tables[tracer]['NGC'][idx] = ngc_rand
+                rand_tables[tracer]['SGC'][idx] = sgc_rand
+
+        return real_tables, rand_tables
+    except Exception as e:
+        raise RuntimeError(f'Error preloading DR2 tables: {e}') from e
+
+
+def process_real_dr2(real_tables, tracer, zone_label, zone_value=2001):
+    """Return DR2 real objects for the requested zone label."""
+    try:
+        tbl = real_tables[tracer][zone_label]
+        if tbl is None or len(tbl) == 0:
+            raise ValueError(f'No entries for tracer {tracer} in zone {zone_label}')
+        sel = tbl.copy()
+        sel = _ensure_zone_column(sel, zone_value)
+        sel = _compute_cartesian(sel)
+        sel['TRACERTYPE'] = f'{tracer}_DATA'
+        sel['RANDITER'] = np.full(len(sel), -1, dtype=np.int32)
+        return sel
+    except KeyError:
+        raise
+    except ValueError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f'Error processing DR2 real data for tracer {tracer}, zone {zone_label}: {e}') from e
+
+
+def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_count, zone_value=2001):
+    """Return DR2 random catalogues for the requested zone label."""
+    try:
+        zone_dict = random_tables[tracer][zone_label]
+        if not zone_dict:
+            raise KeyError(f'No random tables for tracer {tracer} in zone {zone_label}')
+
+        zone_tables = []
+        total_rows = 0
+        for tbl in zone_dict.values():
+            if tbl is None or len(tbl) == 0:
+                continue
+            sel = tbl.copy()
+            sel = _ensure_zone_column(sel, zone_value)
+            sel_xyz = _compute_cartesian(sel)
+            zone_tables.append(sel_xyz)
+            total_rows += len(sel_xyz)
+
+        if total_rows == 0:
+            raise ValueError(f'No random entries for tracer {tracer} in zone {zone_label}')
+        if total_rows < real_count:
+            raise ValueError(f'Zone {zone_label} randoms have {total_rows} rows (< {real_count})')
+
+        pool = vstack(zone_tables)
+
+        samples = []
+        for j in range(n_random):
+            rng = np.random.default_rng(j)
+            rows = rng.choice(len(pool), real_count, replace=False)
+            samp = pool[rows]
+            samp['TRACERTYPE'] = f'{tracer}_RAND'
+            samp['RANDITER'] = np.full(len(samp), j, dtype=np.int32)
+            samples.append(samp)
+
+        return vstack(samples)
+    except KeyError:
+        raise
+    except ValueError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f'Error generating DR2 randoms for tracer {tracer}, zone {zone_label}: {e}') from e

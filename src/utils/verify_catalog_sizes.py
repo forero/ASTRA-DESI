@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Check raw/classification/probability catalogue sizes across zones."""
-
 import argparse
 import re
 from pathlib import Path
