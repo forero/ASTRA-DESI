@@ -9,6 +9,8 @@ from astropy.cosmology import Planck18
 from astropy.table import Column, Table, vstack
 from astropy.units import UnitsWarning
 
+from .dr2_sample_z import assign_random_redshift_column, stack_zone_randoms
+
 warnings.filterwarnings('ignore', category=UnitsWarning)
 
 
@@ -380,8 +382,10 @@ def _split_table_by_ra(tbl, ra_min, ra_max, include_edges=True):
 
 
 def preload_dr2_tables(base_dir, tracers, real_columns, random_columns, n_random_files,
-                       ra_min=90.0, ra_max=300.0, include_edges=True):
-    """Preload DR2 full catalogues and split them into NGC/SGC by RA.
+                       ra_min=90.0, ra_max=300.0, include_edges=True,
+                       redshift_overrides=None):
+    """
+    Preload DR2 full catalogues and split them into NGC/SGC by RA.
 
     Args:
         base_dir (str): Directory containing DR2 catalogues.
@@ -392,18 +396,31 @@ def preload_dr2_tables(base_dir, tracers, real_columns, random_columns, n_random
         ra_min (float): Minimum RA assigned to the NGC subset.
         ra_max (float): Maximum RA assigned to the NGC subset.
         include_edges (bool): When ``True``, boundary values belong to NGC.
+        redshift_overrides (dict | None): Optional mapping of tracer -> column name
+            that should be used as the redshift source before renaming to ``Z``.
     Returns:
         tuple[dict, dict]: Real and random table dictionaries keyed by tracer and zone label.
     Raises:
         RuntimeError: If any catalogue fails to load or split.
     """
     try:
+        redshift_overrides = redshift_overrides or {}
         real_tables = {t: {'NGC': None, 'SGC': None} for t in tracers}
         rand_tables = {t: {'NGC': {}, 'SGC': {}} for t in tracers}
 
         for tracer in tracers:
             real_path = os.path.join(base_dir, f'{tracer}_full.dat.fits')
-            real_tbl = load_table(real_path, real_columns)
+            requested_cols = list(real_columns)
+            override_col = redshift_overrides.get(tracer)
+            if override_col and override_col != 'Z':
+                requested_cols = [c for c in requested_cols if c != 'Z']
+                if override_col not in requested_cols:
+                    requested_cols.append(override_col)
+            real_tbl = load_table(real_path, requested_cols)
+            if override_col and override_col in real_tbl.colnames and override_col != 'Z':
+                real_tbl.rename_column(override_col, 'Z')
+            if 'Z' not in real_tbl.colnames:
+                raise KeyError(f"Missing 'Z' column for tracer {tracer} in DR2 real table")
             ngc_real, sgc_real = _split_table_by_ra(real_tbl, ra_min, ra_max, include_edges=include_edges)
             real_tables[tracer]['NGC'] = ngc_real
             real_tables[tracer]['SGC'] = sgc_real
@@ -421,7 +438,21 @@ def preload_dr2_tables(base_dir, tracers, real_columns, random_columns, n_random
 
 
 def process_real_dr2(real_tables, tracer, zone_label, zone_value=2001):
-    """Return DR2 real objects for the requested zone label."""
+    """
+    Return DR2 real objects for the requested zone label.
+    
+    Args:
+        real_tables (dict): Preloaded real tables keyed by tracer and zone label.
+        tracer (str): Tracer identifier (e.g., ``'BGS_ANY'``).
+        zone_label (str): Zone label (``'NGC'`` or ``'SGC'``).
+        zone_value (int): Synthetic zone identifier to insert when missing.
+    Returns:
+        Table: Real objects annotated with tracer type and ``RANDITER``.
+    Raises:
+        KeyError: If the tracer has no data in the required zone.
+        ValueError: If the zone is empty for the tracer.
+        RuntimeError: If processing fails.
+    """
     try:
         tbl = real_tables[tracer][zone_label]
         if tbl is None or len(tbl) == 0:
@@ -440,39 +471,52 @@ def process_real_dr2(real_tables, tracer, zone_label, zone_value=2001):
         raise RuntimeError(f'Error processing DR2 real data for tracer {tracer}, zone {zone_label}: {e}') from e
 
 
-def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_count, zone_value=2001):
-    """Return DR2 random catalogues for the requested zone label."""
+def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table, zone_value=2001):
+    """
+    Return DR2 random catalogues whose redshift distribution matches the real sample.
+    
+    Args:
+        random_tables (dict): Preloaded random tables keyed by tracer and zone label.
+        tracer (str): Tracer identifier (e.g., ``'BGS_ANY'``).
+        zone_label (str): Zone label (``'NGC'`` or ``'SGC'``).
+        n_random (int): Number of random realizations to generate.
+        real_table (Table): Real data table used to source redshift values.
+        zone_value (int): Synthetic zone identifier to insert when missing.
+    Returns:
+        Table: Concatenated random sample table with Cartesian coordinates.
+    Raises:
+        KeyError: If the tracer lacks random tables for the requested zone.
+        ValueError: If the filtered random pool is too small or real_table lacks redshifts.
+        RuntimeError: If sampling fails.
+    """
     try:
         zone_dict = random_tables[tracer][zone_label]
         if not zone_dict:
             raise KeyError(f'No random tables for tracer {tracer} in zone {zone_label}')
 
-        zone_tables = []
-        total_rows = 0
-        for tbl in zone_dict.values():
-            if tbl is None or len(tbl) == 0:
-                continue
-            sel = tbl.copy()
-            sel = _ensure_zone_column(sel, zone_value)
-            sel_xyz = _compute_cartesian(sel)
-            zone_tables.append(sel_xyz)
-            total_rows += len(sel_xyz)
-
-        if total_rows == 0:
+        pool = stack_zone_randoms(zone_dict, zone_value)
+        if pool is None:
             raise ValueError(f'No random entries for tracer {tracer} in zone {zone_label}')
-        if total_rows < real_count:
-            raise ValueError(f'Zone {zone_label} randoms have {total_rows} rows (< {real_count})')
 
-        pool = vstack(zone_tables)
+        real_count = len(real_table)
+        if len(pool) < real_count:
+            raise ValueError(f'Zone {zone_label} randoms have {len(pool)} rows (< {real_count})')
+
+        real_redshifts = np.asarray(real_table['Z'], dtype=float)
+        if real_redshifts.size == 0:
+            raise ValueError(f'Real tracer {tracer} in zone {zone_label} has no redshift values to sample')
 
         samples = []
+        total_rows = len(pool)
         for j in range(n_random):
             rng = np.random.default_rng(j)
-            rows = rng.choice(len(pool), real_count, replace=False)
-            samp = pool[rows]
-            samp['TRACERTYPE'] = f'{tracer}_RAND'
-            samp['RANDITER'] = np.full(len(samp), j, dtype=np.int32)
-            samples.append(samp)
+            rows = rng.choice(total_rows, real_count, replace=False)
+            samp = pool[rows].copy()
+            assign_random_redshift_column(samp, real_redshifts, rng)
+            samp_xyz = _compute_cartesian(samp)
+            samp_xyz['TRACERTYPE'] = f'{tracer}_RAND'
+            samp_xyz['RANDITER'] = np.full(len(samp_xyz), j, dtype=np.int32)
+            samples.append(samp_xyz)
 
         return vstack(samples)
     except KeyError:

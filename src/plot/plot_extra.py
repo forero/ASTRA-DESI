@@ -6,26 +6,197 @@ from astropy.table import Table
 
 import matplotlib
 import matplotlib.pyplot as plt
+
+import sys
+from pathlib import Path
+
 matplotlib.rcParams['text.usetex'] = True
 
-from desiproc.paths import (classification_path, locate_classification_file, locate_probability_file,
-                            normalize_release_dir, probability_path, safe_tag, zone_tag)
-
-try:
-    from .common import (load_probability_dataframe, load_raw_dataframe, resolve_class_path,
-                         resolve_probability_path, resolve_raw_path)
-except ImportError:
-    import sys
-    from pathlib import Path
-
+if __package__ is None or __package__ == '':
     src_root = Path(__file__).resolve().parents[1]
     if str(src_root) not in sys.path:
         sys.path.append(str(src_root))
+    from desiproc.paths import (classification_path, locate_classification_file, locate_probability_file,
+                                normalize_release_dir, probability_path, safe_tag, zone_tag)
     from plot.common import (load_probability_dataframe, load_raw_dataframe, resolve_class_path,
                              resolve_probability_path, resolve_raw_path)
+else:
+    from desiproc.paths import (classification_path, locate_classification_file, locate_probability_file,
+                                normalize_release_dir, probability_path, safe_tag, zone_tag)
+    from .common import (load_probability_dataframe, load_raw_dataframe, resolve_class_path,
+                         resolve_probability_path, resolve_raw_path)
 
 PLOT_DPI = 360
-CACHE_VERSION = 'v1'
+CACHE_VERSION = 'v2'
+
+_PANDAS_NA = getattr(pd, 'NA', None)
+_NP_BYTES_TYPE = getattr(np, 'bytes_', None)
+_BYTES_TYPES = (bytes, bytearray)
+if _NP_BYTES_TYPE is not None and _NP_BYTES_TYPE not in _BYTES_TYPES:
+    _BYTES_TYPES = _BYTES_TYPES + (_NP_BYTES_TYPE,)
+
+_TRACER_PREFIX_ALIASES = {'BGS': ('BGS',),
+                          'BGS_BRIGHT': ('BGS',),
+                          'BGS_ANY': ('BGS',),
+                          'ELG': ('ELG', 'ELG_LOPnotqso'),
+                          'ELG_LOPNOTQSO': ('ELG_LOPnotqso',),
+                          'LRG': ('LRG',),
+                          'QSO': ('QSO',)}
+
+_TRACER_COLORS = {'BGS': 'blue',
+                  'BGS_BRIGHT': 'blue',
+                  'BGS_ANY': 'blue',
+                  'ELG': 'red',
+                  'ELG_LOPNOTQSO': 'red',
+                  'LRG': 'green',
+                  'QSO': 'orange'}
+
+
+def _tracer_key(tracer):
+    """
+    Return a normalized key for *tracer* (uppercase string or empty string if None).
+    
+    Args:
+        tracer (str | None): Tracer label.
+    Returns:
+        str: Uppercase tracer label or empty string if None.
+    """
+    return str(tracer).upper() if tracer is not None else ''
+
+
+def _tracer_prefixes(tracer):
+    """
+    Return a tuple of catalogue prefixes for *tracer*.
+
+    Args:
+        tracer (str | None): Tracer label.
+    Returns:
+        tuple[str]: Tuple of catalogue prefixes.
+    """
+    key = _tracer_key(tracer)
+    prefixes = _TRACER_PREFIX_ALIASES.get(key)
+    if prefixes:
+        return prefixes
+    value = str(tracer)
+    if key != value.upper():
+        return (value, value.upper())
+    return (value,)
+
+
+def _tracer_display_name(tracer):
+    """
+    Return a display name for *tracer*.
+    
+    Args:
+        tracer (str | None): Tracer label.
+    """
+    key = _tracer_key(tracer)
+    if key in ('BGS_BRIGHT', 'BGS_ANY'):
+        return 'BGS'
+    if key == 'ELG_LOPNOTQSO':
+        return 'ELG'
+    return str(tracer)
+
+
+def _tracer_color(tracer):
+    """
+    Return a color for *tracer*.
+    
+    Args:
+        tracer (str | None): Tracer label.
+    Returns:
+        str: Color name or hex code.
+    """
+    key = _tracer_key(tracer)
+    color = _TRACER_COLORS.get(key)
+    if color:
+        return color
+    display_key = _tracer_display_name(tracer).upper()
+    return _TRACER_COLORS.get(display_key, 'black')
+
+
+def _is_text_like(value):
+    """
+    Return True if *value* is None, pd.NA, NaN, or a string.
+    
+    Args:
+        value: Any value.
+    Returns:
+        bool: True if *value* is considered text-like.
+    """
+    if value is None:
+        return True
+    if _PANDAS_NA is not None and value is _PANDAS_NA:
+        return True
+    if isinstance(value, str):
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _coerce_text(value):
+    """
+    Coerce *value* to a string, handling bytes and None/pd.NA.
+    
+    Args:
+        value: Any value.
+    Returns:
+        str | None: String representation of *value*, or None/pd.NA if applicable.
+    """
+    if value is None:
+        return None
+    if _PANDAS_NA is not None and value is _PANDAS_NA:
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, _BYTES_TYPES):
+        try:
+            return value.decode('utf-8')
+        except Exception:
+            try:
+                return value.decode('utf-8', errors='ignore')
+            except Exception:
+                return str(value)
+    return str(value)
+
+
+def _ensure_text_column(df, column):
+    """
+    Ensure that the specified *column* in *df* contains only text-like values.
+    
+    Args:
+        df (pd.DataFrame): The DataFrame to modify.
+        column (str): The column name to ensure text-like values.
+    Returns:
+        pd.DataFrame: The modified DataFrame with text-like values in *column*.
+    """
+    if column not in df.columns or df.empty:
+        return df
+    col = df[column]
+    mask = ~col.map(_is_text_like)
+    if mask.any():
+        df.loc[mask, column] = col.loc[mask].map(_coerce_text)
+    return df
+
+
+def _sanitize_tracer_columns(df):
+    """
+    Ensure that tracer-related columns in *df* contain only text-like values.
+    
+    Args:
+        df (pd.DataFrame | None): The DataFrame to sanitize, or None.
+    Returns:
+        pd.DataFrame | None: The sanitized DataFrame, or None if input was None.
+    """
+    if df is None:
+        return df
+    for column in ('TRACERTYPE', 'BASE', 'BASE_CORE'):
+        _ensure_text_column(df, column)
+    return df
 
 
 def _max_mtime(paths):
@@ -308,7 +479,8 @@ def load_raw_df(path):
     Returns:
         pd.DataFrame: DataFrame containing the raw data.
     """
-    return load_raw_dataframe(path)
+    df = load_raw_dataframe(path)
+    return _sanitize_tracer_columns(df)
 
 
 def load_class_df(path):
@@ -337,7 +509,6 @@ def load_prob_df(path):
     Returns:
         pd.DataFrame: DataFrame containing the probability data with CLASS column.
     """
-
     frame = load_probability_dataframe(path)
     prob_cols = ['PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']
     frame['CLASS'] = frame[prob_cols].idxmax(axis=1).str[1:].str.lower()
@@ -394,14 +565,16 @@ def plot_z_histogram(df, zone, bins, out_dir):
         out_dir (str): Output directory to save the plot.
     """
     real, rand = df[df['ISDATA']]['Z'], df[~df['ISDATA']]['Z']
+    zone_label = zone_tag(zone)
 
     fig, ax = plt.subplots()
-    ax.grid(linewidth=0.7)
-    ax.hist([real, rand], bins=bins, label=['Data','Random'], alpha=0.7)
-    ax.set(xlabel='$z$', ylabel='Count', title=f'Zone {zone}')
+    ax.grid(linewidth=0.7, zorder=-10)
+    ax.hist([real, rand], bins=bins, label=['Data','Random'], alpha=0.9,
+            color=['royalblue', 'navy'], zorder=10, edgecolor='black', lw=0.3)
+    ax.set(xlabel='Z', ylabel='Count', title=f'Zone {zone_label}')
     ax.legend()
 
-    path = os.path.join(out_dir, f'z_hist_zone_{zone}.png')
+    path = os.path.join(out_dir, f'z_hist_zone_{zone_label}.png')
     fig.savefig(path, dpi=PLOT_DPI); plt.close(fig)
 
 
@@ -417,19 +590,21 @@ def plot_radial_distribution(raw_df, zone, tracers, out_dir, bins):
         out_dir (str): Output directory to save the plots.
         bins (int): Number of bins for the histograms.
     """
+    zone_label = zone_tag(zone)
     fig, axes = plt.subplots(1, len(tracers), figsize=(4*len(tracers),4))
     if len(tracers) == 1:
         axes = [axes]
 
     for ax, tracer in zip(axes, tracers):
-        tr_prefix = 'BGS' if tracer == 'BGS_BRIGHT' else tracer
-        sub = raw_df[raw_df['TRACERTYPE'].str.startswith(tr_prefix)]
+        prefixes = _tracer_prefixes(tracer)
+        display = _tracer_display_name(tracer)
+        sub = raw_df[raw_df['TRACERTYPE'].str.startswith(prefixes)]
         real = sub[sub['RANDITER'] == -1]
         rand_pool = sub[sub['RANDITER'] != -1]
         if len(rand_pool) == 0 or len(real) == 0:
-            ax.set(title=tr_prefix, xlabel=r'$r$', ylabel='Count')
+            ax.set(title=display, xlabel=r'$r$', ylabel='Count')
             ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-            ax.grid(linewidth=0.7)
+            ax.grid(linewidth=0.7, zorder=-10)
             continue
         nsamp = min(len(rand_pool), len(real))
         rand = rand_pool.sample(nsamp, random_state=0, replace=False)
@@ -437,14 +612,15 @@ def plot_radial_distribution(raw_df, zone, tracers, out_dir, bins):
         r_real = np.linalg.norm(real[['XCART','YCART','ZCART']].to_numpy(), axis=1)
         r_rand = np.linalg.norm(rand[['XCART','YCART','ZCART']].to_numpy(), axis=1)
 
-        ax.grid(linewidth=0.7)
-        ax.hist([r_real, r_rand], bins, label=['Real','Random'], alpha=0.7)
-        ax.set(title=tr_prefix, xlabel=r'$r$', ylabel='Count')
+        ax.grid(linewidth=0.7, zorder=-10)
+        ax.hist([r_real, r_rand], bins, label=['Real','Random'], alpha=0.9,
+                color=['royalblue', 'navy'], zorder=10, edgecolor='black', lw=0.05)
+        ax.set(title=display, xlabel=r'$r$', ylabel='Count')
         ax.legend(fontsize=6)
 
-    fig.suptitle(f'Radial Zone {zone}')
+    fig.suptitle(f'Radial Zone {zone_label}')
     fig.tight_layout()
-    path = os.path.join(out_dir, f'radial_zone_{zone}.png')
+    path = os.path.join(out_dir, f'radial_zone_{zone_label}.png')
     fig.savefig(path, dpi=PLOT_DPI)
     plt.close(fig)
 
@@ -459,9 +635,8 @@ def plot_cdf(df_r, zone, tracers, out_dir):
         tracers (list): List of tracer types to plot.
         out_dir (str): Output directory to save the plot.
     """
-    cmap = {'BGS_BRIGHT':'blue','ELG':'red','LRG':'green','QSO':'purple'}
     fig, ax = plt.subplots()
-    ax.grid(linewidth=0.7)
+    ax.grid(linewidth=0.7, zorder=-10)
 
     def ecdf(arr):
         a = np.asarray(arr, dtype=float)
@@ -473,19 +648,21 @@ def plot_cdf(df_r, zone, tracers, out_dir):
         return a, y
 
     for tr in tracers:
-        tr_key = str(tr).upper()
-        tr_prefix = 'BGS' if tr_key.startswith('BGS') else tr_key
-        sub = df_r[df_r['TRACERTYPE'].str.startswith(tr_prefix)]
+        prefixes = _tracer_prefixes(tr)
+        display = _tracer_display_name(tr)
+        color = _tracer_color(tr)
+        sub = df_r[df_r['TRACERTYPE'].str.startswith(prefixes)]
         xr, yr = ecdf(sub[sub['ISDATA']]['r'])
         if xr is not None:
-            ax.plot(xr, yr, label=f'{tr_prefix} real', linewidth=1, color=cmap.get(tr_key, 'black'))
+            ax.plot(xr, yr, label=f'{display} real', linewidth=1, color=color, zorder=10)
         xr, yr = ecdf(sub[~sub['ISDATA']]['r'])
         if xr is not None:
-            ax.plot(xr, yr, label=f'{tr_prefix} rand', linewidth=1, linestyle='--', color=cmap.get(tr_key, 'black'))
+            ax.plot(xr, yr, label=f'{display} rand', linewidth=1, linestyle='--', color=color, zorder=10)
 
-    ax.set(xlabel='$r$', ylabel='CDF', title=f'CDF Zone {zone}')
+    zone_label = zone_tag(zone)
+    ax.set(xlabel='$r$', ylabel='CDF', title=f'CDF Zone {zone_label}')
     ax.legend(fontsize=6)
-    path = os.path.join(out_dir, f'cdf_zone_{zone}.png')
+    path = os.path.join(out_dir, f'cdf_zone_{zone_label}.png')
     fig.savefig(path, dpi=PLOT_DPI)
     plt.close(fig)
 
@@ -542,6 +719,7 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
 
         raw_df = _load_or_build_df(cache_dir, _zone_cache_key('raw', z, tag_list), raw_paths,
                                    lambda: _concat_existing(raw_paths, load_raw_df), progress=progress)
+        _sanitize_tracer_columns(raw_df)
         cls_df = _load_or_build_df(cache_dir, _zone_cache_key('class', z, tag_list), cls_paths,
                                    lambda: _concat_existing(cls_paths, load_class_df), progress=progress)
         cls_df = cls_df[cls_df['ISDATA'] == True]
@@ -552,10 +730,11 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
 
         r_df = _load_or_build_df(cache_dir, _zone_cache_key('r', z, tag_list), raw_paths + cls_paths,
                                  _build_r, progress=progress)
+        _sanitize_tracer_columns(r_df)
 
         for tr in tracers:
-            tr_prefix = 'BGS' if tr == 'BGS_BRIGHT' else tr
-            sub = r_df[r_df['TRACERTYPE'].str.startswith(tr_prefix)]
+            prefixes = _tracer_prefixes(tr)
+            sub = r_df[r_df['TRACERTYPE'].str.startswith(prefixes)]
             real_r = sub[sub['ISDATA']]['r'].to_numpy()
             rand_r = sub[~sub['ISDATA']]['r'].to_numpy()
 
@@ -573,25 +752,32 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
             if np.isfinite(y_rand).any():
                 per_tracer_rand[tr].append(y_rand)
 
-    fig, ax = plt.subplots(figsize=(9, 7))
-    ax.grid(linewidth=0.7)
-
-    tracer_color_map = {'BGS_BRIGHT': 'blue', 'ELG': 'red', 'LRG': 'green', 'QSO': 'orange'}
+    fig, ax = plt.subplots()
+    ax.grid(linewidth=0.7, zorder=-10)
 
     for tr in tracers:
-        color = tracer_color_map.get(tr, 'black')
+        color = _tracer_color(tr)
+        display = _tracer_display_name(tr)
 
         if len(per_tracer_real[tr]) > 0:
             Y = np.vstack(per_tracer_real[tr])
             p16, p50, p84 = np.nanpercentile(Y, [16,50,84], axis=0)
-            ax.fill_between(xgrid, p16, p84, alpha=0.15, label=f'{tr} real ±1σ', color=color)
-            ax.plot(xgrid, p50, linewidth=1.5, color=color, label=f'{tr} real median')
+            ax.fill_between(xgrid, p16, p84, alpha=0.25,
+                            edgecolor=color, linewidth=0.6,
+                            label=f'{display} real '+r'$\pm 1\sigma$', color=color)
+            ax.plot(xgrid, p50, linewidth=1.5, color=color, label=f'{display} real median', zorder=10)
+            ax.plot(xgrid, p16, linewidth=0.7, color=color, linestyle=':', zorder=8)
+            ax.plot(xgrid, p84, linewidth=0.7, color=color, linestyle=':', zorder=8)
 
         if len(per_tracer_rand[tr]) > 0:
             Y = np.vstack(per_tracer_rand[tr])
             p16, p50, p84 = np.nanpercentile(Y, [16,50,84], axis=0)
-            ax.fill_between(xgrid, p16, p84, alpha=0.10, label=f'{tr} rand ±1σ', color=color)
-            ax.plot(xgrid, p50, linewidth=1.2, linestyle='--', color=color, label=f'{tr} rand median')
+            ax.fill_between(xgrid, p16, p84, alpha=0.18,
+                            edgecolor=color, linewidth=0.5, linestyle='--',
+                            label=f'{display} rand '+r'$\pm 1\sigma$', color=color)
+            ax.plot(xgrid, p50, linewidth=1.2, linestyle='--', color=color, label=f'{display} rand median', zorder=10)
+            ax.plot(xgrid, p16, linewidth=0.6, color=color, linestyle='--', dashes=(4,2), zorder=8)
+            ax.plot(xgrid, p84, linewidth=0.6, color=color, linestyle='--', dashes=(4,2), zorder=8)
 
     ax.set_ylabel('CDF')
     ax.set_xlabel(r"$r = \frac{N_{\mathrm{data}} - N_{\mathrm{rand}}}{N_{\mathrm{data}} + N_{\mathrm{rand}}}$")
@@ -643,29 +829,30 @@ def _read_raw_df_min(raw_path):
                                               if isinstance(x, (bytes, bytearray)) else x)
     df['BASE'] = df['TRACERTYPE'].str.replace(r'_(DATA|RAND)$','', regex=True)
     df['ISDATA'] = df['TRACERTYPE'].str.endswith('_DATA')
+    df = _sanitize_tracer_columns(df)
     return df[['TARGETID','TRACERTYPE','BASE','ISDATA']]
 
 
-def _targets_of_tracer_real(raw_df, tracer_prefix):
+def _targets_of_tracer_real(raw_df, tracer):
     """
     Get the set of TARGETIDs for a specific tracer prefix from the raw dataframe.
     
     Args:
         raw_df (pd.DataFrame): The raw dataframe containing tracer information.
-        tracer_prefix (str): The tracer prefix to filter by.
+        tracer (str): Tracer label used to determine matching prefixes.
     Returns:
-        set: A set of TARGETIDs matching the tracer prefix.
+        set: A set of TARGETIDs matching the tracer's catalogue prefixes.
     """
-    if tracer_prefix == 'BGS_BRIGHT':
-        tracer_prefix = 'BGS'
-    m = raw_df['ISDATA'] & raw_df['BASE'].str.startswith(tracer_prefix)
+    prefixes = _tracer_prefixes(tracer)
+    m = raw_df['ISDATA'] & raw_df['BASE'].str.startswith(prefixes)
     return set(raw_df.loc[m, 'TARGETID'].to_numpy(dtype=np.int64))
 
 
 def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25, cache_dir=None, tags_map=None):
     """
-    Plot the PDF of the normalized Shannon entropy H for specified tracers across zones.
-    
+    Plot the PDF of the normalized Shannon entropy H for each tracer, summarizing
+    the dispersion across the provided zones.
+
     Args:
         raw_dir (str): Directory containing raw data files.
         class_dir (str): Directory containing class data files.
@@ -676,66 +863,77 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25, cach
         cache_dir (str or None): Directory used to reuse intermediate results.
         tags_map (dict|None): Optional mapping of zone -> tag list.
     """
-    colors = plt.cm.tab20(np.linspace(0, 1, max(20, len(zones))))
-    fig, axes = plt.subplots(2, 2, figsize=(10,10), sharey=True, sharex=True)
-    axes = np.ravel(axes)
 
-    for ax, tracer in zip(axes, tracers):
-        ax.grid(True, alpha=0.3)
-        ax.set_title(tracer.replace('_ANY', ''))
+    bin_edges = np.linspace(0, 0.6, bins + 1)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
-        for iz, z in enumerate(zones):
-            if tags_map and z in tags_map:
-                tag_list = tags_map[z]
-            else:
-                tags = list_zone_out_tags(raw_dir, class_dir, z)
-                tag_list = tags if tags else ['']
-            ztag = zone_tag(z)
-            raw_paths = [_raw_candidate(raw_dir, z, t or None) for t in tag_list]
-            prob_paths = [_expected_prob_path(class_dir, z, t or None) for t in tag_list]
+    per_tracer_hist = {tr: [] for tr in tracers}
 
-            raw_df = _load_or_build_df(cache_dir, _zone_cache_key('raw_min', z, tag_list), raw_paths,
-                                       lambda: _concat_existing(raw_paths, _read_raw_df_min))
+    for z in zones:
+        if tags_map and z in tags_map:
+            tag_list = tags_map[z]
+        else:
+            tags = list_zone_out_tags(raw_dir, class_dir, z)
+            tag_list = tags if tags else ['']
 
-            def _load_prob_entropy():
-                probs = _concat_existing(prob_paths, load_prob_df)
-                return entropy(probs)
+        raw_paths = [_raw_candidate(raw_dir, z, t or None) for t in tag_list]
+        prob_paths = [_expected_prob_path(class_dir, z, t or None) for t in tag_list]
 
-            probs_df = _load_or_build_df(cache_dir, _zone_cache_key('prob_entropy', z, tag_list), prob_paths,
-                                         _load_prob_entropy)
+        raw_df = _load_or_build_df(cache_dir, _zone_cache_key('raw_min', z, tag_list), raw_paths,
+                                   lambda: _concat_existing(raw_paths, _read_raw_df_min))
+        _sanitize_tracer_columns(raw_df)
 
-            tids_tr = _targets_of_tracer_real(raw_df, tracer.split('_', 1)[0])
-            tids = probs_df['TARGETID'].to_numpy(dtype=np.int64, copy=False)
-            m = np.isin(tids, list(tids_tr))
-            v = probs_df.loc[m, 'H'].to_numpy(dtype=float, copy=False)
+        def _load_prob_entropy():
+            probs = _concat_existing(prob_paths, load_prob_df)
+            return entropy(probs)
 
-            hist, edges = np.histogram(v, bins=bins, range=(0, 0.6), density=True)
-            centers = 0.5 * (edges[:-1] + edges[1:])
-            label = f'Zone {zone_tag(z)}' if ax is axes[0] else None
-            ax.plot(centers, hist, color=colors[iz], label=label)
+        probs_df = _load_or_build_df(cache_dir, _zone_cache_key('prob_entropy', z, tag_list), prob_paths,
+                                     _load_prob_entropy)
 
-        if ax in (axes[0], axes[2]):
-            ax.set_ylabel('PDF')
-        if ax in (axes[2], axes[3]):
-            ax.set_xlabel('$H$')
+        tids = probs_df['TARGETID'].to_numpy(dtype=np.int64, copy=False)
 
-    handles, labels = [], []
-    for ax in axes:
-        h, l = ax.get_legend_handles_labels()
-        for hh, ll in zip(h, l):
-            if ll not in labels and ll is not None:
-                handles.append(hh); labels.append(ll)
+        for tracer in tracers:
+            tids_tr = _targets_of_tracer_real(raw_df, tracer)
+            if not tids_tr:
+                continue
 
-    if handles:
-        fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.01),
-                   bbox_transform=fig.transFigure, ncol=min(7, len(labels)), frameon=False)
-    fig.subplots_adjust(bottom=0.14, top=0.85)
-    plt.suptitle('Normalized Shannon Entropy', y=0.94)
+            mask = np.isin(tids, list(tids_tr))
+            values = probs_df.loc[mask, 'H'].to_numpy(dtype=float, copy=False)
+            if values.size == 0:
+                continue
+
+            hist, _ = np.histogram(values, bins=bin_edges, density=True)
+            per_tracer_hist[tracer].append(hist)
+
+    fig, ax = plt.subplots()
+    ax.grid(linewidth=0.7, zorder=-10)
+
+    for tracer in tracers:
+        series = per_tracer_hist.get(tracer, [])
+        if not series:
+            continue
+
+        color = _tracer_color(tracer)
+        display = _tracer_display_name(tracer)
+        Y = np.vstack(series)
+        p16, p50, p84 = np.nanpercentile(Y, [16, 50, 84], axis=0)
+
+        ax.fill_between(bin_centers, p16, p84, alpha=0.25,
+                        edgecolor=color, linewidth=0.6,
+                        color=color, label=f'{display} '+r'$\pm 1\sigma$')
+        ax.plot(bin_centers, p50, linewidth=1.5, color=color, label=f'{display} median', zorder=10)
+        ax.plot(bin_centers, p16, linewidth=0.7, color=color, linestyle=':', zorder=8)
+        ax.plot(bin_centers, p84, linewidth=0.7, color=color, linestyle=':', zorder=8)
+
+    ax.set_xlabel('$H$')
+    ax.set_ylabel('PDF')
+    ax.set_title('Normalized Shannon Entropy', fontsize=16)
+    ax.legend(fontsize=9, ncol=2)
 
     path = f'{out_path}/entropy'
     os.makedirs(path, exist_ok=True)
     fig.savefig(f'{path}/pdf_entropy.png', dpi=PLOT_DPI)
-    return fig, axes
+    return fig, ax
 
 
 def _process_zone(zone, config):
@@ -756,6 +954,7 @@ def _process_zone(zone, config):
 
     raw_df = _load_or_build_df(cache_dir, _zone_cache_key('raw', zone, tag_list), raw_paths,
                                lambda: _concat_existing(raw_paths, load_raw_df), progress=progress)
+    _sanitize_tracer_columns(raw_df)
     if progress:
         print(f'Zone {zone}: {len(raw_df)} total objects in raw data')
 
@@ -773,6 +972,7 @@ def _process_zone(zone, config):
 
     r_df = _load_or_build_df(cache_dir, _zone_cache_key('r', zone, tag_list), raw_paths + cls_paths,
                              _build_r, progress=progress)
+    _sanitize_tracer_columns(r_df)
     if progress:
         print(f'Zone {zone}: {len(r_df)} total objects after merging raw and class data')
 
@@ -810,7 +1010,7 @@ def parse_args():
     p.add_argument('--plot-entropy-cdf', action='store_true', default=False)
     p.add_argument('--all', action='store_true', help='Enable all plots (heavy)')
     p.add_argument('--usetex', action='store_true', help='Use LaTeX text rendering (heavy)')
-    p.add_argument('--dpi', type=int, default=50, help='Figure DPI')
+    p.add_argument('--dpi', type=int, default=360, help='Figure DPI')
     p.add_argument('--xbins', type=int, default=200,
                    help='Number of x grid points for CDF interpolation (default: 200)')
     p.add_argument('--subsample-per-zone', type=int, default=10000,

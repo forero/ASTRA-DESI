@@ -1,13 +1,14 @@
-import os, glob, argparse, json, time, numpy as np
+import os, glob, argparse, time, numpy as np
 from astropy.table import vstack, join, Table
 
 from desiproc.read_data import *
 from desiproc import implement_astra as astra
-from plot.plot_groups import *
-from desiproc.gen_groups import process_zone
+from plot.plot_wedges import plot_wedges, mask_source, pick_tracers, tracer_prefixes, ALL_WEBTYPES
+from desiproc.gen_groups import process_zone, classify_by_probability
 from desiproc.paths import (zone_tag, safe_tag, zone_prefix,
                             classification_path, probability_path, pairs_path,
                             ensure_release_subdirs, normalize_release_dir)
+from releases import RELEASE_FACTORIES
 
 
 def _read_groups_compat(groups_dir, zone, webtype, out_tag=None):
@@ -97,177 +98,6 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
         raise RuntimeError(f'Error preloading tables: {e}') from e
 
 
-def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tables, output_raw,
-                     n_random, zone_value, out_tag=None, release_tag=None):
-    """
-    Build a raw table for a DR1 sub-region (e.g., 'NGC1', 'NGC2') by combining real and random data
-    filtered by RA/DEC/Z cuts. Tracers that yield no rows after cuts are skipped (warning), so the
-    pipeline does not fail if a given tracer is empty in that box.
-    
-    Args:
-        zone_label (str): Zone label (e.g., 'NGC1', 'NGC2').
-        cuts (dict): Dictionary with RA/DEC/Z cuts (keys: RA_min, RA_max, DEC_min, DEC_max, Z_min, Z_max).
-        region (str): 'N' or 'S' for the hemisphere.
-        tracers (list): List of tracers to process.
-        real_tables (dict): Preloaded real data tables.
-        random_tables (dict): Preloaded random data tables.
-        output_raw (str): Output directory for the raw table.
-        n_random (int): Number of randoms per real object.
-        zone_value (int): Integer value to assign to the ZONE column for this region.
-    Returns:
-        Astropy Table: Combined table with real and random data for the specified region.
-    Raises:
-        RuntimeError: If building or saving the raw table fails.
-        ValueError: If no data is found for any tracer in the specified region and cuts.
-    """
-    try:
-        parts = []
-        skipped = []
-        for tr in tracers:
-            try:
-                rt = process_real_region(real_tables, tr, region, cuts, zone_value=zone_value)
-            except ValueError as e:
-                print(f'[warn] {tr} empty after cuts in region {region}: {e}')
-                skipped.append(tr)
-                continue
-            parts.append(rt)
-            count = len(rt)
-            rpt = generate_randoms_region(random_tables, tr, region, cuts, n_random, count, zone_value=zone_value)
-            parts.append(rpt)
-
-        if not parts:
-            raise ValueError(f'No data in region {region} for cuts {cuts} (tracers tried: {tracers})')
-
-        tbl = vstack(parts)
-        if 'RANDITER' in tbl.colnames:
-            tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
-
-        tsuf = safe_tag(out_tag)
-        out = os.path.join(output_raw, f'zone_{zone_label}{tsuf}.fits.gz')
-        tmp = out + '.tmp'
-
-        tbl_out = tbl.copy()
-        if 'ZONE' in tbl_out.colnames:
-            tbl_out.remove_column('ZONE')
-
-        tbl_out.meta['ZONE'] = zone_tag(zone_label)
-        tbl_out.meta['RELEASE'] = str(release_tag) if release_tag is not None else 'UNKNOWN'
-
-        tbl_out.write(tmp, format='fits', overwrite=True)
-        os.replace(tmp, out)
-        if skipped:
-            print(f'[info] In {zone_label} skipped tracers (empty): {", ".join(skipped)}')
-        return tbl
-    except Exception as e:
-        raise RuntimeError(f'Error building raw table for region {zone_label}: {e}') from e
-
-
-def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_raw,
-                       n_random, zone_value, out_tag=None, release_tag=None):
-    """
-    Build a raw table for a DR2 zone split by RA (NGC or SGC).
-
-    Args:
-        zone_label (str): Zone label ('NGC' or 'SGC').
-        tracers (list[str]): Tracer identifiers to process.
-        real_tables (dict): Preloaded real tables keyed by tracer and zone label.
-        random_tables (dict): Preloaded random tables keyed by tracer and zone label.
-        output_raw (str): Output directory for raw tables.
-        n_random (int): Number of random realisations per real sample.
-        zone_value (int): Value stored in the ``ZONE`` column metadata.
-    Returns:
-        Table: Combined table with real and random data for the specified DR2 zone.
-    Raises:
-        RuntimeError: If building or saving the raw table fails.
-    """
-    try:
-        parts = []
-        skipped = []
-        for tr in tracers:
-            try:
-                rt = process_real_dr2(real_tables, tr, zone_label, zone_value=zone_value)
-            except ValueError as e:
-                print(f'[warn] {tr} empty in DR2 zone {zone_label}: {e}')
-                skipped.append(tr)
-                continue
-            parts.append(rt)
-            count = len(rt)
-            rpt = generate_randoms_dr2(random_tables, tr, zone_label, n_random, count, zone_value=zone_value)
-            parts.append(rpt)
-
-        if not parts:
-            raise ValueError(f'No data in DR2 zone {zone_label} (tracers tried: {tracers})')
-
-        tbl = vstack(parts)
-        if 'RANDITER' in tbl.colnames:
-            tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
-
-        tsuf = safe_tag(out_tag)
-        out = os.path.join(output_raw, f'zone_{zone_label}{tsuf}.fits.gz')
-        tmp = out + '.tmp'
-
-        tbl_out = tbl.copy()
-        if 'ZONE' in tbl_out.colnames:
-            tbl_out.remove_column('ZONE')
-
-        tbl_out.meta['ZONE'] = zone_tag(zone_label)
-        tbl_out.meta['RELEASE'] = str(release_tag) if release_tag is not None else 'UNKNOWN'
-
-        tbl_out.write(tmp, format='fits', overwrite=True)
-        os.replace(tmp, out)
-        if skipped:
-            print(f'[info] In DR2 {zone_label} skipped tracers (empty): {", ".join(skipped)}')
-        return tbl
-    except Exception as e:
-        raise RuntimeError(f'Error building DR2 raw table for zone {zone_label}: {e}') from e
-
-
-def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, tracers, north_rosettes,
-                    out_tag=None, release_tag=None):
-    """
-    Build a raw table for a specific zone by combining real and random data.
-
-    Args:
-        zone (int): Zone number (0-19).
-        real_tables (dict): Preloaded real data tables.
-        random_tables (dict): Preloaded random data tables.
-        output_raw (str): Output directory for the raw table.
-        n_random (int): Number of randoms per real object.
-        tracers (list): List of tracers to process.
-        north_rosettes (set): Set of north rosette indices.
-    Returns:
-        Astropy Table: Combined table with real and random data for the specified zone.
-    Raises:
-        RuntimeError: If building or saving the raw table fails.
-    """
-    try:
-        parts = []
-        for tr in tracers:
-            rt = process_real(real_tables, tr, zone, north_rosettes)
-            parts.append(rt)
-            count = len(rt)
-            rpt = generate_randoms(random_tables, tr, zone, north_rosettes, n_random, count)
-            parts.append(rpt)
-        tbl = vstack(parts)
-        if 'RANDITER' in tbl.colnames:
-            tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
-
-        tsuf = safe_tag(out_tag)
-        out = os.path.join(output_raw, f'zone_{zone:02d}{tsuf}.fits.gz')
-        tmp = out + '.tmp'
-
-        tbl_out = tbl.copy()
-        if 'ZONE' in tbl_out.colnames:
-            tbl_out.remove_column('ZONE')
-
-        tbl_out.meta['ZONE'] = zone_tag(zone)
-        tbl_out.meta['RELEASE'] = str(release_tag) if release_tag is not None else 'UNKNOWN'
-
-        tbl_out.write(tmp, format='fits', overwrite=True)
-        os.replace(tmp, out)
-        return tbl
-    except Exception as e:
-        raise RuntimeError(f'Error building raw table for zone {zone}: {e}') from e
 
 
 def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
@@ -327,41 +157,114 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
 
 def plot_zone_wedges_for_args(z, args, plot_dir):
     """
-    Generate and save the wedge plot for zone z using the parameters from args.
-    Does not return anything; prints the PNG path if generated.
+    Generate the trio of wedge plots (groups, types, structure) for a given zone.
 
     Args:
-        z (int or str): Zone number or label.
+        z (int | str): Zone identifier.
         args (argparse.Namespace): Command-line arguments.
-        plot_dir (str): Directory to save plots.
+        plot_dir (str): Directory to save the resulting PNG files.
     """
     tag = zone_tag(z)
-    try:
-        groups = _read_groups_compat(args.groups_out, z, args.webtype, getattr(args, 'out_tag', None))
-    except Exception as e:
-        print(f'[plot] skip zone {tag}: cannot read groups ({e})')
-        return
+    out_tag = getattr(args, 'out_tag', None)
+    tsuf = safe_tag(out_tag)
 
     try:
-        raw = _read_raw_min_compat(args.raw_out, args.class_out, z, getattr(args, 'out_tag', None))
+        raw = _read_raw_min_compat(args.raw_out, args.class_out, z, out_tag)
     except Exception as e:
         print(f'[plot] skip zone {tag}: cannot read raw/class ({e})')
         return
 
-    gm = mask_source(np.asarray(groups['RANDITER']), args.source)
-    groups = groups[gm]
-
     rm = mask_source(np.asarray(raw['RANDITER']), args.source)
     raw = raw[rm]
+    if len(raw) == 0:
+        print(f'[plot] skip zone {tag}: raw catalogue empty after filtering source={args.source}')
+        return
 
-    jtbl = join(groups, raw, keys=['TARGETID','TRACERTYPE','RANDITER'], join_type='inner')
+    def _select_tracers(table):
+        available = tracer_prefixes(np.asarray(table['TRACERTYPE']).astype(str))
+        selected = pick_tracers(available, args.plot_tracers)
+        if isinstance(selected, np.ndarray):
+            values = selected.tolist()
+        else:
+            values = list(selected)
+        return [str(val) for val in values if str(val)]
 
-    available = tracer_prefixes(np.asarray(jtbl['TRACERTYPE']).astype(str))
-    tracers = pick_tracers(available, args.plot_tracers)
+    raw_tracers = _select_tracers(raw)
+    if not raw_tracers:
+        print(f'[plot] skip zone {tag}: none of the requested tracers present in raw catalogue')
+        return
 
-    tsuf = safe_tag(getattr(args, 'out_tag', None))
-    out_png = os.path.join(plot_dir, f'groups_wedges_zone_{tag}{tsuf}_{args.webtype}.png')
-    plot_wedges(jtbl, tracers, z, args.webtype, out_png, args.plot_smin, args.plot_max_z, connect_lines=args.connect_lines)
+    structure_png = os.path.join(plot_dir, f'structure_wedges_zone_{tag}{tsuf}.png')
+    plot_wedges(raw, raw_tracers, z, 'all', structure_png, args.plot_smin, args.plot_max_z,
+                connect_lines=args.connect_lines, color_mode='mono', title=f'Zone {tag}')
+
+    try:
+        groups = _read_groups_compat(args.groups_out, z, args.webtype, out_tag)
+    except Exception as e:
+        print(f'[plot] skip zone {tag}: cannot read groups ({e})')
+    else:
+        gm = mask_source(np.asarray(groups['RANDITER']), args.source)
+        groups = groups[gm]
+        if len(groups) == 0:
+            print(f'[plot] skip zone {tag}: groups table empty after source={args.source}')
+        else:
+            join_keys = ['TARGETID', 'TRACERTYPE', 'RANDITER']
+            missing_cols = [key for key in join_keys if key not in groups.colnames]
+            if missing_cols:
+                missing = ', '.join(missing_cols)
+                print(f'[plot] skip zone {tag}: groups table missing columns: {missing}')
+            else:
+                jtbl = join(groups, raw, keys=join_keys, join_type='inner')
+                if len(jtbl) == 0:
+                    print(f'[plot] skip zone {tag}: join between groups and raw is empty')
+                else:
+                    group_tracers = _select_tracers(jtbl)
+                    if not group_tracers:
+                        print(f'[plot] skip zone {tag}: requested tracers missing in groups join')
+                    else:
+                        groups_png = os.path.join(
+                            plot_dir,
+                            f'groups_wedges_zone_{tag}{tsuf}_{args.webtype}.png',
+                        )
+                        plot_wedges(jtbl, group_tracers, z, args.webtype, groups_png,
+                                    args.plot_smin, args.plot_max_z,
+                                    connect_lines=args.connect_lines, color_mode='group',
+                                    title=f'{str(args.webtype).capitalize()}s in zone {tag}')
+
+    try:
+        prob_path = probability_path(args.class_out, z, out_tag)
+        prob_tbl = Table.read(prob_path, memmap=True)
+    except Exception as e:
+        print(f'[plot] skip zone {tag}: cannot read probabilities ({e})')
+    else:
+        prob_tbl = classify_by_probability(prob_tbl)
+        pm = mask_source(np.asarray(prob_tbl['RANDITER']), args.source)
+        prob_tbl = prob_tbl[pm]
+        if len(prob_tbl) == 0:
+            print(f'[plot] skip zone {tag}: probability table empty after source={args.source}')
+        else:
+            join_keys = ['TARGETID', 'RANDITER']
+            prob_cols = set(prob_tbl.colnames)
+            missing_cols = [key for key in join_keys if key not in prob_cols]
+            if missing_cols:
+                missing = ', '.join(missing_cols)
+                print(f'[plot] skip zone {tag}: probability table missing columns: {missing}')
+            elif 'WEBTYPE' not in prob_cols:
+                print(f'[plot] skip zone {tag}: probability table missing WEBTYPE column')
+            else:
+                keep_cols = [c for c in ('TARGETID', 'RANDITER', 'WEBTYPE') if c in prob_cols]
+                types_join = join(raw, prob_tbl[keep_cols], keys=join_keys, join_type='inner')
+                if len(types_join) == 0:
+                    print(f'[plot] skip zone {tag}: join between raw and probability tables is empty')
+                else:
+                    type_tracers = _select_tracers(types_join)
+                    if not type_tracers:
+                        print(f'[plot] skip zone {tag}: requested tracers missing in probability join')
+                    else:
+                        types_png = os.path.join(plot_dir, f'types_wedges_zone_{tag}{tsuf}.png')
+                        plot_wedges(types_join, type_tracers, z, 'all', types_png, args.plot_smin,
+                                    args.plot_max_z, connect_lines=args.connect_lines, color_mode='webtype',
+                                    webtype_order=list(ALL_WEBTYPES), title=f'Web types in zone {tag}')
 
 
 def _base_tracer_labels(tracer_col):
@@ -566,70 +469,38 @@ def main():
 
         release = args.release.upper()
 
-        if release == 'EDR':
-            TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
-            REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
-            RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
-            N_RANDOM_FILES = 18
-            N_ZONES = 20
-            NORTH_ROSETTES = {3, 6, 7, 11, 12, 13, 14, 15, 18, 19}
-            REAL_COLUMNS = ['TARGETID', 'ROSETTE_NUMBER', 'RA', 'DEC', 'Z']
-            RANDOM_COLUMNS = REAL_COLUMNS
-            tracer_alias = {'bgs': 'BGS_ANY', 'elg': 'ELG', 'lrg': 'LRG', 'qso': 'QSO'}
-        elif release == 'DR1':
-            TRACERS = ['BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
-            REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
-            RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
-            N_RANDOM_FILES = 18
-
-            REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
-            RANDOM_COLUMNS = REAL_COLUMNS
-
-            DEFAULT_CUTS = {'NGC1': {'RA_min':110, 'RA_max':260, 'DEC_min':-10, 'DEC_max':8},
-                            'NGC2': {'RA_min':180, 'RA_max':260, 'DEC_min':30, 'DEC_max':40}}
-            if args.config: # load external config json if prov
-                with open(args.config, 'r') as f:
-                    user_cuts = json.load(f)
-                DEFAULT_CUTS.update(user_cuts)
-            tracer_alias = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso', 'lrg': 'LRG', 'qso': 'QSO'}
-        elif release == 'DR2':
-            TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
-            N_RANDOM_FILES = 18
-            REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
-            RANDOM_COLUMNS = REAL_COLUMNS
-            REAL_SUFFIX = RANDOM_SUFFIX = None  # not used for DR2
-            DR2_RA_MIN = 90.0
-            DR2_RA_MAX = 300.0
-            DR2_ZONE_VALUES = {'NGC': 2001, 'SGC': 2002}
-            if args.config:
-                raise RuntimeError('--config is not supported for DR2; RA split is fixed at 90 <= RA <= 300 for NGC.')
-            tracer_alias = {'bgs': 'BGS_ANY', 'elg': 'ELG', 'lrg': 'LRG', 'qso': 'QSO'}
-        else:
+        config_factory = RELEASE_FACTORIES.get(release)
+        if config_factory is None:
             raise RuntimeError(f"Unsupported release '{args.release}'")
+
+        release_config = config_factory(args)
+        available_tracers = list(release_config.tracers)
+        tracer_alias = dict(release_config.tracer_alias)
 
         if args.tracers is not None:
             req = [str(t).strip() for t in args.tracers]
             norm = []
             for t in req:
                 t_low = t.lower()
-                if t in TRACERS:
+                t_up = t.upper()
+                if t in available_tracers:
                     norm.append(t)
-                elif t.upper() in TRACERS:
-                    norm.append(t.upper())
+                elif t_up in available_tracers:
+                    norm.append(t_up)
                 elif t_low in tracer_alias:
                     norm.append(tracer_alias[t_low])
                 else:
-                    raise RuntimeError(f"Unknown tracer '{t}'. Available: {', '.join(TRACERS)}")
+                    raise RuntimeError(f"Unknown tracer '{t}'. Available: {', '.join(available_tracers)}")
 
             seen = set()
             SEL_TRACERS = [x for x in norm if not (x in seen or seen.add(x))]
         else:
-            SEL_TRACERS = TRACERS
+            SEL_TRACERS = list(available_tracers)
 
         if not args.only_plot and not args.combine_only and not args.base_dir:
             raise RuntimeError('--base-dir is required unless --only-plot is specified')
 
-        release_tag = release
+        release_tag = release_config.release_tag
 
         os.makedirs(args.raw_out, exist_ok=True)
         class_root = normalize_release_dir(args.class_out)
@@ -642,16 +513,10 @@ def main():
         plot_dir = args.plot_output or args.groups_out
         os.makedirs(plot_dir, exist_ok=True)
 
-        print(f'--- [pipeline] Starting release {args.release.upper()} with tracers: {", ".join(SEL_TRACERS)}')
+        print(f'--- [pipeline] Starting release {release} with tracers: {", ".join(SEL_TRACERS)}')
         pipeline_start = time.time()
-        stage_start = pipeline_start
 
-        if release == 'EDR':
-            zones = [args.zone] if args.zone is not None else range(N_ZONES)
-        elif release == 'DR1':
-            zones = args.zones if args.zones is not None else ['NGC1', 'NGC2']
-        else:  # DR2
-            zones = args.zones if args.zones is not None else ['NGC', 'SGC']
+        zones = list(release_config.zones)
 
         if args.only_plot:
             for z in zones:
@@ -665,36 +530,26 @@ def main():
             print(f'--- [pipeline] combine-only elapsed t {time.time()-pipeline_start:.2f} s')
             return
 
-        if release == 'DR2':
-            real_tables, random_tables = preload_dr2_tables(args.base_dir, SEL_TRACERS,
-                                                            REAL_COLUMNS, RANDOM_COLUMNS,
-                                                            N_RANDOM_FILES,
-                                                            ra_min=DR2_RA_MIN, ra_max=DR2_RA_MAX)
+        if release_config.use_dr2_preload:
+            real_tables, random_tables = preload_dr2_tables(args.base_dir,
+                                                            SEL_TRACERS,
+                                                            release_config.real_columns,
+                                                            release_config.random_columns,
+                                                            release_config.n_random_files,
+                                                            **release_config.preload_kwargs)
         else:
-            real_tables, random_tables = preload_all_tables(args.base_dir, SEL_TRACERS,
-                                                            REAL_SUFFIX, RANDOM_SUFFIX,
-                                                            REAL_COLUMNS, RANDOM_COLUMNS,
-                                                            N_RANDOM_FILES)
+            real_tables, random_tables = preload_all_tables(args.base_dir,
+                                                            SEL_TRACERS,
+                                                            release_config.real_suffix,
+                                                            release_config.random_suffix,
+                                                            release_config.real_columns,
+                                                            release_config.random_columns,
+                                                            release_config.n_random_files)
 
         for z in zones:
             stage_start = time.time()
-            if release == 'EDR':
-                tbl = build_raw_table(int(z), real_tables, random_tables, args.raw_out,
-                                      args.n_random, SEL_TRACERS, NORTH_ROSETTES,
-                                      out_tag=args.out_tag, release_tag=release_tag)
-            elif release == 'DR1':
-                zone_label = str(z)
-                zone_value = {'NGC1': 1001, 'NGC2': 1002}.get(zone_label, 9999)
-                cuts = DEFAULT_CUTS[zone_label]
-                tbl = build_raw_region(zone_label, cuts, 'ALL', SEL_TRACERS, real_tables, random_tables,
-                                       args.raw_out, args.n_random, zone_value,
-                                       out_tag=args.out_tag, release_tag=release_tag)
-            else:  # DR2
-                zone_label = str(z).upper()
-                zone_value = DR2_ZONE_VALUES.get(zone_label, 2999)
-                tbl = build_raw_dr2_zone(zone_label, SEL_TRACERS, real_tables, random_tables,
-                                         args.raw_out, args.n_random, zone_value,
-                                         out_tag=args.out_tag, release_tag=release_tag)
+            tbl = release_config.build_raw(z, real_tables, random_tables, SEL_TRACERS,
+                                           args, release_tag)
             print(f'-- [pipeline] Built raw zone {z} with {len(tbl)} rows in {time.time()-stage_start:.2f} s')
 
             stage_start = time.time()
@@ -704,10 +559,9 @@ def main():
             print(f'-- [pipeline] Classified zone {z} in {time.time()-stage_start:.2f} s')
 
             stage_start = time.time()
-            outputs = process_zone(z, args.raw_out, args.class_out,
-                                   args.groups_out, args.webtype, args.source,
-                                   args.r_lower, args.r_upper,
-                                   release_tag=release_tag, out_tag=args.out_tag)
+            outputs = process_zone(z, args.raw_out, args.class_out, args.groups_out,
+                                   args.webtype, args.source, release_tag=release_tag,
+                                   out_tag=args.out_tag)
             print(f'-- [pipeline] Grouped zone {z} in {time.time()-stage_start:.2f} s')
 
             combine_zone_products(z, args, release_tag)

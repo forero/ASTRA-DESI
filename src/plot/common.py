@@ -8,13 +8,11 @@ from astropy.table import Table
 from desiproc.paths import ( locate_classification_file, locate_probability_file,
                             safe_tag, zone_tag,)
 
-__all__ = [
-    "resolve_raw_path",
-    "resolve_class_path",
-    "resolve_probability_path",
-    "load_raw_dataframe",
-    "load_probability_dataframe",
-]
+__all__ = ["resolve_raw_path",
+           "resolve_class_path",
+           "resolve_probability_path",
+           "load_raw_dataframe",
+           "load_probability_dataframe"]
 
 
 def resolve_raw_path(raw_dir, zone, out_tag=None):
@@ -94,7 +92,8 @@ def load_raw_dataframe(raw_path):
         frame['ISDATA'] = True
 
     if 'TRACERTYPE' in frame.columns:
-        frame['BASE'] = frame['TRACERTYPE'].apply(_normalize_tracertype)
+        frame['TRACERTYPE'] = frame['TRACERTYPE'].apply(_normalize_tracertype)
+        frame['BASE'] = frame['TRACERTYPE']
         frame['BASE_CORE'] = frame['BASE'].str.rsplit('_', n=1).str[0]
     else:
         raise ValueError(f"Raw file {raw_path} is missing column: TRACERTYPE")
@@ -148,7 +147,6 @@ def _normalize_tracertype(value) -> str:
     Returns:
         str: Normalized tracer type string.
     """
-
     if isinstance(value, (bytes, bytearray)):
         try:
             value = value.decode('utf-8', errors='ignore')
