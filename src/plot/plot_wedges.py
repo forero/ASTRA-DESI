@@ -16,14 +16,18 @@ if __package__ is None or __package__ == '':
     from desiproc.paths import safe_tag, zone_tag
     from desiproc.gen_groups import classify_by_probability
     from plot.common import resolve_raw_path, resolve_probability_path
+    from plot.color_theme import load_theme, apply_matplotlib_theme
 else:
     from desiproc.paths import safe_tag, zone_tag
     from desiproc.gen_groups import classify_by_probability
     from .common import resolve_raw_path, resolve_probability_path
+    from .color_theme import load_theme, apply_matplotlib_theme
 matplotlib.rcParams['text.usetex'] = True
 
-
-CLASS_COLORS = {'void': 'crimson', 'sheet': 'orange', 'filament': 'cornflowerblue', 'knot': 'midnightblue'}
+# Change this value (or the PLOT_WEDGE_THEME / PLOT_THEME environment variables) to switch themes.
+THEME_NAME, THEME = load_theme('PLOT_WEDGE_THEME', default='light')
+apply_matplotlib_theme(THEME)
+CLASS_COLORS = dict(THEME['class_colors'])
 CLASS_ZORDER = {'void': 3, 'sheet': 0, 'filament': 1, 'knot': 2}
 ALL_WEBTYPES = tuple(CLASS_COLORS.keys())
 ORDERED_TRACERS = ['BGS', 'LRG', 'ELG', 'QSO']
@@ -31,7 +35,15 @@ TRACER_ZLIMS = {'BGS': 0.45, 'LRG': 1.0, 'ELG': 1.4, 'QSO': 2.2}
 
 RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS','XCM','YCM','ZCM']
-main_color, sec_color = 'black', 'gray'
+
+TEXT_COLOR = THEME['text']
+main_color, sec_color = THEME['primary'], THEME['secondary']
+SCATTER_EDGE_COLOR = THEME['scatter_edge']
+HIGHLIGHT_EDGE_COLOR = THEME['highlight_edge']
+CLASS_FALLBACK_COLOR = THEME['class_fallback']
+GROUP_PALETTE_NAME = THEME['group_palette']
+MONO_COLOR_DEFAULT = THEME['mono']
+CENTER_SCATTER_COLOR = THEME['center_color']
 
 
 def read_groups(groups_dir, zone, webtype, out_tag=None):
@@ -308,7 +320,7 @@ def _init_ax(ax, title):
         ax (matplotlib.axes.Axes): The axis to initialize.
         title (str): The title for the plot.
     """
-    ax.set_title(title, fontsize=18, y=1.09)
+    ax.set_title(title, fontsize=18, y=1.09, color=TEXT_COLOR)
     for sp in ax.spines.values():
         sp.set_visible(False)
     ax.set_xticks([]); ax.set_yticks([])
@@ -388,8 +400,8 @@ def _draw_borders(ax, half_w, y_max):
         half_w (float): Half width of the wedge at the maximum redshift.
         y_max (float): Maximum y value for the plot.
     """
-    ax.plot([-half_w, 0], [y_max, 0], lw=1.5, c=main_color)
-    ax.plot([ half_w, 0], [y_max, 0], lw=1.5, c=main_color)
+    ax.plot([-half_w, 0], [y_max, 0], lw=0.6, c=main_color)
+    ax.plot([ half_w, 0], [y_max, 0], lw=0.6, c=main_color)
     ax.plot([-half_w, half_w], [y_max, y_max], lw=1.5, c=main_color)
     ax.set_xlim(-half_w, half_w)
     ax.set_ylim(0, y_max)
@@ -409,8 +421,8 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc, y_max):
     top4 = np.linspace(ra_ticks.min(), ra_ticks.max(), 4)
     x_top = Dc * np.deg2rad(top4 - ra_ctr)
     for xt, rt in zip(x_top, top4):
-        ax.text(xt, y_max + 0.01*y_max, f'{rt:.0f}', ha='center', va='bottom', fontsize=19)
-    ax.text(0, y_max + 0.05*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=19)
+        ax.text(xt, y_max + 0.01*y_max, f'{rt:.0f}', ha='center', va='bottom', fontsize=19, color=TEXT_COLOR)
+    ax.text(0, y_max + 0.05*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=19, color=TEXT_COLOR)
 
 
 def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
@@ -429,9 +441,9 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
         x0r = half_w * (z0 / y_max) if y_max > 0 else 0
         angle = np.degrees(np.arctan2(-z0, -x0r)) if y_max > 0 else 0
         offset = np.sign(x0r) * half_w * 0.11 if np.abs(x0r) > 1e-6 else half_w * 0.11
-        ax.text(x0r + offset, z0, f'{z0:.2f}', ha='left', va='center', rotation=angle + 180, fontsize=20)
+        ax.text(x0r + offset, z0, f'{z0:.2f}', ha='left', va='center', rotation=angle + 180, fontsize=20, color=TEXT_COLOR)
     if idx == 0:
-        ax.set_ylabel(ylabel, fontsize=30, labelpad=15)
+        ax.set_ylabel(ylabel, fontsize=30, labelpad=15, color=TEXT_COLOR)
 
 
 def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n_z=10, coord='z',
@@ -439,7 +451,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                 min_npts=2, top_groups=None, max_points=None,
                 z_range=None, ra_range=None,
                 use_presets=False, highlight_longest=None, highlight_connect=False,
-                *, color_mode='group', title=None, webtype_order=None, mono_color='black',
+                *, color_mode='group', title=None, webtype_order=None, mono_color=None,
                 per_tracer_caps=None):
     """Plot wedge diagrams for the requested tracers.
 
@@ -452,6 +464,9 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     color_mode = str(color_mode or 'group').lower()
     if color_mode not in {'group', 'webtype', 'mono'}:
         raise ValueError(f'Unsupported color_mode={color_mode}')
+
+    if mono_color is None:
+        mono_color = MONO_COLOR_DEFAULT
 
     tracers = [str(t).split('_', 1)[0].upper() for t in tracers]
     tracers = [t for t in ORDERED_TRACERS if t in tracers]
@@ -480,7 +495,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     tr_pref = tracer_prefixes(tr_types)
 
     nrows, ncols = subplot_grid(len(tracers))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15,11), sharex=False, sharey=False,
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12,30), sharex=False, sharey=False,
                              gridspec_kw={'wspace': 0.5, 'hspace': 0.})
     fig.subplots_adjust(top=0.85)
     axes = np.atleast_1d(axes).ravel()
@@ -490,11 +505,14 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
         sp_t = 1.04
     else:
         sp_t = 0.97
-    plt.suptitle(title or default_title, fontsize=22, y=sp_t)
+    plt.suptitle(title or default_title, fontsize=22, y=sp_t, color=TEXT_COLOR)
 
-    cmap = plt.get_cmap('tab20')
-    palette = np.asarray(cmap.colors)
-    point_size = max(int(smin or 1), 5)
+    cmap = plt.get_cmap(GROUP_PALETTE_NAME)
+    if hasattr(cmap, 'colors'):
+        palette = np.asarray(cmap.colors)
+    else:
+        palette = cmap(np.linspace(0.0, 1.0, 256))
+    point_size = 0.2#max(int(smin or 1), 2)
 
     if webtype_order is None:
         webtype_order = list(ALL_WEBTYPES)
@@ -552,7 +570,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                 m &= (zvec <= z_cap)
 
         if not np.any(m):
-            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes, fontsize=16)
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes, fontsize=16, color=TEXT_COLOR)
             continue
 
         ra_min, ra_max, ra_ctr, Dc_maxz, half_w, zmax = _compute_zone_params(ravec[m], zvec[m], z_cap)
@@ -614,7 +632,8 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                     ys = y_sub[selg][order]
                     wt_g = str(wt_sub[selg][0])
                     ax.plot(xs, ys, lw=0.5, alpha=0.9,
-                            color=CLASS_COLORS.get(wt_g, 'gray'), zorder=CLASS_ZORDER.get(wt_g, 1))
+                            color=CLASS_COLORS.get(wt_g, CLASS_FALLBACK_COLOR),
+                            zorder=CLASS_ZORDER.get(wt_g, 1))
             elif color_mode == 'mono':
                 for gval in np.unique(gid_sub):
                     selg = (gid_sub == gval)
@@ -626,7 +645,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                     ax.plot(xs, ys, lw=0.5, alpha=0.6, color=mono_color, zorder=0)
 
         if color_mode == 'group' and idx_mod is not None:
-            ax.scatter(x_sel, y_sel, s=point_size, edgecolor='k', lw=0.15,
+            ax.scatter(x_sel, y_sel, s=point_size, edgecolor=SCATTER_EDGE_COLOR, lw=0.15,
                        c=palette[idx_mod[mclip]], alpha=1.0)
         elif color_mode == 'webtype' and wt_local is not None:
             wt_sel = wt_local[mclip]
@@ -636,9 +655,9 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                     continue
                 used_webtypes.add(wt)
                 ax.scatter(x_sel[sel], y_sel[sel], s=point_size,
-                        c=CLASS_COLORS.get(wt, 'gray'), alpha=1.0,
-                        zorder=2 + CLASS_ZORDER.get(wt, 0),
-                        edgecolor='k', lw=0.15,)
+                           c=CLASS_COLORS.get(wt, CLASS_FALLBACK_COLOR), alpha=1.0,
+                           zorder=2 + CLASS_ZORDER.get(wt, 0),
+                           edgecolor=SCATTER_EDGE_COLOR, lw=0.15,)
         else:  # mono
             ax.scatter(x_sel, y_sel, s=point_size, c=mono_color,
                        alpha=0.65, edgecolor='none')
@@ -669,7 +688,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                     top_g = set(uniq_g[top_idx].tolist())
                     mh = mclip & np.isin(gid_all, list(top_g))
                     ax.scatter(x_all[mh], y_all[mh], s=point_size*1.8, facecolors='none',
-                               edgecolors='black', linewidths=0.6, zorder=5)
+                               edgecolors=HIGHLIGHT_EDGE_COLOR, linewidths=0.6, zorder=5)
                     if highlight_connect:
                         for gval in top_g:
                             selg = (gid_all == gval) & mclip
@@ -678,7 +697,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                             order2 = np.argsort(y_all[selg])
                             xs = x_all[selg][order2]
                             ys = y_all[selg][order2]
-                            ax.plot(xs, ys, lw=1.1, alpha=0.9, color='black', zorder=6)
+                            ax.plot(xs, ys, lw=1.1, alpha=0.9, color=HIGHLIGHT_EDGE_COLOR, zorder=6)
 
         _draw_borders(ax, half_w, y_max)
         _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc_maxz, y_max)
@@ -691,14 +710,15 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
     if color_mode == 'webtype' and used_webtypes:
         order = [wt for wt in webtype_order if wt in used_webtypes]
         handles = [Line2D([], [], marker='o', linestyle='', markersize=10,
-                          markerfacecolor=CLASS_COLORS.get(wt, 'gray'), markeredgecolor='none',
+                          markerfacecolor=CLASS_COLORS.get(wt, CLASS_FALLBACK_COLOR), markeredgecolor='none',
                           label=wt.capitalize()) for wt in order]
         if handles:
             legend_handles = handles
 
     if legend_handles:
         fig.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, 1.012),
-                   ncol=min(len(legend_handles), 4), frameon=True, fontsize=20,)
+                   ncol=min(len(legend_handles), 4), frameon=True, fontsize=20,
+                   labelcolor=TEXT_COLOR)
 
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
     print(out_png)
@@ -778,7 +798,7 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
     nrows, ncols = subplot_grid(len(tracers))
     fig, axes = plt.subplots(nrows, ncols, figsize=(10,15), sharex=False, sharey=False)
     axes = np.atleast_1d(axes).ravel()
-    plt.suptitle(f'{webtype.capitalize()} groups (centers) in zone {zone_tag(zone)}', fontsize=27, y=1.01)
+    plt.suptitle(f'{webtype.capitalize()} groups (centers) in zone {zone_tag(zone)}', fontsize=27, y=1.01, color=TEXT_COLOR)
 
     for i, tr in enumerate(tracers):
         tr = str(tr)
@@ -787,7 +807,7 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
 
         m = (ag_tr == tr) & (ag_n >= int(min_npts)) & (ag_z <= z_cap)
         if not np.any(m):
-            ax.text(0.5, 0.5, 'No groups', ha='center', va='center', transform=ax.transAxes, fontsize=16)
+            ax.text(0.5, 0.5, 'No groups', ha='center', va='center', transform=ax.transAxes, fontsize=16, color=TEXT_COLOR)
             continue
 
         zvals = ag_z[m]
@@ -800,7 +820,8 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
         mclip = np.abs(x) <= w_at_y
 
         sizes = np.clip(ag_n[mclip], 4, None)
-        ax.scatter(x[mclip], yvals[mclip], s=sizes, c='tab:blue', alpha=0.85, edgecolor='none')
+        ax.scatter(x[mclip], yvals[mclip], s=sizes, c=CENTER_SCATTER_COLOR,
+                   alpha=0.85, edgecolor='none')
 
         _draw_borders(ax, half_w, y_max)
         _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc_maxz, y_max)

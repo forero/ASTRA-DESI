@@ -16,13 +16,101 @@ if __package__ is None or __package__ == '':
     pkg_root = Path(__file__).resolve().parent
     if str(pkg_root) not in sys.path:
         sys.path.append(str(pkg_root))
-    from paths import locate_probability_file, safe_tag, zone_tag
+    from paths import locate_classification_file, safe_tag, zone_tag
 else:
-    from .paths import locate_probability_file, safe_tag, zone_tag
+    from .paths import locate_classification_file, safe_tag, zone_tag
 
 
 RAW_COLS = ['TRACERTYPE','RANDITER','TARGETID','XCART','YCART','ZCART']
-PROB_COLS = ['TARGETID','RANDITER','ISDATA','PVOID','PSHEET','PFILAMENT','PKNOT']
+CLASS_COLS = ['TARGETID','RANDITER','ISDATA','NDATA','NRAND','TRACERTYPE']
+WEBTYPE_MAPPING = np.array(['void', 'sheet', 'filament', 'knot'], dtype='U8')
+
+
+def classify_by_probability(prob_tbl):
+    """
+    Annotate ``prob_tbl`` rows with the most likely web type.
+
+    Args:
+        prob_tbl (Table): Probability table containing columns ``PVOID``,
+            ``PSHEET``, ``PFILAMENT``, ``PKNOT``.
+    Returns:
+        Table: The input table with a ``WEBTYPE`` column containing the
+            maximum-probability label per row (empty string when undefined).
+    Raises:
+        TypeError: When ``prob_tbl`` is not an Astropy Table.
+        KeyError: When required probability columns are missing.
+    """
+    if not isinstance(prob_tbl, Table):
+        raise TypeError('classify_by_probability expects an astropy Table')
+
+    required = ('PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT')
+    missing = [col for col in required if col not in prob_tbl.colnames]
+    if missing:
+        raise KeyError(f'Probability table missing columns: {missing}')
+
+    n_rows = len(prob_tbl)
+    if 'WEBTYPE' in prob_tbl.colnames:
+        prob_tbl.remove_column('WEBTYPE')
+
+    if n_rows == 0:
+        prob_tbl['WEBTYPE'] = np.empty(0, dtype='U8')
+        return prob_tbl
+
+    cols = []
+    for name in required:
+        data = prob_tbl[name]
+        if isinstance(data, np.ma.MaskedArray):
+            values = data.filled(np.nan)
+        else:
+            values = np.asarray(data)
+        cols.append(np.asarray(values, dtype=np.float64))
+
+    arr = np.column_stack(cols)
+    arr = np.nan_to_num(arr, nan=-np.inf, copy=False)
+    idx = np.argmax(arr, axis=1)
+    webtypes = WEBTYPE_MAPPING[idx].astype('U8', copy=False)
+    invalid = ~np.isfinite(arr).any(axis=1)
+    if np.any(invalid):
+        webtypes = webtypes.copy()
+        webtypes[invalid] = ''
+
+    prob_tbl['WEBTYPE'] = webtypes
+    return prob_tbl
+
+
+def _to_tracer_text(value):
+    """
+    Decode tracer values to plain strings.
+
+    Args:
+        value: Input value, possibly bytes.
+    Returns:
+        str: Decoded and stripped string.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return value.decode('utf-8', errors='ignore').strip()
+        except Exception:
+            return value.decode('latin-1', errors='ignore').strip()
+    return str(value).strip()
+
+
+def _normalize_tracer_label(value):
+    """
+    Remove _DATA/_RAND suffixes from tracer labels.
+
+    Args:
+        value: Input tracer label.
+    Returns:
+        str: Normalized tracer prefix.
+    """
+    text = _to_tracer_text(value)
+    if not text:
+        return ''
+    head, sep, tail = text.rpartition('_')
+    if sep and tail.upper() in {'DATA', 'RAND'}:
+        return head
+    return text
 
 
 def _read_fits_columns(path, cols):
@@ -63,11 +151,11 @@ def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     else:
         raise FileNotFoundError(f'Raw table not found for zone {zone} with tag {out_tag}')
 
-    prob_path = locate_probability_file(class_dir, zone, out_tag)
-    return raw_path, prob_path
+    class_path = locate_classification_file(class_dir, zone, out_tag)
+    return raw_path, class_path
 
 
-def _read_zone_tables(raw_path, prob_path):
+def _read_zone_tables(raw_path, class_path):
     """
     Read the raw and class tables for a given zone.
     
@@ -78,47 +166,8 @@ def _read_zone_tables(raw_path, prob_path):
         Tuple[Table, Table]: Tuple containing the raw and classification tables.
     """
     raw = _read_fits_columns(raw_path, RAW_COLS)
-    prob = _read_fits_columns(prob_path, PROB_COLS)
-    return raw, prob
-
-
-def classify_by_probability(prob_tbl):
-    """
-    Assign WEBTYPE per row using the maximum of the probability columns.
-    
-    Args:
-        prob_tbl (Table): Table containing probability columns.
-    Returns:
-        Table: Updated table with a new 'WEBTYPE' column.
-    """
-    prob_tbl = prob_tbl.copy()
-
-    if 'RANDITER' not in prob_tbl.colnames:
-        prob_tbl['RANDITER'] = np.full(len(prob_tbl), -1, dtype=np.int32)
-    prob_tbl['RANDITER'] = np.asarray(prob_tbl['RANDITER'], dtype=np.int32)
-
-    if 'ISDATA' not in prob_tbl.colnames:
-        prob_tbl['ISDATA'] = (np.asarray(prob_tbl['RANDITER']) == -1)
-
-    if 'TARGETID' not in prob_tbl.colnames:
-        raise KeyError('Probability table missing TARGETID column')
-
-    prob_tbl['TARGETID'] = np.asarray(prob_tbl['TARGETID'], dtype=np.int64)
-
-    columns = []
-    for name in ('PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT'):
-        if name in prob_tbl.colnames:
-            columns.append(np.asarray(prob_tbl[name], dtype=float))
-        else:
-            columns.append(np.zeros(len(prob_tbl), dtype=float))
-
-    arr = np.vstack(columns).T if columns else np.zeros((len(prob_tbl), 4), dtype=float)
-    arr = np.nan_to_num(arr, nan=-np.inf)
-    idx = np.argmax(arr, axis=1)
-    mapping = np.array(['void', 'sheet', 'filament', 'knot'], dtype='U8')
-    prob_tbl['WEBTYPE'] = mapping[idx]
-
-    return prob_tbl
+    cls = _read_fits_columns(class_path, CLASS_COLS)
+    return raw, cls
 
 
 def _split_blocks(raw_sub):
@@ -141,7 +190,7 @@ def _split_blocks(raw_sub):
         yield ttype, randit, idxs
 
 
-def lenght(data_raw):
+def length(data_raw):
     """
     Estimate a linking length based on the convex hull of the points.
     
@@ -251,7 +300,7 @@ def _group_inertia(coords, labels):
 
 
 def _build_block_tables(ttype, randit, webtype, tids, labels, labs,
-                       counts, xcm, ycm, zcm, A, B, C):
+                       counts, xcm, ycm, zcm, A, B, C, link_len):
     """
     Builds the tables for the groups based on the computed labels and properties.
     
@@ -269,6 +318,7 @@ def _build_block_tables(ttype, randit, webtype, tids, labels, labs,
         A (np.ndarray): Semi-axis length A of the inertia ellipsoid.
         B (np.ndarray): Semi-axis length B of the inertia ellipsoid.
         C (np.ndarray): Semi-axis length C of the inertia ellipsoid.
+        link_len (float): Linking length used in the FoF algorithm.
     Returns:
         Table: Astropy Table containing the group properties.
     """
@@ -280,7 +330,8 @@ def _build_block_tables(ttype, randit, webtype, tids, labels, labs,
                    'RANDITER': np.full(labs.size, randit, dtype=np.int32),
                    'WEBTYPE': np.full(labs.size, webtype), 'GROUPID': labs,
                    'NPTS': counts, 'XCM': xcm, 'YCM': ycm, 'ZCM': zcm,
-                   'A': A, 'B': B, 'C': C})
+                   'A': A, 'B': B, 'C': C,
+                   'LINKLEN': np.full(labs.size, float(link_len))})
     return join(pts, props, keys=['TRACERTYPE','RANDITER','WEBTYPE','GROUPID'],
                     join_type='left')
 
@@ -316,7 +367,7 @@ def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None, release_tag=None):
 
 
 def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
-                 release_tag=None, out_tag=None):
+                 r_lower, r_upper, release_tag=None, out_tag=None):
     """
     Generate group catalogues for a zone.
 
@@ -327,95 +378,128 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
         out_dir (str): Destination directory for groups.
         webtype (str): Desired cosmic web type (e.g., ``'filament'``).
         source (str): Source selection (``'data'``, ``'rand'``, or ``'both'``).
+        r_lower (float): Lower r threshold (negative).
+        r_upper (float): Upper r threshold (positive).
         release_tag (str, optional): Release label stored in output metadata.
         out_tag (str, optional): Tag appended to filenames.
     Returns:
         list[str]: Paths to generated groups FITS files. Empty when no objects
         meet the criteria.
     """
-    raw_path, prob_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
-    raw_tbl, prob_tbl = _read_zone_tables(raw_path, prob_path)
-    prob_tbl = classify_by_probability(prob_tbl)
+    raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
+    raw_tbl, class_tbl = _read_zone_tables(raw_path, class_path)
 
+    if len(class_tbl) == 0:
+        return []
+
+    r_num = np.asarray(class_tbl['NDATA'], dtype=np.float64) - np.asarray(class_tbl['NRAND'], dtype=np.float64)
+    r_den = np.asarray(class_tbl['NDATA'], dtype=np.float64) + np.asarray(class_tbl['NRAND'], dtype=np.float64)
+    r_val = np.full(len(class_tbl), np.nan, dtype=np.float64)
+    np.divide(r_num, r_den, out=r_val, where=(r_den > 0))
+
+    valid = np.isfinite(r_val)
+    bins = np.array([r_lower, 0.0, r_upper], dtype=float)
+    webtypes = np.full(len(class_tbl), '', dtype='U8')
+    if np.any(valid):
+        idx = np.clip(np.digitize(r_val[valid], bins, right=False), 0, 3)
+        webtypes_valid = WEBTYPE_MAPPING[idx]
+        webtypes[valid] = webtypes_valid
+
+    isdata_cls = np.asarray(class_tbl['ISDATA'], dtype=bool)
+    mask = valid & (webtypes == webtype)
     if source == 'data':
-        prob_tbl = prob_tbl[prob_tbl['ISDATA'] == True]
+        mask &= isdata_cls
     elif source == 'rand':
-        prob_tbl = prob_tbl[prob_tbl['ISDATA'] == False]
+        mask &= ~isdata_cls
 
-    if len(prob_tbl) == 0:
+    if not np.any(mask):
         return []
 
-    prob_tbl = prob_tbl[prob_tbl['WEBTYPE'] == webtype]
-    if len(prob_tbl) == 0:
+    class_sel = class_tbl[mask]
+    isdata_sel = isdata_cls[mask]
+    rand_sel = np.asarray(class_sel['RANDITER'], dtype=np.int32)
+    tid_sel = np.asarray(class_sel['TARGETID'], dtype=np.int64)
+    tracer_sel = np.array([_normalize_tracer_label(v) for v in class_sel['TRACERTYPE']], dtype='U32')
+
+    raw_tid = np.asarray(raw_tbl['TARGETID'], dtype=np.int64)
+    raw_iter = np.asarray(raw_tbl['RANDITER'], dtype=np.int32)
+    raw_tracer_base = np.array([_normalize_tracer_label(v) for v in raw_tbl['TRACERTYPE']], dtype='U32')
+    coords = np.column_stack([np.asarray(raw_tbl['XCART'], dtype=np.float64),
+                             np.asarray(raw_tbl['YCART'], dtype=np.float64),
+                             np.asarray(raw_tbl['ZCART'], dtype=np.float64)])
+
+    data_mask = raw_iter == -1
+    rand_mask = ~data_mask
+    data_idx = np.where(data_mask)[0]
+    rand_idx = np.where(rand_mask)[0]
+
+    data_lookup = {(int(raw_tid[i]), raw_tracer_base[i]): i for i in data_idx}
+    rand_lookup = {(int(raw_tid[i]), raw_tracer_base[i], int(raw_iter[i])): i for i in rand_idx}
+
+    keep = np.ones(tid_sel.size, dtype=bool)
+    coords_sel = np.empty((tid_sel.size, 3), dtype=np.float64)
+    for i in range(tid_sel.size):
+        if isdata_sel[i]:
+            key = (int(tid_sel[i]), tracer_sel[i])
+            idx_lookup = data_lookup.get(key)
+        else:
+            key = (int(tid_sel[i]), tracer_sel[i], int(rand_sel[i]))
+            idx_lookup = rand_lookup.get(key)
+        if idx_lookup is None:
+            keep[i] = False
+        else:
+            coords_sel[i] = coords[idx_lookup]
+
+    if not np.any(keep):
         return []
 
-    keep_cols = ['TARGETID','RANDITER','WEBTYPE','ISDATA']
-    extra_cols = [c for c in prob_tbl.colnames if c in keep_cols]
-    prob_keep = prob_tbl[extra_cols]
+    if not np.all(keep):
+        tid_sel = tid_sel[keep]
+        rand_sel = rand_sel[keep]
+        isdata_sel = isdata_sel[keep]
+        tracer_sel = tracer_sel[keep]
+        coords_sel = coords_sel[keep]
 
-    joined = join(raw_tbl, prob_keep, keys=['TARGETID','RANDITER'], join_type='inner')
-    if len(joined) == 0:
-        return []
+    raw_sub = Table({'TRACERTYPE': tracer_sel.astype('U32'),
+                     'TARGETID': tid_sel,
+                     'RANDITER': rand_sel,
+                     'XCART': coords_sel[:,0],
+                     'YCART': coords_sel[:,1],
+                     'ZCART': coords_sel[:,2],
+                     'WEBTYPE': np.full(tid_sel.size, webtype, dtype='U8'),
+                     'ISDATA': isdata_sel})
 
-    if source == 'data':
-        joined = joined[joined['ISDATA'] == True]
-    elif source == 'rand':
-        joined = joined[joined['ISDATA'] == False]
-
-    if len(joined) == 0:
-        return []
-
-    raw_sub = joined
-
-    data_blocks = []
-    rand_blocks = {}
+    block_tables = []
 
     for ttype, randit, idxs in _split_blocks(raw_sub):
-        is_data = (randit == -1)
-        if (source == 'data' and not is_data) or (source == 'rand' and is_data):
-            continue
-
+        print(f'Processing zone {zone}, TRACERTYPE={ttype}, RANDITER={randit}, NPTS={len(idxs)}')
         block_data = raw_sub[idxs]
-        eps = float(lenght(block_data))
-        if not np.isfinite(eps) or eps < 0.0:
-            eps = 0.0
+        eps = float(length(block_data))
+        if not np.isfinite(eps) or eps <= 0.0:
+            eps = np.finfo(float).eps
 
-        coords = np.column_stack([
-            np.asarray(block_data[col], dtype=float)
-            for col in ('XCART', 'YCART', 'ZCART')
-        ])
+        coords = np.column_stack([np.asarray(block_data[col], dtype=float)
+                                  for col in ('XCART', 'YCART', 'ZCART')])
         labels = _dbscan_labels(coords, eps)  # FoF is the same as DBSCAN with min_samples=1
         labs, counts, xcm, ycm, zcm, A, B, C = _group_inertia(coords, labels)
 
         tids = np.asarray(block_data['TARGETID'], dtype=np.int64)
-        block_tbl = _build_block_tables(
-            ttype, randit, webtype,
-            tids=tids,
-            labels=labels, labs=labs, counts=counts,
-            xcm=xcm, ycm=ycm, zcm=zcm, A=A, B=B, C=C
-        )
-        if is_data:
-            data_blocks.append(block_tbl)
-        else:
-            rand_blocks.setdefault(randit, []).append(block_tbl)
+        block_tbl = _build_block_tables(ttype, randit, webtype,
+                                        tids=tids,
+                                        labels=labels, labs=labs, counts=counts,
+                                        xcm=xcm, ycm=ycm, zcm=zcm, A=A, B=B, C=C,
+                                        link_len=eps)
+        if 'ISDATA' in block_data.colnames:
+            block_tbl['ISDATA'] = np.asarray(block_data['ISDATA'], dtype=bool)
+
+        block_tables.append(block_tbl)
 
     outputs = []
 
-    if data_blocks:
-        merged = vstack(data_blocks, metadata_conflicts='silent')
+    if block_tables:
+        merged = vstack(block_tables, metadata_conflicts='silent')
         outputs.append(write_fits_gz(merged, out_dir, zone, webtype,
                                      out_tag=out_tag, release_tag=release_tag))
-
-    if rand_blocks:
-        for randit, tables in sorted(rand_blocks.items()):
-            merged = vstack(tables, metadata_conflicts='silent')
-            merged.meta['RANDITER'] = int(randit)
-            if out_tag is None:
-                iter_tag = f'{randit:02d}'
-            else:
-                iter_tag = f'{out_tag}_{randit:02d}'
-            outputs.append(write_fits_gz(merged, out_dir, zone, webtype,
-                                         out_tag=iter_tag, release_tag=release_tag))
 
     return outputs
 
@@ -436,7 +520,7 @@ def _default_zones_for_release(release_tag):
 
 
 def parse_args():
-    release_default = os.environ.get('RELEASE', 'dr1')
+    release_default = os.environ.get('RELEASE', 'dr2_res')
 
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'raw'),
@@ -451,16 +535,22 @@ def parse_args():
     p.add_argument('--source', choices=['data','rand','both'], default='rand')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')
     p.add_argument('--release', default=release_default.upper(), help='Release tag stored in FITS metadata')
+    p.add_argument('--r-lower', type=float, default=-0.9, help='Lower r threshold (must be negative)')
+    p.add_argument('--r-upper', type=float, default=0.9, help='Upper r threshold (must be positive)')
     return p.parse_args()
+
 
 def main():
     args = parse_args()
+    if args.r_lower >= 0 or args.r_upper <= 0:
+        raise ValueError('r-lower must be negative and r-upper must be positive.')
     release_tag = str(args.release).upper()
     init = t.time()
     for z in args.zones:
         outputs = process_zone(z, raw_dir=args.raw_dir, class_dir=args.class_dir,
                                out_dir=args.groups_dir, webtype=args.webtype,
                                source=args.source,
+                               r_lower=args.r_lower, r_upper=args.r_upper,
                                release_tag=release_tag,
                                out_tag=args.out_tag)
         if outputs:

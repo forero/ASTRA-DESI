@@ -23,3 +23,4 @@ class ReleaseConfig:
     preload_kwargs: Dict[str, Any]
     zones: List[Any]
     build_raw: Callable[[Any, Dict[str, Any], Dict[str, Any], List[str], Namespace, str], Table]
+    combine_outputs: bool = True

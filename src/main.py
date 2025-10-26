@@ -141,16 +141,28 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
                 except Exception as e:
                     print(f'[classify] Warning: failed to read existing pairs ({e}); recomputing pairs for {prefix}')
                     pr, cr, _ = astra.generate_pairs(tbl, n_random)
-                    astra.save_pairs_fits(pr, pairs_file, meta=meta)
-                    astra.save_classification_fits(cr, class_file, meta=meta)
-                    astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                    try:
+                        astra.save_pairs_fits(pr, pairs_file, meta=meta)
+                        astra.save_classification_fits(cr, class_file, meta=meta)
+                        astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                    finally:
+                        for store in (pr, cr):
+                            cleanup = getattr(store, 'cleanup', None)
+                            if callable(cleanup):
+                                cleanup()
             else:
                 print(f'[classify] Found class and probability files; skipping rebuild for {prefix}')
         else:
             pr, cr, _ = astra.generate_pairs(tbl, n_random)
-            astra.save_pairs_fits(pr, pairs_file, meta=meta)
-            astra.save_classification_fits(cr, class_file, meta=meta)
-            astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+            try:
+                astra.save_pairs_fits(pr, pairs_file, meta=meta)
+                astra.save_classification_fits(cr, class_file, meta=meta)
+                astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+            finally:
+                for store in (pr, cr):
+                    cleanup = getattr(store, 'cleanup', None)
+                    if callable(cleanup):
+                        cleanup()
     except Exception as e:
         raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
     
@@ -525,19 +537,40 @@ def main():
             return
 
         if args.combine_only:
-            for z in zones:
-                combine_zone_products(z, args, release_tag)
-            print(f'--- [pipeline] combine-only elapsed t {time.time()-pipeline_start:.2f} s')
+            if release_config.combine_outputs:
+                for z in zones:
+                    combine_zone_products(z, args, release_tag)
+                print(f'--- [pipeline] combine-only elapsed t {time.time()-pipeline_start:.2f} s')
+            else:
+                print(f'[combine] skipping combine-only operation for release {release} (disabled)')
             return
 
-        if release_config.use_dr2_preload:
+        real_tables, random_tables = {}, {}
+        need_preload = True
+        if release_config.use_dr2_preload and release_config.name.upper() == 'DR2':
+            suffix = safe_tag(args.out_tag)
+            def _raw_exists(zone):
+                ztag = zone_tag(zone)
+                candidates = [os.path.join(args.raw_out, f'zone_{ztag}{suffix}{ext}')
+                              for ext in ('.fits.gz', '.fits')]
+                for candidate in candidates:
+                    if os.path.exists(candidate):
+                        return candidate
+                return None
+
+            missing = [z for z in zones if _raw_exists(z) is None]
+            if not missing:
+                need_preload = False
+                print('[dr2] all requested raw files already exist; skipping preload step', flush=True)
+
+        if release_config.use_dr2_preload and need_preload:
             real_tables, random_tables = preload_dr2_tables(args.base_dir,
                                                             SEL_TRACERS,
                                                             release_config.real_columns,
                                                             release_config.random_columns,
                                                             release_config.n_random_files,
                                                             **release_config.preload_kwargs)
-        else:
+        elif not release_config.use_dr2_preload:
             real_tables, random_tables = preload_all_tables(args.base_dir,
                                                             SEL_TRACERS,
                                                             release_config.real_suffix,
@@ -560,11 +593,12 @@ def main():
 
             stage_start = time.time()
             outputs = process_zone(z, args.raw_out, args.class_out, args.groups_out,
-                                   args.webtype, args.source, release_tag=release_tag,
-                                   out_tag=args.out_tag)
+                                   args.webtype, args.source, args.r_lower, args.r_upper,
+                                   release_tag=release_tag, out_tag=args.out_tag)
             print(f'-- [pipeline] Grouped zone {z} in {time.time()-stage_start:.2f} s')
 
-            combine_zone_products(z, args, release_tag)
+            if release_config.combine_outputs:
+                combine_zone_products(z, args, release_tag)
 
             if outputs:
                 tag = f'{z:02d}' if isinstance(z, int) else str(z)

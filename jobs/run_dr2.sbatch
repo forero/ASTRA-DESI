@@ -1,16 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=astra_dr2
+#SBATCH --job-name=qso_ngc
 #SBATCH --account=desi
-#SBATCH --partition=regular
+#SBATCH -q regular
 #SBATCH -C cpu
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
-#SBATCH --time=00:30:00
+#SBATCH --cpus-per-task=1
+#SBATCH --time=10:00:00
 #SBATCH --mem=0
 #SBATCH --array=0%1
 #SBATCH --hint=nomultithread
-#SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr2/logs/zone_%A_%a.out
-#SBATCH --error=/pscratch/sd/v/vtorresg/cosmic-web/dr2/logs/zone_%A_%a.err
+#SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr2_res/logs/zone_%A_%a.out
+#SBATCH --error=/pscratch/sd/v/vtorresg/cosmic-web/dr2_res/logs/zone_%A_%a.err
 #SBATCH --chdir=/global/homes/v/vtorresg/ASTRA-DESI
 
 set -euo pipefail
@@ -23,16 +23,16 @@ export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
+export PAIR_NJOBS_CAP=1
 
 R_LOWER=${R_LOWER:--0.9}
 R_UPPER=${R_UPPER:-0.9}
-export PAIR_NJOBS_CAP=${PAIR_NJOBS_CAP:-128}
 
 PROJECT_ROOT=$PWD
 MAIN_SCRIPT="${PROJECT_ROOT}/src/main.py"
 
-CLUSTER_DIR="/global/cfs/cdirs/desi/survey/catalogs/DA2/LSS/loa-v1/LSScats/v2"
-SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr2"
+CLUSTER_DIR="/global/cfs/cdirs/desi/survey/catalogs/DA2/LSS/loa-v1/LSScats/v2/PIP/"
+SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr2_res"
 
 RAW_OUT="${SCRATCH_ROOT}/raw"
 CLASS_ROOT="${SCRATCH_ROOT}"
@@ -43,7 +43,7 @@ LOGDIR="${SCRATCH_ROOT}/logs"
 mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}"
 
 ZLABELS=("NGC")
-TRACERS_BY_ZONE=("LRG")
+TRACERS_BY_ZONE=("QSO")
 
 if (( SLURM_ARRAY_TASK_ID >= ${#ZLABELS[@]} )); then
   echo "error: SLURM_ARRAY_TASK_ID ${SLURM_ARRAY_TASK_ID} exceeds ZLABELS" >&2
@@ -83,4 +83,3 @@ srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
        --webtype filament \
        --source data \
        --n-random 100 \
-       --plot
