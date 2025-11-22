@@ -64,6 +64,20 @@ def tracer_tag(tag):
     safe = _SAFE_PATTERN.sub('_', str(tag)).strip('_')
     return safe if safe else 'combined'
 
+def _tracer_subdir(tag):
+    """
+    Return the subdirectory name for a given tracer tag.
+    
+    Args:
+        tag (object | None): Tracer tag to normalize.
+    Returns:
+        str: Tracer subdirectory name.
+    """
+    token = tracer_tag(tag)
+    head = token.split('_', 1)[0]
+    head = head.lower().strip('_')
+    return head if head else 'combined'
+
 
 def zone_prefix(zone, tag=None):
     """
@@ -143,8 +157,10 @@ def classification_path(base_dir, zone, tag=None):
     Returns:
         str: Classification file path.
     """
-    return os.path.join(_subdir(base_dir, 'classification'), classification_filename(zone, tag))
-
+    tracer = _tracer_subdir(tag)
+    zone_dir = zone_tag(zone).lower()
+    return os.path.join(_subdir(base_dir, 'classification'), tracer, zone_dir,
+                        classification_filename(zone, tag))
 
 def probability_path(base_dir, zone, tag=None):
     """
@@ -157,7 +173,10 @@ def probability_path(base_dir, zone, tag=None):
     Returns:
         str: Probability file path.
     """
-    return os.path.join(_subdir(base_dir, 'probabilities'), probability_filename(zone, tag))
+    tracer = _tracer_subdir(tag)
+    zone_dir = zone_tag(zone).lower()
+    return os.path.join(_subdir(base_dir, 'probabilities'), tracer, zone_dir,
+                        probability_filename(zone, tag))
 
 
 def pairs_path(base_dir, zone, tag=None):

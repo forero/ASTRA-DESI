@@ -2,7 +2,7 @@
 
 Implementation of the [ASTRA algorithm](https://arxiv.org/abs/2404.01124) adapted to the
 Dark Energy Spectroscopic Instrument (DESI) clustering catalogues. The pipeline supports
-both the **Early Data Release (EDR)** and **Data Release 1 (DR1)** and produces
+the **Early Data Release (EDR)** plus **Data Releases 1 and 2 (DR1/DR2)** and produces
 per-zone classifications of the cosmic web into **voids, sheets, filaments, and knots**.
 
 
@@ -25,10 +25,10 @@ per-zone classifications of the cosmic web into **voids, sheets, filaments, and 
   - `paths.py`: canonical naming helpers for raw/classification/probability/pairs files
 - **`src/plot/`** – Visualisation entry points
   - `common.py`: shared loaders and path resolvers used by all plotting scripts
-  - `plot_wedges.py`: tracer-by-zone wedge plots for raw classifications, including FoF groups
+  - `plot_wedges.py`: tracer-by-zone wedge plots for raw classifications (EDR/DR1/DR2), including FoF groups, global `--z-slice` cuts, per-tracer windows via `--tracer-z-slice`, and an optional `--view section` mode for annular “fan” wedges
   - `plot_extra.py`: histograms, CDFs, and supplementary wedges
 - **`src/main.py`** – Command-line driver that orchestrates preprocessing, pair generation,
-  classification, probabilities, and group finding (EDR or DR1)
+  classification, probabilities, and group finding (EDR/DR1/DR2)
 - **`jobs/`** – Ready-to-run scripts for either interactive shells (`run_edr.sh`) or
   SLURM batch jobs (`run_edr.sbatch`, `run_dr1.sbatch`)
 - **`zenodo/`** – Tools to stage pipeline outputs and push them to Zenodo (`zenodo_push.py`,
@@ -56,7 +56,7 @@ Each zone produces a consistent set of artefacts stored under the release root
 
 Key CLI options:
 
-- `--release {EDR,DR1}` selects the catalogue layout.
+- `--release {EDR,DR1,DR2}` selects the catalogue layout.
 - `--r-lower` and `--r-upper` control the asymmetric thresholds used when classifying
   web types (defaults: `-0.9`, `0.9`).
 - `--tracers` can restrict processing to a subset of tracer prefixes.
@@ -134,7 +134,7 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
 The plotting scripts under `src/plot/` share the loaders defined in `src/plot/common.py`.
 Key entry points:
 
-- `plot_wedges.py`: raw-classification wedges by tracer and FoF groups. Accepts the same release/tag layout as the main pipeline.
+- `plot_wedges.py`: raw-classification wedges by tracer and FoF groups. Accepts the same release/tag layout as the main pipeline (EDR/DR1/DR2), supports both global `--z-slice zmin zmax` cuts, per-tracer windows via `--tracer-z-slice LRG:0.6:1.0`, and curved “fan” sections with `--view section` when you want to zoom into a thin shell.
 - `plot_extra.py`: CDFs, histograms, and supplemental wedges. Supports on-disk caching
   (`--cache-dir`) to avoid repeated I/O.
 

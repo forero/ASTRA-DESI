@@ -5,8 +5,22 @@ import shutil
 import tempfile
 
 import numpy as np
+from astropy.io import fits
 from astropy.table import Table
 from scipy.spatial import Delaunay
+
+__all__ = ['TempTableStore',
+           'register_tracer_mapping',
+           'generate_pairs',
+           'save_pairs_fits',
+           'load_pairs_fits',
+           'build_class_rows_from_pairs',
+           'save_classification_fits',
+           'build_probability_table',
+           'save_probability_fits',
+           'PAIR_ROW_DTYPE',
+           'CLASS_ROW_DTYPE',
+           'PROB_ROW_DTYPE']
 
 _GP_SHARED = None
 
@@ -22,10 +36,75 @@ _CLASS_ROW_DTYPE = np.dtype([('TARGETID', np.int64),
                              ('TRACER_ID', np.uint8),
                              ('TRACERTYPE', 'S24')])
 _TRACER_ASCII_DTYPE = _CLASS_ROW_DTYPE.fields['TRACERTYPE'][0]
+_PROB_ROW_DTYPE = np.dtype([('TARGETID', np.int64),
+                            ('RANDITER', np.int32),
+                            ('ISDATA', np.bool_),
+                            ('TRACER_ID', np.uint8),
+                            ('TRACERTYPE', 'S24'),
+                            ('PVOID', np.float32),
+                            ('PSHEET', np.float32),
+                            ('PFILAMENT', np.float32),
+                            ('PKNOT', np.float32)])
+
+_DATA_KEY_DTYPE = np.dtype([('TRACER_ID', np.int16), ('TARGETID', np.int64)])
+
+try:
+    _DEFAULT_CHUNK_ROWS = max(1, int(os.environ.get('ASTRA_CHUNK_ROWS', '1000000')))
+except Exception:
+    _DEFAULT_CHUNK_ROWS = 1_000_000
+
+PAIR_ROW_DTYPE = _PAIR_ROW_DTYPE
+CLASS_ROW_DTYPE = _CLASS_ROW_DTYPE
+PROB_ROW_DTYPE = _PROB_ROW_DTYPE
 
 _TRACER_NAME_TO_ID = {}
 _TRACER_ID_TO_NAME = {}
 _TRACER_ID_TO_FULL = {}
+
+
+def _bool_env(name, default=False):
+    """
+    Return the boolean value of an environment variable.
+    
+    Args:
+        name (str): Name of the environment variable.
+        default (bool): Default value if the variable is not set.
+    Returns:
+        bool: Boolean value of the environment variable.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _split_iter_path(base_path, iteration):
+    """
+    Generate a path for a specific iteration based on a base path.
+    
+    Args:
+        base_path (str): The base file path.
+        iteration (int or str): The iteration identifier.
+    Returns:
+        str: The generated file path for the given iteration.
+    """
+    root, ext = os.path.splitext(base_path)
+    if ext == '.gz':
+        root2, ext2 = os.path.splitext(root)
+        base_root = root2
+        extension = ext2 + ext
+    else:
+        base_root = root
+        extension = ext
+
+    if base_root.endswith('_classified'):
+        base_root = base_root[:-len('_classified')]
+
+    tag = iteration
+    if not isinstance(tag, str):
+        val = int(tag)
+        tag = f"{val:03d}" if val >= 0 else f"m{abs(val):03d}"
+    return f"{base_root}_iter{tag}{extension}"
 
 
 def register_tracer_mapping(name_to_id, full_labels=None):
@@ -51,6 +130,11 @@ def register_tracer_mapping(name_to_id, full_labels=None):
 def _tracer_id_from_label(label):
     """
     Return the integer tracer ID for a given tracer base label.
+    
+    Args:
+        label (str): Tracer base label.
+    Returns:
+        int: Integer tracer ID, or -1 if not found.
     """
     return _TRACER_NAME_TO_ID.get(str(label), -1)
 
@@ -58,6 +142,12 @@ def _tracer_id_from_label(label):
 def _full_tracer_label(tracer_id, is_data) -> bytes:
     """
     Return the full tracer label for a given tracer ID and data/random flag.
+    
+    Args:
+        tracer_id (int): Integer tracer ID.
+        is_data (bool): Flag indicating data (True) or random (False).
+    Returns:
+        bytes: Full tracer label as ASCII bytes.
     """
     key = (int(tracer_id), bool(is_data))
     if key in _TRACER_ID_TO_FULL:
@@ -89,9 +179,79 @@ class TempTableStore:
         self._total = 0
         self._final_path = None
 
+    @classmethod
+    def from_directory(cls, directory, dtype):
+        """
+        Reconstruct a store from an existing spill directory produced during a previous run.
+
+        Args:
+            directory (str): Path to the spill directory containing chunk_XXXX.npy files
+                             and/or a combined.npy file.
+            dtype (np.dtype): Structured dtype describing the stored rows.
+        Returns:
+            TempTableStore: Rehydrated store referencing the on-disk chunks.
+        """
+        obj = cls.__new__(cls)
+        obj.dtype = np.dtype(dtype)
+        obj._tmpdir = os.path.abspath(directory)
+        obj._chunks = []
+        obj._total = 0
+        obj._final_path = None
+
+        combined = os.path.join(obj._tmpdir, 'combined.npy')
+        if os.path.exists(combined):
+            mm = np.load(combined, mmap_mode='r')
+            obj._total = mm.shape[0]
+            obj._final_path = combined
+            del mm
+        if obj._final_path is None:
+            chunk_files = sorted(f for f in os.listdir(obj._tmpdir)
+                                 if f.startswith('chunk_') and f.endswith('.npy'))
+            for fname in chunk_files:
+                path = os.path.join(obj._tmpdir, fname)
+                mm = np.load(path, mmap_mode='r')
+                obj._chunks.append((path, mm.shape[0]))
+                obj._total += mm.shape[0]
+                del mm
+        if obj._total == 0 and obj._final_path is None:
+            raise FileNotFoundError(f'No chunk files found in spill directory {directory}')
+        return obj
+
     @property
     def total(self):
         return self._total
+
+    @property
+    def tmpdir(self):
+        return self._tmpdir
+
+    def iter_arrays(self, chunk_rows=None):
+        """
+        Yield numpy arrays (memmap views) covering the stored data.
+
+        Args:
+            chunk_rows (int | None): Optional maximum rows per yielded chunk. When
+                provided, large chunks are subdivided into smaller slices.
+        Yields:
+            np.ndarray: View over a portion of the stored rows.
+        """
+        limit = int(chunk_rows) if chunk_rows else None
+        if self._final_path is not None and not self._chunks:
+            arr = np.load(self._final_path, mmap_mode='r')
+            if limit and limit > 0:
+                for start in range(0, arr.shape[0], limit):
+                    yield arr[start:start+limit]
+            else:
+                yield arr
+            return
+
+        for chunk_path, length in self._chunks:
+            arr = np.load(chunk_path, mmap_mode='r')
+            if limit and limit > 0 and length > limit:
+                for start in range(0, length, limit):
+                    yield arr[start:start+limit]
+            else:
+                yield arr
 
     @property
     def path(self):
@@ -118,6 +278,9 @@ class TempTableStore:
         self._total += arr.shape[0]
 
     def _ensure_combined(self):
+        """
+        Combine all existing chunks into a single memmap file if not already done.
+        """
         if self._final_path is not None:
             return
         if self._total == 0:
@@ -401,8 +564,16 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
         tuple[TempTableStore, TempTableStore, dict]: Disk-backed pair and classification
         stores plus an (empty) placeholder for backwards compatibility.
     """
+    if spill_dir is None:
+        spill_dir = (os.environ.get('ASTRA_PAIR_SPILL_DIR')
+                     or os.environ.get('ASTRA_TMPDIR')
+                     or os.environ.get('PSCRATCH')
+                     or os.environ.get('TMPDIR'))
+
     pair_store = TempTableStore(_PAIR_ROW_DTYPE, prefix='pairs', base_dir=spill_dir)
     class_store = TempTableStore(_CLASS_ROW_DTYPE, prefix='class', base_dir=spill_dir)
+    print(f'[astra] pair chunks -> {pair_store.tmpdir}')
+    print(f'[astra] class chunks -> {class_store.tmpdir}')
 
     if n_jobs is None:
         env_val = os.environ.get('SLURM_CPUS_PER_TASK', '').strip()
@@ -425,13 +596,11 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
 
     blocks = extract_tracer_blocks(tbl)
     for tracer, data in blocks.items():
-        tids, rand_sub, coords, is_data, tracer_label = (
-            data['tids'],
-            data['rand'],
-            data['coords'],
-            data['is_data'],
-            data['label'],
-        )
+        tids, rand_sub, coords, is_data, tracer_label = (data['tids'],
+                                                         data['rand'],
+                                                         data['coords'],
+                                                         data['is_data'],
+                                                         data['label'])
         tracer_id = data.get('tracer_id', _tracer_id_from_label(tracer_label))
 
         if n_jobs > 1:
@@ -486,6 +655,70 @@ def _coerce_structured_rows(rows, dtype):
     return np.asarray(rows, dtype=dtype)
 
 
+def _iter_structured_chunks(rows, dtype, chunk_rows=None):
+    """
+    Return an iterator over structured arrays for ``rows`` with optional chunking.
+    
+    Args:
+        rows: Sequence or disk-backed store of structured rows.
+        dtype: Target numpy structured dtype.
+        chunk_rows: Optional number of rows per chunk.
+    Returns:
+        Iterator over structured arrays and total number of rows.
+    """
+    if isinstance(rows, TempTableStore):
+        return rows.iter_arrays(chunk_rows), rows.total
+    arr = _coerce_structured_rows(rows, dtype)
+    total = len(arr)
+    if chunk_rows and chunk_rows > 0 and total > chunk_rows:
+        def _gen():
+            for start in range(0, total, chunk_rows):
+                yield arr[start:start+chunk_rows]
+        return _gen(), total
+    else:
+        def _gen_single():
+            if total:
+                yield arr
+        return _gen_single(), total
+
+
+def _write_fits_table(columns, total_rows, chunk_iter, output_path, meta=None):
+    """
+    Write a FITS binary table from chunked structured arrays.
+
+    Args:
+        columns (list): List of column definitions.
+        total_rows (int): Total number of rows in the table.
+        chunk_iter (iterator): Iterator over chunks of structured arrays.
+        output_path (str): Path to the output FITS file.
+        meta (dict | None): Optional metadata inserted into the FITS header.
+    """
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    coldefs = fits.ColDefs([fits.Column(name=name, format=fmt) for name, fmt in columns])
+    hdu = fits.BinTableHDU.from_columns(coldefs, nrows=int(total_rows))
+    if meta:
+        for key, value in meta.items():
+            try:
+                hdu.header[key] = value
+            except Exception:
+                pass
+    tmp = f"{output_path}.tmp"
+    hdu.writeto(tmp, overwrite=True)
+    with fits.open(tmp, mode='update', memmap=True) as hdul:
+        data = hdul[1].data
+        start = 0
+        for chunk in chunk_iter:
+            length = len(chunk)
+            if length == 0:
+                continue
+            end = start + length
+            for name, _ in columns:
+                data[name][start:end] = chunk[name]
+            start = end
+        hdul.flush()
+    os.replace(tmp, output_path)
+
+
 def build_pairs_table(rows):
     """
     Construct a pairs table from ``rows``.
@@ -507,21 +740,11 @@ def save_pairs_fits(rows, output_path, meta=None):
         output_path (str): Destination path for the FITS file.
         meta (dict | None): Optional metadata inserted into the FITS header.
     """
-    tbl = build_pairs_table(rows)
-    if meta:
-        for key, value in meta.items():
-            tbl.meta[key] = value
-    _tmp = f"{output_path}.tmp"
-    try:
-        tbl.write(_tmp, format='fits', overwrite=True)
-        os.replace(_tmp, output_path)
-    except Exception:
-        try:
-            if os.path.exists(_tmp):
-                os.remove(_tmp)
-        except Exception:
-            pass
-        raise
+    chunk_iter, total_rows = _iter_structured_chunks(rows, _PAIR_ROW_DTYPE, chunk_rows=_DEFAULT_CHUNK_ROWS)
+    columns = (('TARGETID1', 'K'),
+               ('TARGETID2', 'K'),
+               ('RANDITER', 'J'))
+    _write_fits_table(columns, total_rows, chunk_iter, output_path, meta=meta)
 
 
 def load_pairs_fits(path):
@@ -540,7 +763,7 @@ def load_pairs_fits(path):
         return Table.read(path)
 
 
-def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
+def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None):
     """
     Reconstruct classification rows from previously saved pairs.
 
@@ -548,8 +771,9 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
         tbl (Table): Raw table with ``TARGETID``, ``RANDITER``, and ``TRACERTYPE``.
         pairs_tbl (Table): Table containing pair information.
         n_random (int): Number of random iterations present in the dataset.
+        spill_dir (str | None): Optional directory for temporary spill files.
     Returns:
-        list[tuple]: Classification tuples ``(TARGETID, RANDITER, ISDATA, NDATA, NRAND, TRACERTYPE)``.
+        TempTableStore: Disk-backed store of classification rows.
     """
     tids = np.asarray(tbl['TARGETID'], dtype=np.int64)
     randiter = np.asarray(tbl['RANDITER'], dtype=np.int32)
@@ -563,6 +787,8 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
     is_data_map = {int(t): (ri == -1) for t, ri in zip(tids, randiter)}
     tracer_map = {int(t): str(tt) for t, tt in zip(tids, trtype)}
     tracer_id_map = {int(t): int(code) for t, code in zip(tids, tracer_ids)}
+    tracer_bytes_map = {int(t): str(tt).encode('ascii', errors='ignore')
+                        for t, tt in tracer_map.items()}
 
     rand_ids_by_j = {}
     for j in range(n_random):
@@ -577,8 +803,12 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
     p_tid1 = np.asarray(pairs_tbl['TARGETID1'], dtype=np.int64)
     p_tid2 = np.asarray(pairs_tbl['TARGETID2'], dtype=np.int64)
     p_j = np.asarray(pairs_tbl['RANDITER'], dtype=np.int32)
-
-    class_rows = []
+    if spill_dir is None:
+        spill_dir = (os.environ.get('ASTRA_PAIR_SPILL_DIR')
+                     or os.environ.get('ASTRA_TMPDIR')
+                     or os.environ.get('PSCRATCH')
+                     or os.environ.get('TMPDIR'))
+    store = TempTableStore(_CLASS_ROW_DTYPE, prefix='class_rebuild', base_dir=spill_dir)
 
     present_js = np.unique(p_j)
     for j in range(n_random):
@@ -611,24 +841,48 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random):
         else:
             total_map, ndata_map = {}, {}
 
-        for t in data_ids.tolist():
-            nd = int(ndata_map.get(int(t), 0))
-            tt = int(total_map.get(int(t), 0))
-            nr = tt - nd
-            class_rows.append((int(t), int(j), True, nd, nr,
-                               tracer_id_map.get(int(t), 255),
-                               tracer_map.get(int(t), 'UNKNOWN')))
+        if data_ids.size:
+            nd_vals = np.fromiter((ndata_map.get(int(t), 0) for t in data_ids),
+                                  dtype=np.int32, count=data_ids.size)
+            total_vals = np.fromiter((total_map.get(int(t), 0) for t in data_ids),
+                                     dtype=np.int32, count=data_ids.size)
+            rand_vals = total_vals - nd_vals
+
+            arr_data = np.empty(data_ids.size, dtype=_CLASS_ROW_DTYPE)
+            arr_data['TARGETID'] = data_ids
+            arr_data['RANDITER'] = np.full(data_ids.size, j, dtype=np.int32)
+            arr_data['ISDATA'] = True
+            arr_data['NDATA'] = nd_vals
+            arr_data['NRAND'] = rand_vals
+            arr_data['TRACER_ID'] = np.fromiter((tracer_id_map.get(int(t), 255) for t in data_ids),
+                                                dtype=np.int16, count=data_ids.size).astype(np.uint8, copy=False)
+            arr_data['TRACERTYPE'] = np.asarray([
+                tracer_bytes_map.get(int(t), b'UNKNOWN') for t in data_ids
+            ], dtype='S24')
+            store.append(arr_data)
 
         rids = rand_ids_by_j.get(j, np.empty(0, dtype=np.int64))
-        for t in rids.tolist():
-            nd = int(ndata_map.get(int(t), 0))
-            tt = int(total_map.get(int(t), 0))
-            nr = tt - nd
-            class_rows.append((int(t), int(j), False, nd, nr,
-                               tracer_id_map.get(int(t), 255),
-                               tracer_map.get(int(t), 'UNKNOWN')))
+        if rids.size:
+            nd_vals_r = np.fromiter((ndata_map.get(int(t), 0) for t in rids),
+                                    dtype=np.int32, count=rids.size)
+            total_vals_r = np.fromiter((total_map.get(int(t), 0) for t in rids),
+                                       dtype=np.int32, count=rids.size)
+            rand_vals_r = total_vals_r - nd_vals_r
 
-    return class_rows
+            arr_rand = np.empty(rids.size, dtype=_CLASS_ROW_DTYPE)
+            arr_rand['TARGETID'] = rids
+            arr_rand['RANDITER'] = np.full(rids.size, j, dtype=np.int32)
+            arr_rand['ISDATA'] = False
+            arr_rand['NDATA'] = nd_vals_r
+            arr_rand['NRAND'] = rand_vals_r
+            arr_rand['TRACER_ID'] = np.fromiter((tracer_id_map.get(int(t), 255) for t in rids),
+                                                dtype=np.int16, count=rids.size).astype(np.uint8, copy=False)
+            arr_rand['TRACERTYPE'] = np.asarray([
+                tracer_bytes_map.get(int(t), b'UNKNOWN') for t in rids
+            ], dtype='S24')
+            store.append(arr_rand)
+
+    return store
 
 
 def build_class_table(rows):
@@ -657,295 +911,623 @@ def save_classification_fits(rows, output_path, meta=None):
         output_path (str): Destination path for the FITS file.
         meta (dict | None): Optional metadata inserted into the FITS header.
     """
-    tbl = build_class_table(rows)
-    if meta:
-        for key, value in meta.items():
-            tbl.meta[key] = value
-    _tmp = f"{output_path}.tmp"
-    try:
-        tbl.write(_tmp, format='fits', overwrite=True)
-        os.replace(_tmp, output_path)
-    except Exception:
-        try:
-            if os.path.exists(_tmp):
-                os.remove(_tmp)
-        except Exception:
+    chunk_iter, total_rows = _iter_structured_chunks(rows, _CLASS_ROW_DTYPE, chunk_rows=_DEFAULT_CHUNK_ROWS)
+    columns = (('TARGETID', 'K'),
+               ('RANDITER', 'J'),
+               ('ISDATA', 'L'),
+               ('NDATA', 'J'),
+               ('NRAND', 'J'),
+               ('TRACER_ID', 'B'),
+               ('TRACERTYPE', '24A'))
+    split_iter = _bool_env('ASTRA_CLASS_SPLIT_ITER', default=True)
+    skip_combined = _bool_env('ASTRA_CLASS_SKIP_COMBINED', default=False)
+    if not split_iter and skip_combined:
+        return
+
+    class _SplitCollector:
+        __slots__ = ('base_iter', 'stores')
+
+        def __init__(self, base_iter):
+            self.base_iter = base_iter
+            self.stores = {}
+
+        def __iter__(self):
+            for chunk in self.base_iter:
+                if chunk.size == 0:
+                    yield chunk
+                    continue
+                rand_vals = np.asarray(chunk['RANDITER'], dtype=np.int32, copy=False)
+                unique_vals = np.unique(rand_vals)
+                for val in unique_vals:
+                    mask = (rand_vals == val)
+                    if not mask.any():
+                        continue
+                    store = self.stores.get(int(val))
+                    if store is None:
+                        store = TempTableStore(_CLASS_ROW_DTYPE, prefix=f'class_iter_{int(val):03d}',
+                                               base_dir=os.path.dirname(output_path))
+                        self.stores[int(val)] = store
+                    store.append(chunk[mask])
+                yield chunk
+
+    if split_iter:
+        collector = _SplitCollector(chunk_iter)
+        iterator = iter(collector)
+    else:
+        collector = None
+        iterator = chunk_iter
+
+    if not skip_combined:
+        _write_fits_table(columns, total_rows, iterator, output_path, meta=meta)
+    else:
+        for _ in iterator:
             pass
-        raise
+
+    if split_iter and collector is not None:
+        for iteration, store in collector.stores.items():
+            iter_path = _split_iter_path(output_path, iteration)
+            iter_chunk_iter, iter_total = _iter_structured_chunks(store, _CLASS_ROW_DTYPE, chunk_rows=_DEFAULT_CHUNK_ROWS)
+            _write_fits_table(columns, iter_total, iter_chunk_iter, iter_path, meta=meta)
+            store.cleanup()
 
 
-def build_probability_table(class_rows, raw_table, r_lower=-0.9, r_upper=0.9):
+def _prepare_dense_data_accumulator(raw_table):
     """
-    Build a probability table aligned with the raw table rows.
+    Construct a dense accumulator for data-target probability counts using ``raw_table``.
 
     Args:
-        class_rows (list): Classification tuples.
-        raw_table (Table): Raw table used to generate ``class_rows``.
-        r_lower (float): Lower ``r`` threshold (negative).
-        r_upper (float): Upper ``r`` threshold (positive).
+        raw_table (Table | None): Raw table containing TARGETID, RANDITER, and tracer columns.
     Returns:
-        Table: Probability table containing probabilities for each row in ``raw_table``.
-    Raises:
-        ValueError: If the thresholds do not straddle zero.
+        dict | None: Dense accumulator dictionary or ``None`` when not applicable.
+    """
+    if raw_table is None:
+        return None
+    required = {'TARGETID', 'RANDITER'}
+    if not required.issubset(set(raw_table.colnames)):
+        return None
+
+    randiters = np.asarray(raw_table['RANDITER'])
+    data_mask = randiters < 0
+    if not np.any(data_mask):
+        return None
+
+    targetids = np.asarray(raw_table['TARGETID'][data_mask], dtype=np.int64)
+
+    if 'TRACER_ID' in raw_table.colnames:
+        tracer_ids = np.asarray(raw_table['TRACER_ID'][data_mask], dtype=np.int16)
+    else:
+        tracer_vals = np.asarray(raw_table['TRACERTYPE'][data_mask]).astype(str)
+        tracer_ids = np.fromiter((_tracer_id_from_label(val) for val in tracer_vals),
+                                 dtype=np.int16, count=tracer_vals.size)
+
+    tracer_ids = np.asarray(tracer_ids, dtype=np.int16)
+    if tracer_ids.size:
+        neg_mask = tracer_ids < 0
+        if np.any(neg_mask):
+            tracer_ids = tracer_ids.copy()
+            tracer_ids[neg_mask] = 255
+
+    tracer_ids_clipped = np.clip(tracer_ids, 0, 255).astype(np.uint8, copy=False)
+
+    keys = np.empty(targetids.size, dtype=_DATA_KEY_DTYPE)
+    keys['TRACER_ID'] = tracer_ids.astype(np.int16, copy=False)
+    keys['TARGETID'] = targetids
+    if keys.size:
+        sorter = np.argsort(keys, order=('TRACER_ID', 'TARGETID'))
+        keys_sorted = keys[sorter]
+        tracer_ids_sorted = tracer_ids_clipped[sorter]
+    else:
+        keys_sorted = keys
+        tracer_ids_sorted = tracer_ids_clipped
+
+    counts = np.zeros((keys_sorted.size, 4), dtype=np.uint16)
+    return {'keys': keys_sorted,
+            'counts': counts,
+            'tracer_ids': tracer_ids_sorted}
+
+
+def _finalize_dense_data_records(acc):
+    """
+    Convert a dense accumulator into probability data records.
+
+    Args:
+        acc (dict | None): Dense accumulator dictionary.
+    Returns:
+        np.ndarray: Structured probability rows for data targets.
+    """
+    if acc is None or acc['keys'].size == 0:
+        return np.empty(0, dtype=_PROB_ROW_DTYPE)
+
+    n = acc['keys'].shape[0]
+    data_records = np.empty(n, dtype=_PROB_ROW_DTYPE)
+    data_records['TARGETID'] = acc['keys']['TARGETID']
+    data_records['RANDITER'] = -1
+    data_records['ISDATA'] = True
+    data_records['TRACER_ID'] = acc['tracer_ids']
+    tracer_ids = acc['tracer_ids']
+    labels = np.empty(n, dtype=_TRACER_ASCII_DTYPE)
+    if n:
+        unique_ids = np.unique(tracer_ids)
+        for tid in unique_ids:
+            mask = tracer_ids == tid
+            labels[mask] = _full_tracer_label(int(tid), True)
+    data_records['TRACERTYPE'] = labels
+    data_records['PVOID'] = 0.0
+    data_records['PSHEET'] = 0.0
+    data_records['PFILAMENT'] = 0.0
+    data_records['PKNOT'] = 0.0
+
+    counts_float = acc['counts'].astype(np.float32, copy=False)
+    totals = counts_float.sum(axis=1)
+    nonzero = totals > 0
+    if np.any(nonzero):
+        nz_idx = np.nonzero(nonzero)[0]
+        data_records['PVOID'][nz_idx] = counts_float[nz_idx, 0] / totals[nz_idx]
+        data_records['PSHEET'][nz_idx] = counts_float[nz_idx, 1] / totals[nz_idx]
+        data_records['PFILAMENT'][nz_idx] = counts_float[nz_idx, 2] / totals[nz_idx]
+        data_records['PKNOT'][nz_idx] = counts_float[nz_idx, 3] / totals[nz_idx]
+
+    acc['keys'] = None
+    acc['counts'] = None
+    acc['tracer_ids'] = None
+    return data_records
+
+
+def _iter_dense_data_chunks(acc, chunk_rows):
+    """
+    Yield probability records for dense accumulator data in ``chunk_rows`` slices.
+
+    Args:
+        acc (dict | None): Dense accumulator dictionary.
+        chunk_rows (int): Maximum rows per yielded chunk.
+    Yields:
+        np.ndarray: Structured probability rows for data targets.
+    """
+    if acc is None:
+        return
+    keys = acc.get('keys')
+    counts = acc.get('counts')
+    tracer_ids = acc.get('tracer_ids')
+    if keys is None or counts is None or tracer_ids is None:
+        return
+
+    total = keys.shape[0]
+    if total == 0:
+        return
+
+    step = int(chunk_rows) if chunk_rows and chunk_rows > 0 else total
+    try:
+        for start in range(0, total, step):
+            end = min(start + step, total)
+            size = end - start
+            chunk = np.empty(size, dtype=_PROB_ROW_DTYPE)
+            chunk['TARGETID'] = keys['TARGETID'][start:end]
+            chunk['RANDITER'] = -1
+            chunk['ISDATA'] = True
+            tracer_subset = tracer_ids[start:end]
+            chunk['TRACER_ID'] = tracer_subset
+
+            labels = np.empty(size, dtype=_TRACER_ASCII_DTYPE)
+            if size:
+                unique_ids = np.unique(tracer_subset)
+                for tid in unique_ids:
+                    mask = tracer_subset == tid
+                    labels[mask] = _full_tracer_label(int(tid), True)
+            chunk['TRACERTYPE'] = labels
+            chunk['PVOID'] = 0.0
+            chunk['PSHEET'] = 0.0
+            chunk['PFILAMENT'] = 0.0
+            chunk['PKNOT'] = 0.0
+
+            counts_slice = counts[start:end].astype(np.float32, copy=False)
+            totals = counts_slice.sum(axis=1)
+            nonzero = totals > 0
+            if np.any(nonzero):
+                idx = np.nonzero(nonzero)[0]
+                chunk['PVOID'][idx] = counts_slice[idx, 0] / totals[idx]
+                chunk['PSHEET'][idx] = counts_slice[idx, 1] / totals[idx]
+                chunk['PFILAMENT'][idx] = counts_slice[idx, 2] / totals[idx]
+                chunk['PKNOT'][idx] = counts_slice[idx, 3] / totals[idx]
+            yield chunk
+    finally:
+        acc['keys'] = None
+        acc['counts'] = None
+        acc['tracer_ids'] = None
+
+
+def _build_data_records_from_dict(counts_dict, tracer_dict):
+    """
+    Convert a dictionary-based accumulator into probability data records.
+
+    Args:
+        counts_dict (dict): Mapping ``(TARGETID, TRACER_ID) -> counts``.
+        tracer_dict (dict): Mapping ``(TARGETID, TRACER_ID) -> tracer bytes``.
+    Returns:
+        np.ndarray: Structured probability rows.
+    """
+    if not counts_dict:
+        return np.empty(0, dtype=_PROB_ROW_DTYPE)
+
+    data_records = np.empty(len(counts_dict), dtype=_PROB_ROW_DTYPE)
+    data_records['RANDITER'] = -1
+    data_records['ISDATA'] = True
+    data_records['PVOID'] = 0.0
+    data_records['PSHEET'] = 0.0
+    data_records['PFILAMENT'] = 0.0
+    data_records['PKNOT'] = 0.0
+    for idx, (key, counts) in enumerate(counts_dict.items()):
+        tid, tracer_id = key
+        data_records[idx]['TARGETID'] = tid
+        if 0 <= int(tracer_id) < 256:
+            data_records[idx]['TRACER_ID'] = np.uint8(tracer_id)
+        else:
+            data_records[idx]['TRACER_ID'] = np.uint8(255)
+        tracer_bytes = tracer_dict.get(key)
+        if tracer_bytes is None:
+            tracer_bytes = _full_tracer_label(tracer_id, True)
+        data_records[idx]['TRACERTYPE'] = tracer_bytes
+        counts_float = np.asarray(counts, dtype=np.float32)
+        total = counts_float.sum()
+        if total > 0:
+            data_records[idx]['PVOID'] = counts_float[0] / total
+            data_records[idx]['PSHEET'] = counts_float[1] / total
+            data_records[idx]['PFILAMENT'] = counts_float[2] / total
+            data_records[idx]['PKNOT'] = counts_float[3] / total
+    return data_records
+
+
+def _compute_probability_components(class_rows, raw_table=None, r_lower=-0.9, r_upper=0.9,
+                                    chunk_rows=None, spill_dir=None):
+    """
+    Aggregate probability information from classification rows.
+    
+    Args:
+        class_rows: Sequence or disk-backed store of classification rows.
+        r_lower (float): Lower ratio threshold for classification.
+        r_upper (float): Upper ratio threshold for classification.
+        chunk_rows (int | None): Optional maximum rows per processing chunk.
+        spill_dir (str | None): Optional directory where temporary chunks are stored.
+    Returns:
+        tuple[np.ndarray, TempTableStore]: Data records array and random records store.
+    """
+    if chunk_rows is None or chunk_rows <= 0:
+        chunk_rows = _DEFAULT_CHUNK_ROWS
+    if isinstance(class_rows, TempTableStore):
+        chunk_iter = class_rows.iter_arrays(chunk_rows)
+    else:
+        arr = _coerce_structured_rows(class_rows, _CLASS_ROW_DTYPE)
+        total = len(arr)
+        if chunk_rows and chunk_rows > 0 and total > chunk_rows:
+            def _gen():
+                for start in range(0, total, chunk_rows):
+                    yield arr[start:start+chunk_rows]
+            chunk_iter = _gen()
+        else:
+            def _single():
+                if total:
+                    yield arr
+            chunk_iter = _single()
+
+    dense_acc = _prepare_dense_data_accumulator(raw_table)
+    if dense_acc is not None and dense_acc['keys'].size == 0:
+        dense_acc = None
+    fallback_counts = {}
+    fallback_tracer = {}
+    random_store = TempTableStore(_PROB_ROW_DTYPE, prefix='prob', base_dir=spill_dir)
+
+    for chunk in chunk_iter:
+        if chunk.size == 0:
+            continue
+        ndata = chunk['NDATA'].astype(np.float32, copy=False)
+        nrand = chunk['NRAND'].astype(np.float32, copy=False)
+        denom = ndata + nrand
+        diff = ndata - nrand
+        ratios = np.zeros_like(denom, dtype=np.float32)
+        valid = denom > 0
+        np.divide(diff, denom, out=ratios, where=valid)
+
+        classes = np.zeros(chunk.shape[0], dtype=np.uint8)
+        mid_mask = (ratios >= r_lower) & (ratios < 0.0)
+        pos_mask = (ratios >= 0.0) & (ratios < r_upper)
+        high_mask = ratios >= r_upper
+        classes[mid_mask] = 1
+        classes[pos_mask] = 2
+        classes[high_mask] = 3
+
+        mask_data = chunk['ISDATA']
+        if mask_data.any():
+            tids = chunk['TARGETID'][mask_data].astype(np.int64, copy=False)
+            tracer_ids_full = chunk['TRACER_ID'][mask_data].astype(np.int16, copy=False)
+            tracers = chunk['TRACERTYPE'][mask_data]
+            class_vals = classes[mask_data]
+
+            dense_used = False
+            if dense_acc is not None:
+                dense_keys = dense_acc['keys']
+                if dense_keys.size:
+                    dense_used = True
+                    chunk_keys = np.empty(tids.size, dtype=_DATA_KEY_DTYPE)
+                    chunk_keys['TRACER_ID'] = tracer_ids_full
+                    chunk_keys['TARGETID'] = tids
+                    positions = np.searchsorted(dense_keys, chunk_keys)
+                    matched = np.zeros_like(positions, dtype=bool)
+                    valid = positions < dense_keys.shape[0]
+                    if np.any(valid):
+                        matched_valid = dense_keys[positions[valid]] == chunk_keys[valid]
+                        matched[valid] = matched_valid
+                    if np.any(matched):
+                        np.add.at(dense_acc['counts'],
+                                  (positions[matched].astype(np.intp, copy=False),
+                                   class_vals[matched].astype(np.intp, copy=False)),
+                                  1)
+                    if not np.all(matched):
+                        unmatched_idx = np.nonzero(~matched)[0]
+                        for tid, tracer_id, tracer_type, cls in zip(
+                                tids[unmatched_idx],
+                                tracer_ids_full[unmatched_idx],
+                                tracers[unmatched_idx],
+                                class_vals[unmatched_idx]):
+                            key = (int(tid), int(tracer_id))
+                            counts = fallback_counts.get(key)
+                            if counts is None:
+                                counts = np.zeros(4, dtype=np.uint16)
+                                fallback_counts[key] = counts
+                                fallback_tracer[key] = bytes(tracer_type)
+                            counts[int(cls)] += 1
+            if dense_acc is None or not dense_used:
+                for tid, tracer_id, tracer_type, cls in zip(tids, tracer_ids_full, tracers, class_vals):
+                    key = (int(tid), int(tracer_id))
+                    counts = fallback_counts.get(key)
+                    if counts is None:
+                        counts = np.zeros(4, dtype=np.uint16)
+                        fallback_counts[key] = counts
+                        fallback_tracer[key] = bytes(tracer_type)
+                    counts[int(cls)] += 1
+
+        mask_rand = ~mask_data
+        if mask_rand.any():
+            class_vals_rand = classes[mask_rand]
+            rec_size = mask_rand.sum()
+            rec = np.empty(rec_size, dtype=_PROB_ROW_DTYPE)
+            rec['TARGETID'] = chunk['TARGETID'][mask_rand].astype(np.int64, copy=False)
+            rec['RANDITER'] = chunk['RANDITER'][mask_rand].astype(np.int32, copy=False)
+            rec['ISDATA'] = False
+            rec['TRACER_ID'] = chunk['TRACER_ID'][mask_rand].astype(np.uint8, copy=False)
+            rec['TRACERTYPE'] = chunk['TRACERTYPE'][mask_rand]
+            rec['PVOID'] = 0.0
+            rec['PSHEET'] = 0.0
+            rec['PFILAMENT'] = 0.0
+            rec['PKNOT'] = 0.0
+            if rec_size:
+                idx_void = (class_vals_rand == 0)
+                if np.any(idx_void):
+                    rec['PVOID'][idx_void] = 1.0
+                idx_sheet = (class_vals_rand == 1)
+                if np.any(idx_sheet):
+                    rec['PSHEET'][idx_sheet] = 1.0
+                idx_fil = (class_vals_rand == 2)
+                if np.any(idx_fil):
+                    rec['PFILAMENT'][idx_fil] = 1.0
+                idx_knot = (class_vals_rand == 3)
+                if np.any(idx_knot):
+                    rec['PKNOT'][idx_knot] = 1.0
+            random_store.append(rec)
+
+    fallback_records = _build_data_records_from_dict(fallback_counts, fallback_tracer)
+    if dense_acc is not None and dense_acc.get('keys') is None:
+        dense_acc = None
+
+    return dense_acc, fallback_records, random_store
+
+
+def _chain_probability_chunks(dense_acc, fallback_records, random_store, chunk_rows):
+    """
+    Yield probability rows, prioritising data records then random chunks.
+    
+    Args:
+        dense_acc (dict | None): Dense accumulator for data probabilities.
+        fallback_records (np.ndarray | None): Fallback data records array.
+        random_store (TempTableStore | np.ndarray | None): Random records store or array.
+        chunk_rows (int): Maximum rows per yielded chunk.
+    Returns:
+        generator[np.ndarray]: Generator yielding structured arrays of probability rows.
+    """
+    yielded = False
+    for chunk in _iter_dense_data_chunks(dense_acc, chunk_rows):
+        if chunk.size:
+            yielded = True
+            yield chunk
+
+    if fallback_records is not None:
+        total = int(fallback_records.shape[0]) if hasattr(fallback_records, 'shape') else len(fallback_records)
+        if total:
+            yielded = True
+            if chunk_rows and chunk_rows > 0 and total > chunk_rows:
+                for start in range(0, total, int(chunk_rows)):
+                    yield fallback_records[start:start+int(chunk_rows)]
+            else:
+                yield fallback_records
+
+    if isinstance(random_store, TempTableStore):
+        for chunk in random_store.iter_arrays(chunk_rows):
+            if chunk.size:
+                yielded = True
+                yield chunk
+    elif random_store is not None and len(random_store):
+        yielded = True
+        yield random_store
+    if not yielded:
+        yield np.empty(0, dtype=_PROB_ROW_DTYPE)
+
+
+def build_probability_table(class_rows, raw_table=None, r_lower=-0.9, r_upper=0.9):
+    """
+    Return an in-memory probability table (suitable for small datasets).
+    
+    Args:
+        class_rows: Sequence or disk-backed store of classification rows.
+        raw_table (Table | None): Optional raw input table for reference.
+        r_lower (float): Lower ratio threshold for classification.
+        r_upper (float): Upper ratio threshold for classification.
+    Returns:
+        Table: Table with probability information.
     """
     if r_lower >= 0 or r_upper <= 0:
         raise ValueError('r_lower must be negative and r_upper must be positive.')
 
-    arr = _coerce_structured_rows(class_rows, _CLASS_ROW_DTYPE)
+    dense_acc, fallback_records, random_store = _compute_probability_components(class_rows,
+                                                                                raw_table=raw_table,
+                                                                                r_lower=r_lower,
+                                                                                r_upper=r_upper)
 
-    raw_len = len(raw_table)
-    target_raw = np.asarray(raw_table['TARGETID'], dtype=np.int64)
-    randiter_raw = (np.asarray(raw_table['RANDITER'], dtype=np.int32)
-                    if 'RANDITER' in raw_table.colnames
-                    else np.full(raw_len, -1, dtype=np.int32))
-    use_tracer_id = ('TRACER_ID' in raw_table.colnames) and ('TRACER_ID' in arr.dtype.names)
+    arrays = []
+    if dense_acc is not None:
+        arrays.append(_finalize_dense_data_records(dense_acc))
+    if fallback_records is not None and getattr(fallback_records, 'size', 0):
+        arrays.append(fallback_records)
+    if isinstance(random_store, TempTableStore):
+        arrays.extend(list(random_store.iter_arrays()))
+        random_store.cleanup()
+    elif random_store is not None:
+        arrays.append(random_store)
 
-    if not use_tracer_id:
-        tracers_raw = (np.array([_to_tracer_text(v) for v in raw_table['TRACERTYPE']], dtype='U32')
-                       if raw_len else np.asarray([], dtype='U32'))
-        isdata_raw = randiter_raw == -1
+    if arrays:
+        combined = np.concatenate(arrays, axis=0) if len(arrays) > 1 else arrays[0]
+    else:
+        combined = np.empty(0, dtype=_PROB_ROW_DTYPE)
 
-        if arr.size == 0:
-            zeros = np.zeros(raw_len, dtype=np.float32)
-            return Table({'TARGETID': target_raw,
-                          'RANDITER': randiter_raw,
-                          'ISDATA': isdata_raw,
-                          'TRACERTYPE': tracers_raw,
-                          'PVOID': zeros.copy(),
-                          'PSHEET': zeros.copy(),
-                          'PFILAMENT': zeros.copy(),
-                          'PKNOT': zeros.copy()})
+    return Table(combined, copy=False)
 
-        ndata = arr['NDATA'].astype(np.float64, copy=False)
-        nrand = arr['NRAND'].astype(np.float64, copy=False)
-        denom = ndata + nrand
-        r = np.zeros_like(denom, dtype=np.float64)
-        np.divide(ndata - nrand, denom, out=r, where=(denom > 0))
+def save_probability_fits(class_rows, raw_table=None, output_path=None, r_lower=-0.9, r_upper=0.9, meta=None):
+    """
+    Write the probability table to ``output_path`` with minimal peak memory.
+    
+    Args:
+        class_rows: Sequence or disk-backed store of classification rows.
+        raw_table (Table | None): Optional raw input table for reference.
+        output_path (str): Destination path for the FITS file.
+        r_lower (float): Lower ratio threshold for classification.
+        r_upper (float): Upper ratio threshold for classification.
+        meta (dict | None): Optional metadata inserted into the FITS header.
+    """
+    if output_path is None:
+        raise ValueError('output_path must be provided')
+    if r_lower >= 0 or r_upper <= 0:
+        raise ValueError('r_lower must be negative and r_upper must be positive.')
 
-        classes = np.digitize(r, bins=[r_lower, 0.0, r_upper])
-        classes = np.clip(classes, 0, 3)
+    spill_dir = None
+    if isinstance(class_rows, TempTableStore):
+        spill_dir = os.path.dirname(class_rows.tmpdir)
+    dense_acc, fallback_records, random_store = _compute_probability_components(class_rows,
+                                                                                raw_table=raw_table,
+                                                                                r_lower=r_lower,
+                                                                                r_upper=r_upper,
+                                                                                chunk_rows=_DEFAULT_CHUNK_ROWS,
+                                                                                spill_dir=spill_dir)
 
-        mask_data = arr['ISDATA']
-        data_map = {}
-        if mask_data.any():
-            data_keys = np.empty(mask_data.sum(), dtype=[('TARGETID', 'i8'), ('TRACERTYPE', 'U24')])
-            data_keys['TARGETID'] = arr['TARGETID'][mask_data]
-            data_keys['TRACERTYPE'] = arr['TRACERTYPE'][mask_data]
-            uniq_data, inv_data = np.unique(data_keys, return_inverse=True)
-            counts_data = np.zeros((uniq_data.size, 4), dtype=np.int64)
-            np.add.at(counts_data, (inv_data, classes[mask_data]), 1)
-            totals_data = counts_data.sum(axis=1, keepdims=True).astype(np.float32)
-            probs_data = counts_data.astype(np.float32)
-            np.divide(probs_data, totals_data, out=probs_data, where=(totals_data > 0))
-            data_map = {(int(tid), _to_tracer_text(tracer)): probs_data[idx]
-                        for idx, (tid, tracer) in enumerate(zip(uniq_data['TARGETID'], uniq_data['TRACERTYPE']))}
+    total_rows = 0
+    if dense_acc is not None:
+        keys = dense_acc.get('keys')
+        if keys is not None:
+            total_rows += int(keys.shape[0])
+    if fallback_records is not None:
+        total_rows += int(len(fallback_records))
+    if isinstance(random_store, TempTableStore):
+        total_rows += random_store.total
+    elif random_store is not None:
+        total_rows += len(random_store)
 
-        mask_rand = ~mask_data
-        rand_map = {}
-        if mask_rand.any():
-            rand_keys = np.empty(mask_rand.sum(), dtype=[('TARGETID', 'i8'), ('TRACERTYPE', 'U24'), ('RANDITER', 'i4')])
-            rand_keys['TARGETID'] = arr['TARGETID'][mask_rand]
-            rand_keys['TRACERTYPE'] = arr['TRACERTYPE'][mask_rand]
-            rand_keys['RANDITER'] = arr['RANDITER'][mask_rand]
-            uniq_rand, inv_rand = np.unique(rand_keys, return_inverse=True)
-            counts_rand = np.zeros((uniq_rand.size, 4), dtype=np.int64)
-            np.add.at(counts_rand, (inv_rand, classes[mask_rand]), 1)
-            totals_rand = counts_rand.sum(axis=1, keepdims=True).astype(np.float32)
-            probs_rand = counts_rand.astype(np.float32)
-            np.divide(probs_rand, totals_rand, out=probs_rand, where=(totals_rand > 0))
-            rand_map = {(int(tid), _to_tracer_text(tracer), int(rj)): probs_rand[idx]
-                        for idx, (tid, tracer, rj) in enumerate(zip(uniq_rand['TARGETID'],
-                                                                   uniq_rand['TRACERTYPE'],
-                                                                   uniq_rand['RANDITER']))}
+    columns = (('TARGETID', 'K'),
+               ('RANDITER', 'J'),
+               ('ISDATA', 'L'),
+               ('TRACER_ID', 'B'),
+               ('TRACERTYPE', '24A'),
+               ('PVOID', 'E'),
+               ('PSHEET', 'E'),
+               ('PFILAMENT', 'E'),
+               ('PKNOT', 'E'))
 
-        pvoid = np.zeros(raw_len, dtype=np.float32)
-        psheet = np.zeros(raw_len, dtype=np.float32)
-        pfilament = np.zeros(raw_len, dtype=np.float32)
-        pknot = np.zeros(raw_len, dtype=np.float32)
+    split_iter = _bool_env('ASTRA_PROB_SPLIT_ITER', default=True)
+    skip_combined = _bool_env('ASTRA_PROB_SKIP_COMBINED', default=False)
+    if not split_iter and skip_combined:
+        if isinstance(random_store, TempTableStore):
+            random_store.cleanup()
+        return
 
-        for idx in range(raw_len):
-            tid = int(target_raw[idx])
-            tracer_full = tracers_raw[idx]
-            base = _normalize_tracertype_label(tracer_full)
-            if isdata_raw[idx]:
-                probs = data_map.get((tid, base))
-            else:
-                probs = rand_map.get((tid, base, int(randiter_raw[idx])))
-            if probs is not None:
-                pvoid[idx], psheet[idx], pfilament[idx], pknot[idx] = probs
+    random_split_stores = {}
+    data_store = None
+    base_dir = os.path.dirname(output_path)
 
-        return Table({'TARGETID': target_raw,
-                      'RANDITER': randiter_raw,
-                      'ISDATA': isdata_raw,
-                      'TRACERTYPE': tracers_raw,
-                      'PVOID': pvoid,
-                      'PSHEET': psheet,
-                      'PFILAMENT': pfilament,
-                      'PKNOT': pknot})
-
-    tracer_id_raw = np.asarray(raw_table['TRACER_ID'], dtype=np.uint8)
-    isdata_raw = randiter_raw == -1
-
-    if arr.size == 0:
-        zeros = np.zeros(raw_len, dtype=np.float32)
-        tracer_strings = np.full(raw_len, b'UNKNOWN', dtype=_TRACER_ASCII_DTYPE)
-        for tid in np.unique(tracer_id_raw):
-            mask = tracer_id_raw == tid
+    def _append_random_split(chunk):
+        """
+        Append random chunk rows to per-iteration stores.
+        
+        Args:
+            chunk (np.ndarray): Structured array of probability rows.
+        """
+        if not split_iter or chunk.size == 0:
+            return
+        vals = np.asarray(chunk['RANDITER'], dtype=np.int32, copy=False)
+        unique_vals = np.unique(vals)
+        for val in unique_vals:
+            mask = (vals == val)
             if not mask.any():
                 continue
-            data_mask = mask & isdata_raw
-            rand_mask = mask & ~isdata_raw
-            if data_mask.any():
-                tracer_strings[data_mask] = _full_tracer_label(int(tid), True)
-            if rand_mask.any():
-                tracer_strings[rand_mask] = _full_tracer_label(int(tid), False)
-        return Table({'TARGETID': target_raw,
-                      'RANDITER': randiter_raw,
-                      'ISDATA': isdata_raw,
-                      'TRACER_ID': tracer_id_raw,
-                      'TRACERTYPE': tracer_strings.astype('U24'),
-                      'PVOID': zeros.copy(),
-                      'PSHEET': zeros.copy(),
-                      'PFILAMENT': zeros.copy(),
-                      'PKNOT': zeros.copy()})
+            store = random_split_stores.get(int(val))
+            if store is None:
+                store = TempTableStore(_PROB_ROW_DTYPE, prefix=f'prob_iter_{int(val):03d}', base_dir=base_dir)
+                random_split_stores[int(val)] = store
+            store.append(chunk[mask])
 
-    ndata = arr['NDATA'].astype(np.float64, copy=False)
-    nrand = arr['NRAND'].astype(np.float64, copy=False)
-    denom = ndata + nrand
-    r = np.zeros_like(denom, dtype=np.float64)
-    np.divide(ndata - nrand, denom, out=r, where=(denom > 0))
+    def _prob_chunk_generator():
+        """
+        Generator yielding probability chunks.
+        
+        Yields:
+            np.ndarray: Structured arrays of probability rows.
+        """
+        nonlocal data_store
+        if dense_acc is not None:
+            dense_records_arr = _finalize_dense_data_records(dense_acc)
+            if dense_records_arr.size:
+                if split_iter:
+                    data_store = TempTableStore(_PROB_ROW_DTYPE, prefix='prob_data', base_dir=base_dir)
+                    data_store.append(dense_records_arr)
+                yield dense_records_arr
+        if fallback_records is not None and getattr(fallback_records, 'size', 0):
+            if split_iter:
+                if data_store is None:
+                    data_store = TempTableStore(_PROB_ROW_DTYPE, prefix='prob_data', base_dir=base_dir)
+                data_store.append(fallback_records)
+            yield fallback_records
+        if isinstance(random_store, TempTableStore):
+            for chunk in random_store.iter_arrays(_DEFAULT_CHUNK_ROWS):
+                if chunk.size:
+                    _append_random_split(chunk)
+                    yield chunk
+        elif random_store is not None:
+            _append_random_split(random_store)
+            yield random_store
 
-    classes = np.digitize(r, bins=[r_lower, 0.0, r_upper])
-    classes = np.clip(classes, 0, 3)
+    iterator = _prob_chunk_generator()
 
-    mask_data = arr['ISDATA']
-    tracer_id_arr = arr['TRACER_ID']
-
-    if mask_data.any():
-        data_keys = np.empty(mask_data.sum(), dtype=[('TARGETID', 'i8'), ('TRACER_ID', 'u1')])
-        data_keys['TARGETID'] = arr['TARGETID'][mask_data]
-        data_keys['TRACER_ID'] = tracer_id_arr[mask_data]
-        uniq_data, inv_data = np.unique(data_keys, return_inverse=True)
-        counts_data = np.zeros((uniq_data.size, 4), dtype=np.int64)
-        np.add.at(counts_data, (inv_data, classes[mask_data]), 1)
-        totals_data = counts_data.sum(axis=1, keepdims=True).astype(np.float32)
-        probs_data = counts_data.astype(np.float32)
-        np.divide(probs_data, totals_data, out=probs_data, where=(totals_data > 0))
+    if not skip_combined:
+        _write_fits_table(columns, total_rows, iterator, output_path, meta=meta)
     else:
-        uniq_data = np.empty(0, dtype=[('TARGETID', 'i8'), ('TRACER_ID', 'u1')])
-        probs_data = np.empty((0, 4), dtype=np.float32)
-
-    mask_rand = ~mask_data
-    if mask_rand.any():
-        rand_keys = np.empty(mask_rand.sum(), dtype=[('TARGETID', 'i8'), ('TRACER_ID', 'u1'), ('RANDITER', 'i4')])
-        rand_keys['TARGETID'] = arr['TARGETID'][mask_rand]
-        rand_keys['TRACER_ID'] = tracer_id_arr[mask_rand]
-        rand_keys['RANDITER'] = arr['RANDITER'][mask_rand]
-        uniq_rand, inv_rand = np.unique(rand_keys, return_inverse=True)
-        counts_rand = np.zeros((uniq_rand.size, 4), dtype=np.int64)
-        np.add.at(counts_rand, (inv_rand, classes[mask_rand]), 1)
-        totals_rand = counts_rand.sum(axis=1, keepdims=True).astype(np.float32)
-        probs_rand = counts_rand.astype(np.float32)
-        np.divide(probs_rand, totals_rand, out=probs_rand, where=(totals_rand > 0))
-    else:
-        uniq_rand = np.empty(0, dtype=[('TARGETID', 'i8'), ('TRACER_ID', 'u1'), ('RANDITER', 'i4')])
-        probs_rand = np.empty((0, 4), dtype=np.float32)
-
-    pvoid = np.zeros(raw_len, dtype=np.float32)
-    psheet = np.zeros(raw_len, dtype=np.float32)
-    pfilament = np.zeros(raw_len, dtype=np.float32)
-    pknot = np.zeros(raw_len, dtype=np.float32)
-
-    if uniq_data.size:
-        raw_data_mask = isdata_raw
-        if raw_data_mask.any():
-            raw_data_keys = np.empty(raw_data_mask.sum(), dtype=uniq_data.dtype)
-            raw_data_keys['TARGETID'] = target_raw[raw_data_mask]
-            raw_data_keys['TRACER_ID'] = tracer_id_raw[raw_data_mask]
-            pos = np.searchsorted(uniq_data, raw_data_keys)
-            valid = pos < uniq_data.size
-            valid_idx = np.nonzero(valid)[0]
-            if valid_idx.size:
-                same = uniq_data[pos[valid_idx]] == raw_data_keys[valid_idx]
-                valid_idx = valid_idx[same]
-                if valid_idx.size:
-                    idxs = np.where(raw_data_mask)[0][valid_idx]
-                    pos_valid = pos[valid_idx]
-                    pvoid[idxs] = probs_data[pos_valid, 0]
-                    psheet[idxs] = probs_data[pos_valid, 1]
-                    pfilament[idxs] = probs_data[pos_valid, 2]
-                    pknot[idxs] = probs_data[pos_valid, 3]
-
-    if uniq_rand.size:
-        raw_rand_mask = ~isdata_raw
-        if raw_rand_mask.any():
-            raw_rand_keys = np.empty(raw_rand_mask.sum(), dtype=uniq_rand.dtype)
-            raw_rand_keys['TARGETID'] = target_raw[raw_rand_mask]
-            raw_rand_keys['TRACER_ID'] = tracer_id_raw[raw_rand_mask]
-            raw_rand_keys['RANDITER'] = randiter_raw[raw_rand_mask]
-            pos = np.searchsorted(uniq_rand, raw_rand_keys)
-            valid = pos < uniq_rand.size
-            valid_idx = np.nonzero(valid)[0]
-            if valid_idx.size:
-                same = uniq_rand[pos[valid_idx]] == raw_rand_keys[valid_idx]
-                valid_idx = valid_idx[same]
-                if valid_idx.size:
-                    idxs = np.where(raw_rand_mask)[0][valid_idx]
-                    pos_valid = pos[valid_idx]
-                    pvoid[idxs] = probs_rand[pos_valid, 0]
-                    psheet[idxs] = probs_rand[pos_valid, 1]
-                    pfilament[idxs] = probs_rand[pos_valid, 2]
-                    pknot[idxs] = probs_rand[pos_valid, 3]
-
-    tracer_strings = np.full(raw_len, b'UNKNOWN', dtype=_TRACER_ASCII_DTYPE)
-    for tid in np.unique(tracer_id_raw):
-        mask = tracer_id_raw == tid
-        if not mask.any():
-            continue
-        data_mask = mask & isdata_raw
-        rand_mask = mask & ~isdata_raw
-        if data_mask.any():
-            tracer_strings[data_mask] = _full_tracer_label(int(tid), True)
-        if rand_mask.any():
-            tracer_strings[rand_mask] = _full_tracer_label(int(tid), False)
-
-    return Table({'TARGETID': target_raw,
-                  'RANDITER': randiter_raw,
-                  'ISDATA': isdata_raw,
-                  'TRACER_ID': tracer_id_raw,
-                  'TRACERTYPE': tracer_strings.astype('U24'),
-                  'PVOID': pvoid,
-                  'PSHEET': psheet,
-                  'PFILAMENT': pfilament,
-                  'PKNOT': pknot})
-
-def save_probability_fits(class_rows, raw_table, output_path, r_lower=-0.9, r_upper=0.9, meta=None):
-    """
-    Saves the probability table to a FITS file.
-
-    Args:
-        class_rows (list): List of tuples containing classification data.
-        output_path (str): Path to save the FITS file.
-        r_lower (float, optional): Lower ``r`` threshold (default: -0.9).
-        r_upper (float, optional): Upper ``r`` threshold (default: 0.9).
-        meta (dict | None): Optional metadata to inject into the FITS header.
-    Raises:
-        ValueError: If the thresholds do not straddle zero.
-        TypeError: If the input types are incorrect.
-        RuntimeError: If the FITS file cannot be written.
-    """
-    tbl = build_probability_table(class_rows, raw_table, r_lower=r_lower, r_upper=r_upper)
-    if meta:
-        for key, value in meta.items():
-            tbl.meta[key] = value
-    _tmp = f"{output_path}.tmp"
-    try:
-        tbl.write(_tmp, format='fits', overwrite=True)
-        os.replace(_tmp, output_path)
-    except Exception:
-        try:
-            if os.path.exists(_tmp):
-                os.remove(_tmp)
-        except Exception:
+        for _ in iterator:
             pass
-        raise
+
+    if isinstance(random_store, TempTableStore):
+        random_store.cleanup()
+
+    if split_iter:
+        if data_store is not None and data_store.total:
+            data_path = _split_iter_path(output_path, 'data')
+            data_iter, data_total = _iter_structured_chunks(data_store, _PROB_ROW_DTYPE, chunk_rows=_DEFAULT_CHUNK_ROWS)
+            _write_fits_table(columns, data_total, data_iter, data_path, meta=meta)
+            data_store.cleanup()
+        for iteration, store in random_split_stores.items():
+            iter_path = _split_iter_path(output_path, iteration)
+            iter_chunk_iter, iter_total = _iter_structured_chunks(store, _PROB_ROW_DTYPE, chunk_rows=_DEFAULT_CHUNK_ROWS)
+            _write_fits_table(columns, iter_total, iter_chunk_iter, iter_path, meta=meta)
+            store.cleanup()

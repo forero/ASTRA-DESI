@@ -11,6 +11,18 @@ from desiproc.paths import (zone_tag, safe_tag, zone_prefix,
 from releases import RELEASE_FACTORIES
 
 
+def _bool_env(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+# Set default environment variables for per-iteration classification/probability
+os.environ.setdefault('ASTRA_CLASS_SPLIT_ITER', '1')
+os.environ.setdefault('ASTRA_CLASS_SKIP_COMBINED', '1')
+os.environ.setdefault('ASTRA_PROB_SPLIT_ITER', '1')
+os.environ.setdefault('ASTRA_PROB_SKIP_COMBINED', '1')
+
 def _read_groups_compat(groups_dir, zone, webtype, out_tag=None):
     """
     Read groups FITS using a zone tag that supports numeric or string labels (e.g., 'NGC1').
@@ -101,7 +113,9 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
 
 
 def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
-                  out_tag=None, release_tag=None):
+                  out_tag=None, release_tag=None,
+                  reuse_pair_store=None, reuse_class_store=None,
+                  spill_dir=None):
     """
     Classify a zone by generating pairs, classification, and probability files.
     Saves the generated files in the specified output directory.
@@ -133,36 +147,80 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
             need_class = not os.path.exists(class_file)
             need_prob = not os.path.exists(prob_file)
             if need_class or need_prob:
-                try:
-                    ptbl = astra.load_pairs_fits(pairs_file)
-                    cr = astra.build_class_rows_from_pairs(tbl, ptbl, n_random)
-                    astra.save_classification_fits(cr, class_file, meta=meta)
-                    astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
-                except Exception as e:
-                    print(f'[classify] Warning: failed to read existing pairs ({e}); recomputing pairs for {prefix}')
-                    pr, cr, _ = astra.generate_pairs(tbl, n_random)
+                class_store = None
+                cleanup_class = False
+                reuse_class_dir = reuse_class_store if reuse_class_store and os.path.isdir(reuse_class_store) else None
+                if reuse_class_dir:
                     try:
-                        astra.save_pairs_fits(pr, pairs_file, meta=meta)
-                        astra.save_classification_fits(cr, class_file, meta=meta)
-                        astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                        class_store = astra.TempTableStore.from_directory(reuse_class_dir, astra.CLASS_ROW_DTYPE)
+                    except Exception as e:
+                        print(f'[classify] Warning: failed to load existing class store ({e}); falling back to pairs.')
+                        class_store = None
+                regen_completed = False
+                if class_store is None:
+                    try:
+                        ptbl = astra.load_pairs_fits(pairs_file)
+                    except Exception as e:
+                        ptbl = None
+                        print(f'[classify] Warning: failed to read pairs file ({e}); will regenerate.')
+                    if ptbl is None:
+                        need_regen = True
+                    else:
+                        try:
+                            class_store = astra.build_class_rows_from_pairs(tbl, ptbl, n_random,
+                                                                            spill_dir=spill_dir)
+                            cleanup_class = True
+                            need_regen = False
+                        except Exception as e:
+                            print(f'[classify] Warning: failed to rebuild class rows ({e}); will regenerate.')
+                            class_store = None
+                            need_regen = True
+                    if class_store is None and need_regen:
+                        pr, cr, _ = astra.generate_pairs(tbl, n_random, spill_dir=spill_dir)
+                        try:
+                            astra.save_pairs_fits(pr, pairs_file, meta=meta)
+                            astra.save_classification_fits(cr, class_file, meta=meta)
+                            astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                        finally:
+                            for store in (pr, cr):
+                                cleanup = getattr(store, 'cleanup', None)
+                                if callable(cleanup):
+                                    cleanup()
+                        regen_completed = True
+
+                if not regen_completed:
+                    try:
+                        astra.save_classification_fits(class_store, class_file, meta=meta)
+                        astra.save_probability_fits(class_store, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
                     finally:
-                        for store in (pr, cr):
-                            cleanup = getattr(store, 'cleanup', None)
+                        if cleanup_class:
+                            cleanup = getattr(class_store, 'cleanup', None)
                             if callable(cleanup):
                                 cleanup()
             else:
                 print(f'[classify] Found class and probability files; skipping rebuild for {prefix}')
         else:
-            pr, cr, _ = astra.generate_pairs(tbl, n_random)
+            reused_stores = False
+            if reuse_pair_store and reuse_class_store:
+                if os.path.isdir(reuse_pair_store) and os.path.isdir(reuse_class_store):
+                    print(f'[classify] Reusing existing TempTableStore directories for {prefix}')
+                    pr = astra.TempTableStore.from_directory(reuse_pair_store, astra.PAIR_ROW_DTYPE)
+                    cr = astra.TempTableStore.from_directory(reuse_class_store, astra.CLASS_ROW_DTYPE)
+                    reused_stores = True
+                else:
+                    print(f'[classify] Warning: reuse paths are invalid; falling back to regeneration.')
+            if not reused_stores:
+                pr, cr, _ = astra.generate_pairs(tbl, n_random, spill_dir=spill_dir)
             try:
                 astra.save_pairs_fits(pr, pairs_file, meta=meta)
                 astra.save_classification_fits(cr, class_file, meta=meta)
                 astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
             finally:
-                for store in (pr, cr):
-                    cleanup = getattr(store, 'cleanup', None)
-                    if callable(cleanup):
-                        cleanup()
+                if not reused_stores:
+                    for store in (pr, cr):
+                        cleanup = getattr(store, 'cleanup', None)
+                        if callable(cleanup):
+                            cleanup()
     except Exception as e:
         raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
     
@@ -462,6 +520,16 @@ def main():
         p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames (e.g., tracer)')
         p.add_argument('--tracers', nargs='+', default=None,
                        help='Process only these tracers (e.g., BGS_ANY ELG LRG QSO for EDR; BGS_BRIGHT ELG_LOPnotqso LRG QSO for DR1)')
+        p.add_argument('--progress', action='store_true',
+                       help='Enable verbose progress messages during preprocessing')
+        p.add_argument('--reuse-pairs-store', default=None,
+                       help='Path to an existing TempTableStore directory containing pair chunks (resume mode).')
+        p.add_argument('--reuse-class-store', default=None,
+                       help='Path to an existing TempTableStore directory containing classification chunks (resume mode).')
+        p.add_argument('--spill-dir', default=None,
+                       help='Directory where temporary chunk files are written (defaults to $ASTRA_TMPDIR/PSCRATCH/TMPDIR).')
+        p.add_argument('--chunk-rows', type=int, default=None,
+                       help='Override the default chunk size used when writing FITS outputs.')
 
         p.add_argument('--release', choices=['EDR','DR1','DR2'], default='EDR',
                        help='Data release: EDR (rosettes), DR1 (NGC1/NGC2 boxes), DR2 (full-sky NGC/SGC split)')
@@ -472,12 +540,18 @@ def main():
 
         args = p.parse_args()
 
+        if args.progress:
+            os.environ.setdefault('ASTRA_PROGRESS', '1')
+
         if args.r_limit is not None:
             sym = float(abs(args.r_limit))
             args.r_lower = -sym
             args.r_upper = sym
         if args.r_lower >= 0 or args.r_upper <= 0:
             raise ValueError('--r-lower must be negative and --r-upper must be positive.')
+
+        if args.chunk_rows and args.chunk_rows > 0:
+            astra._DEFAULT_CHUNK_ROWS = max(1, int(args.chunk_rows))
 
         release = args.release.upper()
 
@@ -588,8 +662,15 @@ def main():
             stage_start = time.time()
             classify_zone(z, tbl, args.class_out, args.n_random,
                           args.r_lower, args.r_upper,
-                          out_tag=args.out_tag, release_tag=release_tag)
+                          out_tag=args.out_tag, release_tag=release_tag,
+                          reuse_pair_store=args.reuse_pairs_store,
+                          reuse_class_store=args.reuse_class_store,
+                          spill_dir=args.spill_dir)
             print(f'-- [pipeline] Classified zone {z} in {time.time()-stage_start:.2f} s')
+
+            if _bool_env('ASTRA_SKIP_GROUPS', False) or (_bool_env('ASTRA_CLASS_SKIP_COMBINED', False) and _bool_env('ASTRA_CLASS_SPLIT_ITER', False)):
+                print(f'[pipeline] Skip groups for zone {z} (per-iteration classification enabled).')
+                continue
 
             stage_start = time.time()
             outputs = process_zone(z, args.raw_out, args.class_out, args.groups_out,

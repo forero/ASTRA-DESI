@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
-from astropy.table import Table, join, vstack
+from astropy.table import Table
 from scipy.spatial import ConvexHull, QhullError
 from sklearn.cluster import DBSCAN
 
@@ -16,14 +16,136 @@ if __package__ is None or __package__ == '':
     pkg_root = Path(__file__).resolve().parent
     if str(pkg_root) not in sys.path:
         sys.path.append(str(pkg_root))
+    parent_root = pkg_root.parent
+    if str(parent_root) not in sys.path:
+        sys.path.append(str(parent_root))
+    from implement_astra import TempTableStore
     from paths import locate_classification_file, safe_tag, zone_tag
 else:
+    from .implement_astra import TempTableStore
     from .paths import locate_classification_file, safe_tag, zone_tag
 
 
-RAW_COLS = ['TRACERTYPE','RANDITER','TARGETID','XCART','YCART','ZCART']
-CLASS_COLS = ['TARGETID','RANDITER','ISDATA','NDATA','NRAND','TRACERTYPE']
+RAW_COLS = ['TRACERTYPE','TRACER_ID','RANDITER','TARGETID','XCART','YCART','ZCART']
+CLASS_COLS = ['TARGETID','RANDITER','ISDATA','NDATA','NRAND','TRACERTYPE','TRACER_ID']
 WEBTYPE_MAPPING = np.array(['void', 'sheet', 'filament', 'knot'], dtype='U8')
+HULL_SAMPLE_CAP = int(os.environ.get('ASTRA_GROUPS_HULL_CAP', '50000'))
+_GROUP_TRACER_DTYPE = 'S32'
+_GROUP_WEBTYPE_DTYPE = 'S8'
+_GROUP_ROW_DTYPE = np.dtype([('TRACERTYPE', _GROUP_TRACER_DTYPE),
+                             ('TARGETID', np.int64),
+                             ('RANDITER', np.int32),
+                             ('WEBTYPE', _GROUP_WEBTYPE_DTYPE),
+                             ('GROUPID', np.int32),
+                             ('NPTS', np.int32),
+                             ('XCM', np.float32),
+                             ('YCM', np.float32),
+                             ('ZCM', np.float32),
+                             ('A', np.float32),
+                             ('B', np.float32),
+                             ('C', np.float32),
+                             ('LINKLEN', np.float32),
+                             ('ISDATA', np.bool_)])
+
+_GROUP_FITS_COLUMNS = (('TRACERTYPE', '32A'),
+                       ('TARGETID', 'K'),
+                       ('RANDITER', 'J'),
+                       ('WEBTYPE', '8A'),
+                       ('GROUPID', 'J'),
+                       ('NPTS', 'J'),
+                       ('XCM', 'E'),
+                       ('YCM', 'E'),
+                       ('ZCM', 'E'),
+                       ('A', 'E'),
+                       ('B', 'E'),
+                       ('C', 'E'),
+                       ('LINKLEN', 'E'),
+                       ('ISDATA', 'L'))
+
+
+def _group_chunk_rows():
+    """
+    Get the number of rows per chunk for group output.
+    
+    Returns:
+        int: Number of rows per chunk.
+    """
+    try:
+        return max(1, int(os.environ.get('ASTRA_GROUP_CHUNK_ROWS', '250000')))
+    except Exception:
+        return 250000
+
+
+def _group_spill_dir():
+    """
+    Get the temporary spill directory for group processing.
+    
+    Returns:
+        str or None: Path to the spill directory, or None if not set.
+    """
+    return (os.environ.get('ASTRA_GROUP_SPILL_DIR')
+            or os.environ.get('ASTRA_TMPDIR')
+            or os.environ.get('PSCRATCH')
+            or os.environ.get('TMPDIR'))
+
+
+def _ascii_fill(value, size, dtype):
+    """
+    Create an array of fixed-size ASCII strings filled with the given value.
+    
+    Args:
+        value: Input value to encode.
+        size (int): Number of elements in the output array.
+        dtype: Numpy dtype for the output array (e.g., 'S32').
+    Returns:
+        np.ndarray: Array of fixed-size ASCII strings.
+    """
+    arr = np.empty(size, dtype=np.dtype(dtype))
+    encoded = str(value).encode('ascii', errors='ignore')[:arr.itemsize]
+    arr[...] = encoded
+    return arr
+
+
+def _normalize_tracer_array(values):
+    """
+    Vectorised normalisation of tracer labels to strip _DATA/_RAND suffixes.
+
+    Args:
+        values (array-like): Input tracer labels.
+    Returns:
+        np.ndarray: Array of normalised tracer prefixes.
+    """
+    arr = np.asarray(values).astype('U32', copy=False)
+    head, sep, tail = np.char.rpartition(arr, '_')
+    mask = (sep != '') & np.isin(np.char.upper(tail), ('DATA', 'RAND'))
+    result = arr.copy()
+    if np.any(mask):
+        result[mask] = head[mask]
+    return result
+
+
+def _compute_tracer_codes(raw_labels, sel_labels):
+    """
+    Generate aligned integer codes for raw and selected tracer labels.
+
+    Args:
+        raw_labels (array-like): Raw tracer labels (strings).
+        sel_labels (array-like): Selected tracer labels (strings).
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Raw codes array and selected codes array.
+    """
+    raw_base = _normalize_tracer_array(raw_labels)
+    sel_base = _normalize_tracer_array(sel_labels)
+
+    raw_unique, raw_codes = np.unique(raw_base, return_inverse=True)
+    sel_unique, sel_inverse = np.unique(sel_base, return_inverse=True)
+
+    lookup = np.searchsorted(raw_unique, sel_unique)
+    matched = (lookup < raw_unique.size) & (raw_unique[lookup] == sel_unique)
+    sel_code_map = np.full(sel_unique.size, -1, dtype=np.int32)
+    sel_code_map[matched] = lookup[matched]
+    sel_codes = sel_code_map[sel_inverse]
+    return raw_codes.astype(np.int32, copy=False), sel_codes.astype(np.int32, copy=False)
 
 
 def classify_by_probability(prob_tbl):
@@ -125,7 +247,15 @@ def _read_fits_columns(path, cols):
     """
     with fits.open(path, memmap=True) as hdul:
         data = hdul[1].data
-        subset = {c: np.asarray(data[c]) for c in cols}
+        available = set(data.columns.names)
+        subset = {}
+        for name in cols:
+            if name not in available:
+                continue
+            col = data[name]
+            subset[name] = np.array(col, copy=False)
+    if not subset:
+        raise KeyError(f'None of the requested columns {cols} present in {path}')
     return Table(subset, copy=False)
 
 
@@ -170,27 +300,79 @@ def _read_zone_tables(raw_path, class_path):
     return raw, cls
 
 
-def _split_blocks(raw_sub):
+def _split_blocks(tracer_labels, randiters):
     """
-    Splits the raw data into blocks based on the tracer type and random iteration.
+    Yield index blocks grouped by tracer label and random iteration.
 
     Args:
-        raw_sub (Table): Subset of the raw data table.
-    Returns:
-        Generator yielding tuples of (tracer type, random iteration, indices).
+        tracer_labels (np.ndarray): Tracer labels (strings) for each row.
+        randiters (np.ndarray): Random iteration numbers per row.
+    Yields:
+        tuple[str, int, np.ndarray]: Tracer label, iteration, and indices for the block.
     """
-    tr = np.asarray(raw_sub['TRACERTYPE'], dtype=str)
-    ri = np.asarray(raw_sub['RANDITER'])
-    keys = np.char.add(np.char.add(tr, '|'), ri.astype(str))
-    uniq, inv = np.unique(keys, return_inverse=True)
-    for k_idx, key in enumerate(uniq):
-        idxs = np.nonzero(inv == k_idx)[0]
-        ttype = tr[idxs[0]]
-        randit = int(ri[idxs[0]])
-        yield ttype, randit, idxs
+    tr = np.asarray(tracer_labels)
+    ri = np.asarray(randiters)
+    if tr.size == 0:
+        return
+    order = np.lexsort((ri, tr))
+    tr_sorted = tr[order]
+    ri_sorted = ri[order]
+    change = np.empty(order.size, dtype=bool)
+    change[0] = True
+    change[1:] = (tr_sorted[1:] != tr_sorted[:-1]) | (ri_sorted[1:] != ri_sorted[:-1])
+    start_idx = np.nonzero(change)[0]
+    end_idx = np.r_[start_idx[1:], order.size]
+    for start, end in zip(start_idx, end_idx):
+        idxs = order[start:end]
+        yield tr_sorted[start], int(ri_sorted[start]), idxs
 
 
-def length(data_raw):
+def _max_pairwise_distance(coords, block_size=2048):
+    """
+    Compute the maximum pairwise distance without building a dense NxN array.
+
+    Args:
+        coords (np.ndarray): Array with shape (N, 3).
+        block_size (int): Number of points processed per block.
+    Returns:
+        float: Maximum Euclidean distance between any two points.
+    """
+    npts = coords.shape[0]
+    if npts <= 1:
+        return 0.0
+
+    coords64 = coords.astype(np.float64, copy=False)
+    max_dist2 = 0.0
+
+    for i_start in range(0, npts, block_size):
+        i_end = min(i_start + block_size, npts)
+        block_i = coords64[i_start:i_end]
+        norm_i = np.sum(block_i * block_i, axis=1)
+
+        for j_start in range(i_start, npts, block_size):
+            j_end = min(j_start + block_size, npts)
+            block_j = coords64[j_start:j_end]
+            norm_j = np.sum(block_j * block_j, axis=1)
+
+            cross = np.dot(block_i, block_j.T)
+            dist2 = norm_i[:, None] + norm_j[None, :] - 2.0 * cross
+            np.maximum(dist2, 0.0, out=dist2)
+
+            if j_start == i_start:
+                if dist2.shape[0] < 2:
+                    continue
+                tri_mask = np.triu_indices(dist2.shape[0], k=1)
+                block_max = float(np.max(dist2[tri_mask]))
+            else:
+                block_max = float(np.max(dist2))
+
+            if block_max > max_dist2:
+                max_dist2 = block_max
+
+    return float(np.sqrt(max_dist2)) if max_dist2 > 0 else 0.0
+
+
+def length(data_raw, hull_cap=None, rng_seed=0):
     """
     Estimate a linking length based on the convex hull of the points.
     
@@ -199,20 +381,45 @@ def length(data_raw):
     Returns:
         float: Estimated linking length, or 0.0 if it cannot be computed.
     """
-    coords = np.column_stack([np.asarray(data_raw[col], dtype=float) for col in ('XCART','YCART','ZCART')])
+    x_all = np.asarray(data_raw['XCART'])
+    y_all = np.asarray(data_raw['YCART'])
+    z_all = np.asarray(data_raw['ZCART'])
+
+    npts = x_all.size
+    if npts <= 1:
+        return float(np.finfo(np.float32).eps)
+
+    cap = HULL_SAMPLE_CAP if hull_cap is None else hull_cap
+    idx = None
+    if cap and npts > cap:
+        rs = np.random.RandomState(rng_seed)
+        idx = rs.choice(npts, size=cap, replace=False)
+
+    if idx is None:
+        sample = np.column_stack((x_all, y_all, z_all)).astype(np.float32, copy=False)
+    else:
+        sample = np.column_stack((x_all[idx], y_all[idx], z_all[idx])).astype(np.float32, copy=False)
+
     try:
-        hull = ConvexHull(coords)
+        hull = ConvexHull(sample)
         vol = float(hull.volume)
     except QhullError:
-        diffs = coords[:, None, :] - coords[None, :, :]
-        return float(np.max(np.linalg.norm(diffs, axis=-1)))
+        dx = float(np.max(x_all) - np.min(x_all))
+        dy = float(np.max(y_all) - np.min(y_all))
+        dz = float(np.max(z_all) - np.min(z_all))
+        diag_full = np.sqrt(dx*dx + dy*dy + dz*dz)
+        dist_sample = _max_pairwise_distance(sample)
+        return float(max(dist_sample, diag_full, np.finfo(np.float32).eps))
 
     if vol <= 0:
-        diffs = coords[:, None, :] - coords[None, :, :]
-        return float(np.max(np.linalg.norm(diffs, axis=-1)))
+        dx = float(np.max(x_all) - np.min(x_all))
+        dy = float(np.max(y_all) - np.min(y_all))
+        dz = float(np.max(z_all) - np.min(z_all))
+        diag_full = np.sqrt(dx*dx + dy*dy + dz*dz)
+        dist_sample = _max_pairwise_distance(sample)
+        return float(max(dist_sample, diag_full, np.finfo(np.float32).eps))
 
-    num_galaxies = coords.shape[0]
-    return float(np.cbrt(vol / num_galaxies))
+    return float(np.cbrt(vol / float(npts)))
 
 
 def _dbscan_labels(coords, eps):
@@ -299,69 +506,113 @@ def _group_inertia(coords, labels):
     return labs.astype(np.int32), counts.astype(np.int32), xcm, ycm, zcm, A, B, C
 
 
-def _build_block_tables(ttype, randit, webtype, tids, labels, labs,
-                       counts, xcm, ycm, zcm, A, B, C, link_len):
+def _build_block_rows(ttype, webtype, tids, randiters, isdata,
+                      labels, labs, counts, xcm, ycm, zcm, A, B, C, link_len):
     """
-    Builds the tables for the groups based on the computed labels and properties.
+    Create structured probability rows for a block.
     
     Args:
         ttype (str): Tracer type.
-        randit (int): Random iteration number.
-        webtype (str): Type of web structure.
-        tids (np.ndarray): Array of target IDs.
-        labels (np.ndarray): Array of cluster labels.
-        labs (np.ndarray): Unique labels for the groups.
-        counts (np.ndarray): Number of points in each group.
-        xcm (np.ndarray): X coordinate of the center of mass for each group.
-        ycm (np.ndarray): Y coordinate of the center of mass for each group.
-        zcm (np.ndarray): Z coordinate of the center of mass for each group.
-        A (np.ndarray): Semi-axis length A of the inertia ellipsoid.
-        B (np.ndarray): Semi-axis length B of the inertia ellipsoid.
-        C (np.ndarray): Semi-axis length C of the inertia ellipsoid.
-        link_len (float): Linking length used in the FoF algorithm.
+        webtype (str): Web type.
+        tids (np.ndarray): Target IDs.
+        randiters (np.ndarray): Random iteration numbers.
+        isdata (np.ndarray): Boolean array indicating data points.
+        labels (np.ndarray): Cluster labels for each point.
+        labs (np.ndarray): Unique cluster labels.
+        counts (np.ndarray): Counts of points in each cluster.
+        xcm (np.ndarray): X center of mass for each cluster.
+        ycm (np.ndarray): Y center of mass for each cluster.
+        zcm (np.ndarray): Z center of mass for each cluster.
+        A (np.ndarray): Semi-axis A for each cluster.
+        B (np.ndarray): Semi-axis B for each cluster.
+        C (np.ndarray): Semi-axis C for each cluster.
+        link_len (float): Linking length used in clustering.
     Returns:
-        Table: Astropy Table containing the group properties.
+        np.ndarray: Structured array of group rows.
     """
-    pts = Table({'TRACERTYPE': np.full(tids.size, ttype),
-                 'TARGETID': tids, 'RANDITER': np.full(tids.size, randit, dtype=np.int32),
-                 'WEBTYPE': np.full(tids.size, webtype), 'GROUPID': labels})
+    n = tids.size
+    rows = np.empty(n, dtype=_GROUP_ROW_DTYPE)
+    rows['TRACERTYPE'] = _ascii_fill(ttype, n, _GROUP_TRACER_DTYPE)
+    rows['TARGETID'] = tids.astype(np.int64, copy=False)
+    rows['RANDITER'] = randiters.astype(np.int32, copy=False)
+    rows['WEBTYPE'] = _ascii_fill(webtype, n, _GROUP_WEBTYPE_DTYPE)
+    rows['GROUPID'] = labels.astype(np.int32, copy=False)
+
+    idx = np.searchsorted(labs, labels)
+    rows['NPTS'] = counts[idx].astype(np.int32, copy=False)
+    rows['XCM'] = xcm[idx].astype(np.float32, copy=False)
+    rows['YCM'] = ycm[idx].astype(np.float32, copy=False)
+    rows['ZCM'] = zcm[idx].astype(np.float32, copy=False)
+    rows['A'] = A[idx].astype(np.float32, copy=False)
+    rows['B'] = B[idx].astype(np.float32, copy=False)
+    rows['C'] = C[idx].astype(np.float32, copy=False)
+    rows['LINKLEN'] = np.full(n, float(link_len), dtype=np.float32)
+    rows['ISDATA'] = isdata.astype(bool, copy=False)
+    return rows
+
+
+def _write_chunked_fits(columns, total_rows, chunk_iter, output_path, meta=None):
+    """
+    Write a FITS binary table in chunks.
     
-    props = Table({'TRACERTYPE': np.full(labs.size, ttype),
-                   'RANDITER': np.full(labs.size, randit, dtype=np.int32),
-                   'WEBTYPE': np.full(labs.size, webtype), 'GROUPID': labs,
-                   'NPTS': counts, 'XCM': xcm, 'YCM': ycm, 'ZCM': zcm,
-                   'A': A, 'B': B, 'C': C,
-                   'LINKLEN': np.full(labs.size, float(link_len))})
-    return join(pts, props, keys=['TRACERTYPE','RANDITER','WEBTYPE','GROUPID'],
-                    join_type='left')
-
-
-def write_fits_gz(tbl, out_dir, zone, webtype, out_tag=None, release_tag=None):
-    """
-    Write ``tbl`` to a gzipped FITS file with zone metadata.
-
     Args:
-        tbl (Table): Group catalogue to persist.
-        out_dir (str): Destination directory.
-        zone (int | str): Zone identifier used in the filename and metadata.
-        webtype (str): Cosmic web type for the output file name.
-        out_tag (str, optional): Additional tag appended to the filename.
-        release_tag (str, optional): Release label stored in the FITS header.
+        columns (list of tuple): List of (name, format) for each column.
+        total_rows (int): Total number of rows in the table.
+        chunk_iter (iterator): Iterator yielding chunks of data as structured arrays.
+        output_path (str): Path to write the FITS file.
+        meta (dict, optional): Metadata to add to the FITS header.
+    """
+    coldefs = fits.ColDefs([fits.Column(name=name, format=fmt) for name, fmt in columns])
+    hdu = fits.BinTableHDU.from_columns(coldefs, nrows=int(total_rows))
+    if meta:
+        for key, value in meta.items():
+            try:
+                hdu.header[key] = value
+            except Exception:
+                pass
+    hdu.writeto(output_path, overwrite=True)
+    with fits.open(output_path, mode='update', memmap=True) as hdul:
+        data = hdul[1].data
+        start = 0
+        for chunk in chunk_iter:
+            length = len(chunk)
+            if length == 0:
+                continue
+            end = start + length
+            for name, _ in columns:
+                data[name][start:end] = chunk[name]
+            start = end
+        hdul.flush()
+
+
+def _write_groups_fits(store, out_dir, zone, webtype, out_tag=None, release_tag=None):
+    """
+    Write the groups stored in `store` to a compressed FITS file.
+    
+    Args:
+        store (TempTableStore): Store containing group rows.
+        out_dir (str): Output directory.
+        zone (int | str): Zone identifier.
+        webtype (str): Cosmic web type.
+        out_tag (str, optional): Tag appended to filenames.
+        release_tag (str, optional): Release label for metadata.
     Returns:
         str: Path to the compressed FITS file.
     """
     os.makedirs(out_dir, exist_ok=True)
     tsuf = safe_tag(out_tag)
     zone_str = zone_tag(zone)
-    uncompressed = os.path.join(out_dir, f'zone_{zone_str}{tsuf}_groups_fof_{webtype}.fits')
-    compressed = uncompressed + '.gz'
+    base = os.path.join(out_dir, f'zone_{zone_str}{tsuf}_groups_fof_{webtype}.fits')
+    tmp_path = base + '.tmp'
+    meta = {'ZONE': zone_str, 'RELEASE': str(release_tag) if release_tag is not None else ''}
+    chunk_iter = store.iter_arrays(_group_chunk_rows())
+    _write_chunked_fits(_GROUP_FITS_COLUMNS, store.total, chunk_iter, tmp_path, meta=meta)
+
+    compressed = base + '.gz'
     tmp_compressed = compressed + '.tmp'
-    tbl.meta['ZONE'] = zone_str
-    tbl.meta['RELEASE'] = str(release_tag) if release_tag is not None else ''
-    tbl.write(uncompressed, overwrite=True)
-    with open(uncompressed, 'rb') as fi, gzip.open(tmp_compressed, 'wb') as fo:
+    with open(tmp_path, 'rb') as fi, gzip.open(tmp_compressed, 'wb') as fo:
         shutil.copyfileobj(fi, fo)
-    os.remove(uncompressed)
+    os.remove(tmp_path)
     os.replace(tmp_compressed, compressed)
     return compressed
 
@@ -416,39 +667,47 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
         return []
 
     class_sel = class_tbl[mask]
-    isdata_sel = isdata_cls[mask]
+    isdata_sel = np.asarray(class_sel['ISDATA'], dtype=bool)
     rand_sel = np.asarray(class_sel['RANDITER'], dtype=np.int32)
+    rand_sel = np.where(isdata_sel, -1, rand_sel)
     tid_sel = np.asarray(class_sel['TARGETID'], dtype=np.int64)
-    tracer_sel = np.array([_normalize_tracer_label(v) for v in class_sel['TRACERTYPE']], dtype='U32')
+    tracer_labels = np.asarray(class_sel['TRACERTYPE']).astype('U32')
 
     raw_tid = np.asarray(raw_tbl['TARGETID'], dtype=np.int64)
     raw_iter = np.asarray(raw_tbl['RANDITER'], dtype=np.int32)
-    raw_tracer_base = np.array([_normalize_tracer_label(v) for v in raw_tbl['TRACERTYPE']], dtype='U32')
-    coords = np.column_stack([np.asarray(raw_tbl['XCART'], dtype=np.float64),
-                             np.asarray(raw_tbl['YCART'], dtype=np.float64),
-                             np.asarray(raw_tbl['ZCART'], dtype=np.float64)])
 
-    data_mask = raw_iter == -1
-    rand_mask = ~data_mask
-    data_idx = np.where(data_mask)[0]
-    rand_idx = np.where(rand_mask)[0]
+    if 'TRACER_ID' in raw_tbl.colnames and 'TRACER_ID' in class_sel.colnames:
+        raw_tracer_codes = np.asarray(raw_tbl['TRACER_ID'], dtype=np.int32)
+        sel_tracer_codes = np.asarray(class_sel['TRACER_ID'], dtype=np.int32)
+    else:
+        raw_tracer_codes, sel_tracer_codes = _compute_tracer_codes(raw_tbl['TRACERTYPE'],
+                                                                   class_sel['TRACERTYPE'])
 
-    data_lookup = {(int(raw_tid[i]), raw_tracer_base[i]): i for i in data_idx}
-    rand_lookup = {(int(raw_tid[i]), raw_tracer_base[i], int(raw_iter[i])): i for i in rand_idx}
+    key_dtype = np.dtype([('TARGETID', np.int64),
+                          ('RANDITER', np.int32),
+                          ('TRACER', np.int32)])
 
-    keep = np.ones(tid_sel.size, dtype=bool)
-    coords_sel = np.empty((tid_sel.size, 3), dtype=np.float64)
-    for i in range(tid_sel.size):
-        if isdata_sel[i]:
-            key = (int(tid_sel[i]), tracer_sel[i])
-            idx_lookup = data_lookup.get(key)
-        else:
-            key = (int(tid_sel[i]), tracer_sel[i], int(rand_sel[i]))
-            idx_lookup = rand_lookup.get(key)
-        if idx_lookup is None:
-            keep[i] = False
-        else:
-            coords_sel[i] = coords[idx_lookup]
+    raw_keys = np.empty(raw_tid.size, dtype=key_dtype)
+    raw_keys['TARGETID'] = raw_tid
+    raw_keys['RANDITER'] = raw_iter
+    raw_keys['TRACER'] = raw_tracer_codes
+
+    sel_keys = np.empty(tid_sel.size, dtype=key_dtype)
+    sel_keys['TARGETID'] = tid_sel
+    sel_keys['RANDITER'] = rand_sel
+    sel_keys['TRACER'] = sel_tracer_codes
+
+    sorter = np.argsort(raw_keys, order=('TARGETID', 'RANDITER', 'TRACER'))
+    raw_sorted = raw_keys[sorter]
+
+    pos = np.searchsorted(raw_sorted, sel_keys)
+    within = pos < raw_sorted.size
+    keep = np.zeros(sel_keys.size, dtype=bool)
+    if np.any(within):
+        matches = raw_sorted[pos[within]] == sel_keys[within]
+        if np.any(matches):
+            keep_indices = np.where(within)[0][matches]
+            keep[keep_indices] = True
 
     if not np.any(keep):
         return []
@@ -457,49 +716,52 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
         tid_sel = tid_sel[keep]
         rand_sel = rand_sel[keep]
         isdata_sel = isdata_sel[keep]
-        tracer_sel = tracer_sel[keep]
-        coords_sel = coords_sel[keep]
+        tracer_labels = tracer_labels[keep]
+        sel_keys = sel_keys[keep]
 
-    raw_sub = Table({'TRACERTYPE': tracer_sel.astype('U32'),
-                     'TARGETID': tid_sel,
-                     'RANDITER': rand_sel,
-                     'XCART': coords_sel[:,0],
-                     'YCART': coords_sel[:,1],
-                     'ZCART': coords_sel[:,2],
-                     'WEBTYPE': np.full(tid_sel.size, webtype, dtype='U8'),
-                     'ISDATA': isdata_sel})
+    matched_indices = sorter[pos[keep]]
 
-    block_tables = []
+    x_raw = np.array(raw_tbl['XCART'], copy=False)
+    y_raw = np.array(raw_tbl['YCART'], copy=False)
+    z_raw = np.array(raw_tbl['ZCART'], copy=False)
 
-    for ttype, randit, idxs in _split_blocks(raw_sub):
-        print(f'Processing zone {zone}, TRACERTYPE={ttype}, RANDITER={randit}, NPTS={len(idxs)}')
-        block_data = raw_sub[idxs]
-        eps = float(length(block_data))
-        if not np.isfinite(eps) or eps <= 0.0:
-            eps = np.finfo(float).eps
-
-        coords = np.column_stack([np.asarray(block_data[col], dtype=float)
-                                  for col in ('XCART', 'YCART', 'ZCART')])
-        labels = _dbscan_labels(coords, eps)  # FoF is the same as DBSCAN with min_samples=1
-        labs, counts, xcm, ycm, zcm, A, B, C = _group_inertia(coords, labels)
-
-        tids = np.asarray(block_data['TARGETID'], dtype=np.int64)
-        block_tbl = _build_block_tables(ttype, randit, webtype,
-                                        tids=tids,
-                                        labels=labels, labs=labs, counts=counts,
-                                        xcm=xcm, ycm=ycm, zcm=zcm, A=A, B=B, C=C,
-                                        link_len=eps)
-        if 'ISDATA' in block_data.colnames:
-            block_tbl['ISDATA'] = np.asarray(block_data['ISDATA'], dtype=bool)
-
-        block_tables.append(block_tbl)
+    x_sel = x_raw[matched_indices].astype(np.float32, copy=False)
+    y_sel = y_raw[matched_indices].astype(np.float32, copy=False)
+    z_sel = z_raw[matched_indices].astype(np.float32, copy=False)
 
     outputs = []
+    store = TempTableStore(_GROUP_ROW_DTYPE, prefix='groups', base_dir=_group_spill_dir())
 
-    if block_tables:
-        merged = vstack(block_tables, metadata_conflicts='silent')
-        outputs.append(write_fits_gz(merged, out_dir, zone, webtype,
-                                     out_tag=out_tag, release_tag=release_tag))
+    try:
+        for ttype, randit, idxs in _split_blocks(tracer_labels, rand_sel):
+            print(f'Processing zone {zone}, TRACERTYPE={ttype}, RANDITER={randit}, NPTS={len(idxs)}')
+            idxs = np.asarray(idxs, dtype=np.int64)
+            tids_block = tid_sel[idxs]
+            rand_block = rand_sel[idxs].astype(np.int32, copy=False)
+            isdata_block = isdata_sel[idxs]
+            x_block = x_sel[idxs]
+            y_block = y_sel[idxs]
+            z_block = z_sel[idxs]
+
+            eps = float(length({'XCART': x_block, 'YCART': y_block, 'ZCART': z_block}))
+            if not np.isfinite(eps) or eps <= 0.0:
+                eps = np.finfo(float).eps
+
+            coords = np.column_stack((x_block, y_block, z_block)).astype(np.float32, copy=False)
+            labels = _dbscan_labels(coords, eps)
+            labs, counts, xcm, ycm, zcm, A, B, C = _group_inertia(coords, labels)
+
+            rows = _build_block_rows(ttype, webtype,
+                                     tids_block, rand_block, isdata_block,
+                                     labels, labs, counts, xcm, ycm, zcm, A, B, C,
+                                     link_len=eps)
+            store.append(rows)
+
+        if store.total:
+            outputs.append(_write_groups_fits(store, out_dir, zone, webtype,
+                                              out_tag=out_tag, release_tag=release_tag))
+    finally:
+        store.cleanup()
 
     return outputs
 

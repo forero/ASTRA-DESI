@@ -1,11 +1,12 @@
+import gc
 import os
 from typing import Dict, List
 
 import numpy as np
 from argparse import Namespace
-from astropy.table import Column, Table, vstack
+from astropy.table import Column, Table
 
-from desiproc.implement_astra import register_tracer_mapping
+from desiproc.implement_astra import TempTableStore, register_tracer_mapping
 from desiproc.read_data import generate_randoms_dr2, process_real_dr2
 from desiproc.paths import safe_tag, zone_tag
 
@@ -26,6 +27,14 @@ TRACER_FULL_LABELS = {}
 for tracer_name, tracer_idx in TRACER_IDS.items():
     TRACER_FULL_LABELS[(tracer_idx, True)] = f'{tracer_name}_DATA'.encode('ascii')
     TRACER_FULL_LABELS[(tracer_idx, False)] = f'{tracer_name}_RAND'.encode('ascii')
+
+
+def _progress(message: str) -> None:
+    """
+    Print a progress message when verbose progress is enabled.
+    """
+    if os.environ.get('ASTRA_PROGRESS'):
+        print(f'[progress] {message}', flush=True)
 
 
 def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_raw,
@@ -63,6 +72,7 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
         except Exception as exc:
             print(f'[dr2] warning: cannot read existing raw {existing_path} ({exc}); rebuilding', flush=True)
         else:
+            _progress(f'zone {zone_label}: reusing cached raw table {existing_path}')
             tbl_cached = cached.copy()
             if 'RANDITER' in tbl_cached.colnames:
                 tbl_cached['RANDITER'] = np.asarray(tbl_cached['RANDITER'], dtype=np.int32)
@@ -70,8 +80,37 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
                 tbl_cached.add_column(Column(np.full(len(tbl_cached), int(zone_value), dtype=np.int32), name='ZONE'))
             return tbl_cached
 
-    parts: List[Table] = []
     skipped: List[str] = []
+
+    raw_store = None
+    store_cols: List[str] = []
+    total_rows = 0
+    tmp_base = (os.environ.get('ASTRA_RAW_SPILL_DIR')
+                or os.environ.get('ASTRA_TMPDIR')
+                or os.environ.get('PSCRATCH')
+                or os.environ.get('TMPDIR'))
+
+    def _append_chunk(chunk: Table):
+        """
+        Append a chunk of data to the raw store.
+        """
+        nonlocal raw_store, store_cols, total_rows
+        if chunk is None or len(chunk) == 0:
+            return
+        if not store_cols:
+            store_cols = list(chunk.colnames)
+        elif list(chunk.colnames) != store_cols:
+            missing = sorted(set(store_cols) - set(chunk.colnames))
+            if missing:
+                raise RuntimeError(f'Chunk missing expected columns {missing}')
+            chunk = chunk[store_cols]
+        arr = np.asarray(chunk.as_array())
+        if raw_store is None:
+            raw_store = TempTableStore(arr.dtype, prefix=f'dr2_raw_{zone_label}', base_dir=tmp_base)
+        raw_store.append(arr)
+        total_rows += len(chunk)
+        _progress(f'zone {zone_label}: appended {len(chunk)} rows (cumulative {total_rows})')
+
     for tr in tracers:
         tracer_id = TRACER_IDS.get(tr)
         try:
@@ -81,16 +120,25 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
             print(f'[warn] {tr} empty in DR2 zone {zone_label}: {exc}')
             skipped.append(tr)
             continue
-        parts.append(rt)
+        _progress(f'zone {zone_label}: processing tracer {tr} real sample ({len(rt)} rows)')
+        _append_chunk(rt)
         rpt = generate_randoms_dr2(random_tables, tr, zone_label, n_random, rt,
                                    zone_value=zone_value, tracer_id=tracer_id,
                                    include_tracertype=False, downcast=True)
-        parts.append(rpt)
+        _progress(f'zone {zone_label}: tracer {tr} random catalogue ({len(rpt)} rows) ready')
+        _append_chunk(rpt)
+        del rpt
+        del rt
+        gc.collect()
 
-    if not parts:
+    if raw_store is None:
         raise ValueError(f'No data in DR2 zone {zone_label} (tracers tried: {tracers})')
 
-    tbl = vstack(parts, metadata_conflicts='silent', join_type='exact')
+    combined_memmap = raw_store.as_array()
+    combined = np.array(combined_memmap, copy=True)
+    del combined_memmap
+    tbl = Table(combined, copy=False)
+    _progress(f'zone {zone_label}: combined raw table assembled ({len(tbl)} rows)')
     if 'RANDITER' in tbl.colnames:
         tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int16)
     if 'ZONE' in tbl.colnames and tbl['ZONE'].dtype != np.int16:
@@ -125,6 +173,7 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
         del labels
 
     try:
+        _progress(f'zone {zone_label}: writing raw FITS to {out_path}')
         tbl.write(tmp_path, format='fits', overwrite=True)
     finally:
         if removed_zone is not None and 'ZONE' not in tbl.colnames:
@@ -132,8 +181,11 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
         if removed_trtype is not None:
             tbl.remove_column('TRACERTYPE')
             removed_trtype = None
+        if raw_store is not None:
+            raw_store.cleanup()
 
     os.replace(tmp_path, out_path)
+    _progress(f'zone {zone_label}: completed raw FITS {out_path}')
 
     if skipped:
         print(f'[info] In DR2 {zone_label} skipped tracers (empty): {", ".join(skipped)}')

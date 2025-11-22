@@ -12,6 +12,14 @@ from astropy.units import UnitsWarning
 warnings.filterwarnings('ignore', category=UnitsWarning)
 
 
+def _progress(message):
+    """
+    Emit a progress message when verbose progress is enabled.
+    """
+    if os.environ.get('ASTRA_PROGRESS'):
+        print(f'[progress] {message}', flush=True)
+
+
 def load_table(path, columns):
     """
     Return a FITS table containing only the requested columns.
@@ -530,47 +538,41 @@ def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table
         real_count = len(real_table)
         if real_count == 0:
             raise ValueError(f'Real table for tracer {tracer} zone {zone_label} is empty')
+        _progress(f'zone {zone_label}: generating randoms for tracer {tracer} '
+                  f'(target {n_random} iterations, {real_count} rows each)')
 
-        core_columns = [name for name in real_table.colnames
+        base_numeric_cols = ('TARGETID', 'RA', 'DEC', 'Z')
+        keep_columns = [name for name in real_table.colnames
                         if name not in ('TRACERTYPE', 'RANDITER', 'TRACER_ID')]
+        extra_columns = [col for col in keep_columns if col not in ('TARGETID', 'RA', 'DEC', 'Z',
+                                                                    'XCART', 'YCART', 'ZCART', 'ZONE')]
+
+        required_source_cols = set(base_numeric_cols) | set(extra_columns)
+
         zone_tables = []
-        table_arrays = []
         lengths = []
 
-        # Preload zone tables in place and cache numpy views to avoid duplicating arrays.
         for tbl in zone_dict.values():
             if tbl is None or len(tbl) == 0:
                 continue
 
-            base = tbl
-            if 'ZONE' not in base.colnames:
-                base.add_column(Column(np.full(len(base), int(zone_value), dtype=np.int32), name='ZONE'))
-            else:
-                if base['ZONE'].dtype != np.int32:
-                    base['ZONE'] = np.asarray(base['ZONE'], dtype=np.int32)
+            has_cart = all(comp in tbl.colnames for comp in ('XCART', 'YCART', 'ZCART'))
+            if has_cart:
+                required_source_cols.update(('XCART', 'YCART', 'ZCART'))
 
-            if 'Z' not in base.colnames:
-                raise KeyError(f"Missing 'Z' column for tracer {tracer} in DR2 random tables")
-
-            if 'XCART' not in base.colnames or 'YCART' not in base.colnames or 'ZCART' not in base.colnames:
-                base = _compute_cartesian(base, dtype=np.float32 if downcast else np.float64)
-            else:
-                for comp in ('XCART', 'YCART', 'ZCART'):
-                    base[comp] = np.asarray(base[comp], dtype=np.float32 if downcast else np.float64)
-
-            if downcast:
-                for col in ('RA', 'DEC', 'Z'):
-                    if col in base.colnames:
-                        base[col] = np.asarray(base[col], dtype=np.float32)
-
-            missing = [col for col in core_columns if col not in base.colnames]
+            missing = [col for col in required_source_cols if col not in tbl.colnames]
             if missing:
                 raise KeyError(f"Missing columns {missing} in random tables for tracer {tracer}, zone {zone_label}")
 
-            zone_tables.append(base)
-            arrays = {col: np.asarray(base[col]) for col in core_columns}
-            table_arrays.append(arrays)
-            lengths.append(len(base))
+            arrays = {}
+            for col in required_source_cols:
+                data = tbl[col]
+                if isinstance(data, np.ma.MaskedArray):
+                    arrays[col] = np.asarray(data.filled(0))
+                else:
+                    arrays[col] = np.asarray(data)
+            zone_tables.append(arrays)
+            lengths.append(len(tbl))
 
         if not zone_tables:
             raise ValueError(f'No random entries for tracer {tracer} in zone {zone_label}')
@@ -578,18 +580,45 @@ def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table
         total_rows = int(np.sum(lengths, dtype=np.int64))
         if total_rows < real_count:
             raise ValueError(f'Zone {zone_label} randoms have {total_rows} rows (< {real_count})')
+        _progress(f'zone {zone_label}: tracer {tracer} random pool size {total_rows} rows '
+                  f'({len(zone_tables)} files)')
 
         offsets = np.zeros(len(lengths) + 1, dtype=np.int64)
         offsets[1:] = np.cumsum(lengths, dtype=np.int64)
 
+        float_dtype = np.float32 if downcast else np.float64
         total_out = real_count * n_random
-        output_arrays = {col: np.empty(total_out, dtype=table_arrays[0][col].dtype) for col in core_columns}
-        if include_tracertype:
-            tracertype = _build_fixed_string_array(total_out, f'{tracer}_RAND')
-        else:
-            tracertype = None
+
+        output_numeric = {
+            'TARGETID': np.empty(total_out, dtype=np.int64),
+            'RA': np.empty(total_out, dtype=float_dtype),
+            'DEC': np.empty(total_out, dtype=float_dtype),
+            'Z': np.empty(total_out, dtype=float_dtype),
+            'XCART': np.empty(total_out, dtype=float_dtype),
+            'YCART': np.empty(total_out, dtype=float_dtype),
+            'ZCART': np.empty(total_out, dtype=float_dtype),
+        }
+
+        output_extra = {}
+        for col in extra_columns:
+            output_extra[col] = np.empty(total_out, dtype=real_table[col].dtype)
+
+        zone_col = None
+        if 'ZONE' in real_table.colnames:
+            zone_col = np.full(total_out, int(zone_value), dtype=np.int32)
+
+        tracer_id_col = None
+        tracer_code = int(tracer_id) if tracer_id is not None else 255
+        if ('TRACER_ID' in real_table.colnames) or tracer_id is not None:
+            tracer_id_col = np.full(total_out, tracer_code, dtype=np.uint8)
+
+        tracertype = _build_fixed_string_array(total_out, f'{tracer}_RAND', min_length=8) if include_tracertype else None
+
         randiter_dtype = np.int16 if downcast else np.int32
         randiter = np.empty(total_out, dtype=randiter_dtype)
+
+        have_cartesian = all(all(comp in arrays for comp in ('XCART', 'YCART', 'ZCART'))
+                             for arrays in zone_tables)
 
         print(f"[dr2] tracer={tracer} zone={zone_label} random pool rows={total_rows} target={real_count}", flush=True)
         for j in range(n_random):
@@ -606,14 +635,40 @@ def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table
                 positions = np.where(table_idx == idx_table)[0]
                 if positions.size == 0:
                     continue
-                # Copy sampled rows grouped by source table into the preallocated buffers.
                 dest_pos = start + positions
                 src_rows = local_idx[positions]
-                arrays = table_arrays[int(idx_table)]
-                for col in core_columns:
-                    output_arrays[col][dest_pos] = arrays[col][src_rows]
+                arrays = zone_tables[int(idx_table)]
+
+                output_numeric['TARGETID'][dest_pos] = arrays['TARGETID'][src_rows].astype(np.int64, copy=False)
+                output_numeric['RA'][dest_pos] = arrays['RA'][src_rows].astype(float_dtype, copy=False)
+                output_numeric['DEC'][dest_pos] = arrays['DEC'][src_rows].astype(float_dtype, copy=False)
+                output_numeric['Z'][dest_pos] = arrays['Z'][src_rows].astype(float_dtype, copy=False)
+
+                for col in extra_columns:
+                    output_extra[col][dest_pos] = arrays[col][src_rows]
 
             randiter[start:end] = j
+
+            if have_cartesian:
+                for idx_table in unique_tables:
+                    positions = np.where(table_idx == idx_table)[0]
+                    if positions.size == 0:
+                        continue
+                    dest_pos = start + positions
+                    src_rows = local_idx[positions]
+                    arrays = zone_tables[int(idx_table)]
+                    output_numeric['XCART'][dest_pos] = arrays['XCART'][src_rows].astype(float_dtype, copy=False)
+                    output_numeric['YCART'][dest_pos] = arrays['YCART'][src_rows].astype(float_dtype, copy=False)
+                    output_numeric['ZCART'][dest_pos] = arrays['ZCART'][src_rows].astype(float_dtype, copy=False)
+            else:
+                ra_chunk = output_numeric['RA'][start:end].astype(np.float64, copy=False)
+                dec_chunk = output_numeric['DEC'][start:end].astype(np.float64, copy=False)
+                z_chunk = output_numeric['Z'][start:end].astype(np.float64, copy=False)
+                dist = Planck18.comoving_distance(z_chunk).value
+                sc = SkyCoord(ra=ra_chunk * u.deg, dec=dec_chunk * u.deg, distance=dist * u.Mpc)
+                output_numeric['XCART'][start:end] = np.asarray(sc.cartesian.x.value, dtype=float_dtype)
+                output_numeric['YCART'][start:end] = np.asarray(sc.cartesian.y.value, dtype=float_dtype)
+                output_numeric['ZCART'][start:end] = np.asarray(sc.cartesian.z.value, dtype=float_dtype)
 
             if (j + 1) % 10 == 0 or (j + 1) == n_random:
                 print(f"[dr2] tracer={tracer} zone={zone_label} generated random iteration {j+1}/{n_random}", flush=True)
@@ -626,16 +681,20 @@ def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table
             elif col == 'RANDITER':
                 rand_tbl[col] = Column(randiter, name=col)
             elif col == 'TRACER_ID':
-                continue
-            else:
-                rand_tbl[col] = output_arrays[col]
+                if tracer_id_col is not None:
+                    rand_tbl[col] = Column(tracer_id_col, name=col)
+            elif col == 'ZONE':
+                if zone_col is not None:
+                    rand_tbl[col] = Column(zone_col, name=col)
+            elif col in output_numeric:
+                rand_tbl[col] = Column(output_numeric[col], name=col)
+            elif col in output_extra:
+                rand_tbl[col] = Column(output_extra[col], name=col)
 
-        if 'TRACER_ID' in output_arrays and 'TRACER_ID' not in rand_tbl.colnames:
-            rand_tbl['TRACER_ID'] = Column(output_arrays['TRACER_ID'], name='TRACER_ID')
-        elif tracer_id is not None and 'TRACER_ID' not in rand_tbl.colnames:
-            rand_tbl['TRACER_ID'] = Column(np.full(len(rand_tbl), int(tracer_id), dtype=np.uint8),
-                                           name='TRACER_ID')
+        if 'TRACER_ID' not in rand_tbl.colnames and tracer_id_col is not None:
+            rand_tbl['TRACER_ID'] = Column(tracer_id_col, name='TRACER_ID')
 
+        _progress(f'zone {zone_label}: tracer {tracer} random tables generated ({len(rand_tbl)} rows)')
         return rand_tbl
     except KeyError:
         raise

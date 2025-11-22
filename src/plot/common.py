@@ -1,9 +1,11 @@
+import hashlib
 import os
 from typing import Iterable, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 from astropy.table import Table
+from astropy.io import fits
 
 from desiproc.paths import ( locate_classification_file, locate_probability_file,
                             safe_tag, zone_tag,)
@@ -12,7 +14,11 @@ __all__ = ["resolve_raw_path",
            "resolve_class_path",
            "resolve_probability_path",
            "load_raw_dataframe",
-           "load_probability_dataframe"]
+           "load_probability_dataframe",
+           "table_row_count"]
+
+_MINIMUM_RAW_COLUMNS = ("TARGETID", "TRACERTYPE")
+_DEFAULT_RAW_COLUMNS = _MINIMUM_RAW_COLUMNS + ("RANDITER", "Z", "XCART", "YCART", "ZCART")
 
 
 def resolve_raw_path(raw_dir, zone, out_tag=None):
@@ -66,45 +72,142 @@ def resolve_probability_path(release_dir, zone, out_tag=None):
     return locate_probability_file(release_dir, zone, out_tag)
 
 
-def load_raw_dataframe(raw_path):
+def table_row_count(path: str, hdu: int = 1) -> int:
     """
-    Load a raw FITS catalogue into a pandas DataFrame.
+    Return the number of rows stored in the requested HDU of a FITS table.
+    """
+    with fits.open(path, memmap=True) as hdul:
+        return int(hdul[hdu].header.get("NAXIS2", 0))
 
-    The function annotates the frame with convenience columns:
 
-    * ``ISDATA``: Bool flag indicating real data rows (``RANDITER == -1``)
-    * ``BASE`` / ``BASE_CORE``: Normalized tracer labels
+def _stable_int_from_path(path: str) -> int:
+    """
+    Compute a stable 32-bit integer hash from a filesystem path.
+    """
+    digest = hashlib.blake2b(os.fsencode(os.path.abspath(path)), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False) & 0xFFFFFFFF
+
+
+def _uniq_seq(values: Iterable[str]) -> Tuple[str, ...]:
+    seen = set()
+    ordered = []
+    for value in values:
+        if value in seen:
+            continue
+        ordered.append(value)
+        seen.add(value)
+    return tuple(ordered)
+
+
+def load_raw_dataframe(raw_path,
+                       columns: Optional[Iterable[str]] = None,
+                       downcast: bool = True,
+                       row_limit: Optional[int] = None,
+                       randomize: bool = False,
+                       seed: Optional[int] = None):
+    """
+    Load a raw FITS catalogue into a pandas DataFrame while minimising memory usage.
+
+    The loader keeps only a small, plot-oriented column set by default. Additional
+    column names can be supplied via ``columns``; ``"all"`` or ``"*"`` forces the
+    full table to be materialised. Regardless of the selection, convenience columns
+    are added:
+
+    * ``ISDATA``: Bool flag indicating real data rows (``RANDITER == -1`` when available)
+    * ``BASE`` / ``BASE_CORE``: Normalised tracer labels derived from ``TRACERTYPE``
     * ``TARGETID`` cast to ``int64``
 
     Args:
         raw_path (str): Path to the raw FITS file.
+        columns (Iterable[str] | str | None): Additional columns to keep. ``None`` keeps
+            the default minimalist set, ``"all"``/``"*"`` keeps every column.
+        downcast (bool): If True, attempt to downcast float/int columns to reduce RAM.
     Returns:
-        pd.DataFrame: DataFrame containing the raw catalogue.
+        pd.DataFrame: DataFrame containing the requested columns.
     Raises:
-        ValueError: If required columns are missing.
+        ValueError: If mandatory columns such as ``TRACERTYPE`` or ``TARGETID`` are missing.
     """
-    table = Table.read(raw_path, memmap=True)
+    include = None
+    if isinstance(columns, str):
+        if columns.lower() in ("all", "*"):
+            include = None
+        else:
+            include = _uniq_seq(list(_MINIMUM_RAW_COLUMNS) + [columns])
+    elif columns:
+        include = _uniq_seq(list(_MINIMUM_RAW_COLUMNS) + list(columns))
+    else:
+        include = _DEFAULT_RAW_COLUMNS
+
+    with fits.open(raw_path, memmap=True) as hdul:
+        if len(hdul) < 2:
+            raise ValueError(f"Raw file {raw_path} does not contain HDU 1")
+        hdu = hdul[1]
+        available = list(hdu.columns.names)
+
+        if include is not None:
+            missing = [name for name in include if name not in available]
+            if missing:
+                raise ValueError(f"Raw file {raw_path} is missing columns: {missing}")
+
+        total_rows = int(hdu.header.get("NAXIS2", 0))
+        row_slice = None
+        if row_limit is not None and row_limit > 0 and total_rows > 0:
+            limit = min(int(row_limit), total_rows)
+            if limit < total_rows:
+                if randomize:
+                    rng_seed = (_stable_int_from_path(raw_path) + (seed or 0)) & 0xFFFFFFFF
+                    rng = np.random.default_rng(rng_seed)
+                    max_start = total_rows - limit
+                    start = int(rng.integers(0, max_start + 1))
+                else:
+                    start = 0
+                row_slice = slice(start, start + limit)
+
+        data = hdu.data
+        if data is None:
+            raise ValueError(f"Raw file {raw_path} has no table data")
+        if row_slice is not None:
+            data = data[row_slice]
+
+        table = Table(data, copy=False)
+        if include is not None:
+            table = table[list(include)]
+
     frame = table.to_pandas()
 
-    if 'RANDITER' in frame.columns:
-        frame['ISDATA'] = frame['RANDITER'].to_numpy() == -1
-    else:
-        frame['ISDATA'] = True
-
-    if 'TRACERTYPE' in frame.columns:
-        frame['TRACERTYPE'] = frame['TRACERTYPE'].apply(_normalize_tracertype)
-        frame['BASE'] = frame['TRACERTYPE']
-        frame['BASE_CORE'] = frame['BASE'].str.rsplit('_', n=1).str[0]
-    else:
+    if 'TRACERTYPE' not in frame.columns:
         raise ValueError(f"Raw file {raw_path} is missing column: TRACERTYPE")
 
-    if 'TARGETID' in frame.columns:
-        frame['TARGETID'] = frame['TARGETID'].astype(np.int64)
+    frame['TRACERTYPE'] = frame['TRACERTYPE'].apply(_normalize_tracertype)
+    frame['TRACERTYPE'] = pd.Categorical(frame['TRACERTYPE'])
+    frame['BASE'] = frame['TRACERTYPE'].astype(str).str.replace(r'_(DATA|RAND)$', '', regex=True)
+    frame['BASE'] = pd.Categorical(frame['BASE'])
+    frame['BASE_CORE'] = frame['BASE'].astype(str).str.rsplit('_', n=1).str[0]
+    frame['BASE_CORE'] = pd.Categorical(frame['BASE_CORE'])
 
-    required = ('RA', 'DEC', 'Z', 'TARGETID')
-    missing = [col for col in required if col not in frame.columns]
-    if missing:
-        raise ValueError(f"Raw file {raw_path} is missing columns: {missing}")
+    if 'TARGETID' in frame.columns:
+        frame['TARGETID'] = frame['TARGETID'].astype(np.int64, copy=False)
+    else:
+        raise ValueError(f"Raw file {raw_path} is missing column: TARGETID")
+
+    if 'RANDITER' in frame.columns:
+        frame['RANDITER'] = pd.to_numeric(frame['RANDITER'], downcast='integer')
+        frame['ISDATA'] = frame['RANDITER'].to_numpy() == -1
+    elif 'ISDATA' in frame.columns:
+        frame['ISDATA'] = frame['ISDATA'].astype(bool, copy=False)
+    else:
+        frame['ISDATA'] = frame['TRACERTYPE'].astype(str).str.endswith('_DATA')
+
+    frame['ISDATA'] = frame['ISDATA'].astype(bool, copy=False)
+
+    if downcast:
+        float_cols = frame.select_dtypes(include=['float', 'float64']).columns
+        for col in float_cols:
+            frame[col] = pd.to_numeric(frame[col], downcast='float')
+        int_cols = [col for col in frame.select_dtypes(include=['int', 'int64', 'int32']).columns
+                    if col != 'TARGETID']
+        for col in int_cols:
+            frame[col] = pd.to_numeric(frame[col], downcast='integer')
 
     return frame
 

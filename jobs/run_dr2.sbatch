@@ -5,12 +5,12 @@
 #SBATCH -C cpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=10:00:00
+#SBATCH --time=12:00:00
 #SBATCH --mem=0
 #SBATCH --array=0%1
 #SBATCH --hint=nomultithread
-#SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr2_res/logs/zone_%A_%a.out
-#SBATCH --error=/pscratch/sd/v/vtorresg/cosmic-web/dr2_res/logs/zone_%A_%a.err
+#SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr2/logs/zone_%A_%a.out
+#SBATCH --error=/pscratch/sd/v/vtorresg/cosmic-web/dr2/logs/zone_%A_%a.err
 #SBATCH --chdir=/global/homes/v/vtorresg/ASTRA-DESI
 
 set -euo pipefail
@@ -32,18 +32,42 @@ PROJECT_ROOT=$PWD
 MAIN_SCRIPT="${PROJECT_ROOT}/src/main.py"
 
 CLUSTER_DIR="/global/cfs/cdirs/desi/survey/catalogs/DA2/LSS/loa-v1/LSScats/v2/PIP/"
-SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr2_res"
+SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr2"
 
 RAW_OUT="${SCRATCH_ROOT}/raw"
 CLASS_ROOT="${SCRATCH_ROOT}"
 GROUPS_OUT="${SCRATCH_ROOT}/groups"
 PLOTS_OUT="${SCRATCH_ROOT}/figs"
 LOGDIR="${SCRATCH_ROOT}/logs"
+RAW_SPILL="${SCRATCH_ROOT}/raw_spill"
+PAIR_SPILL="${SCRATCH_ROOT}/pair_spill"
 
-mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}"
+export ASTRA_CLASS_SPLIT_ITER=1
+export ASTRA_CLASS_SKIP_COMBINED=1
+export ASTRA_PROB_SPLIT_ITER=1
+export ASTRA_PROB_SKIP_COMBINED=1
+
+
+export ASTRA_RAW_SPILL_DIR="${RAW_SPILL}"
+export ASTRA_PAIR_SPILL_DIR="${PAIR_SPILL}"
+if [[ -n ${CHUNK_ROWS:-} ]]; then
+  export ASTRA_CHUNK_ROWS="${CHUNK_ROWS}"
+fi
+
+mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}" "${RAW_SPILL}" "${PAIR_SPILL}"
 
 ZLABELS=("NGC")
 TRACERS_BY_ZONE=("QSO")
+
+if [[ -n ${REUSE_PAIR_STORE:-} ]]; then
+  echo "[sbatch] reuse pair store -> ${REUSE_PAIR_STORE}"
+fi
+if [[ -n ${REUSE_CLASS_STORE:-} ]]; then
+  echo "[sbatch] reuse class store -> ${REUSE_CLASS_STORE}"
+fi
+if [[ -n ${CHUNK_ROWS:-} ]]; then
+  echo "[sbatch] chunk rows override -> ${CHUNK_ROWS}"
+fi
 
 if (( SLURM_ARRAY_TASK_ID >= ${#ZLABELS[@]} )); then
   echo "error: SLURM_ARRAY_TASK_ID ${SLURM_ARRAY_TASK_ID} exceeds ZLABELS" >&2
@@ -61,6 +85,18 @@ fi
 TRACE_ARGS=()
 if [[ -n ${TRACER_LABEL} ]]; then
   TRACE_ARGS+=(--tracers ${TRACER_LABEL} --out-tag "${TRACER_LABEL// /_}")
+fi
+
+if [[ -n ${REUSE_PAIR_STORE:-} ]]; then
+  TRACE_ARGS+=(--reuse-pairs-store "${REUSE_PAIR_STORE}")
+fi
+
+if [[ -n ${REUSE_CLASS_STORE:-} ]]; then
+  TRACE_ARGS+=(--reuse-class-store "${REUSE_CLASS_STORE}")
+fi
+
+if [[ -n ${CHUNK_ROWS:-} ]]; then
+  TRACE_ARGS+=(--chunk-rows "${CHUNK_ROWS}")
 fi
 
 TRACER_SAFE=${TRACER_LABEL// /_}
@@ -83,3 +119,5 @@ srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
        --webtype filament \
        --source data \
        --n-random 100 \
+       --spill-dir "${PAIR_SPILL}" \
+       --progress
