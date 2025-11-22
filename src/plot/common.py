@@ -1,3 +1,4 @@
+import glob
 import hashlib
 import os
 from typing import Iterable, Optional, Sequence, Tuple
@@ -69,7 +70,28 @@ def resolve_probability_path(release_dir, zone, out_tag=None):
     Returns:
         str: Path to the probability FITS file.
     """
-    return locate_probability_file(release_dir, zone, out_tag)
+    try:
+        return locate_probability_file(release_dir, zone, out_tag)
+    except FileNotFoundError:
+        pass
+
+    base = os.path.join(release_dir, 'probabilities')
+    zone_str = zone_tag(zone)
+    tsuf = safe_tag(out_tag)
+    candidates = [
+        os.path.join(base, f"zone_{zone_str}{tsuf}_probability.fits.gz"),
+        os.path.join(base, f"zone_{zone_str}{tsuf}_probability.fits"),
+    ]
+
+    if not tsuf:
+        pattern = os.path.join(base, f"zone_{zone_str}_probability*.fits*")
+        candidates.extend(sorted(glob.glob(pattern)))
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    raise FileNotFoundError(candidates[0])
 
 
 def table_row_count(path: str, hdu: int = 1) -> int:
