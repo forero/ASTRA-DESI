@@ -1,0 +1,3 @@
+'''
+Void finder pipeline package
+'''
