@@ -1,7 +1,6 @@
 import os, json, tarfile
 import argparse, time
 from pathlib import Path
-from typing import List, Dict, Optional
 
 from zenodo_upl import (ensure_pscratch_copy, push_to_zenodo, slugify)
 
@@ -50,7 +49,7 @@ def parse_args():
     return args
 
 
-def _make_folder_tarballs(staging_dir: str) -> List[str]:
+def _make_folder_tarballs(staging_dir):
     """
     Creates tar.gz files for each subdirectory in the staging directory.
 
@@ -60,7 +59,7 @@ def _make_folder_tarballs(staging_dir: str) -> List[str]:
         List[str]: A list of paths to the created .tar.gz files.
     """
     s = Path(staging_dir)
-    tar_paths: List[str] = []
+    tar_paths = []
     subdirs = [p for p in s.iterdir() if p.is_dir()]
     if not subdirs:
         tar_path = s / "dataset.tar.gz"
@@ -80,13 +79,13 @@ def _make_folder_tarballs(staging_dir: str) -> List[str]:
     return tar_paths
 
 
-def _load_json_or_string(value: Optional[str]):
+def _load_json_or_string(value):
     """
     Load JSON from a string or a file path.
     If the value is None or empty, return None.
     If the value is a valid file path, read and parse the JSON from the file.
     Otherwise, parse the value as a JSON string.
-    
+
     Args:
         value (Optional[str]): The JSON string or file path.
     Returns:
@@ -100,10 +99,10 @@ def _load_json_or_string(value: Optional[str]):
     return json.loads(value)
 
 
-def _get_token(env_name: str, token_file: Optional[str]) -> str:
+def _get_token(env_name, token_file):
     """
     Retrieve the Zenodo token from an environment variable or a file.
-    
+
     Args:
         env_name (str): The name of the environment variable to check.
         token_file (Optional[str]): The path to a file containing the token.
@@ -121,10 +120,10 @@ def _get_token(env_name: str, token_file: Optional[str]) -> str:
     raise SystemExit(f'ERROR: not a valid token. Define venv {env_name} or --token-file PATH.')
 
 
-def _resolve_description(text: Optional[str], path: Optional[str]) -> str:
+def _resolve_description(text, path):
     """
     Resolve the description text from a string or a file path.
-    
+
     Args:
         text (Optional[str]): The description text.
         path (Optional[str]): The path to a file containing the description.
@@ -143,10 +142,10 @@ def _resolve_description(text: Optional[str], path: Optional[str]) -> str:
     raise SystemExit('ERROR: description text not provided. Use --description or --description-file.')
 
 
-def _collect_release_paths(release_root: str, include_figs: bool) -> List[str]:
+def _collect_release_paths(release_root, include_figs):
     """
     Collect the paths to the release subdirectories to include in the upload.
-    
+
     Args:
         release_root (str): The root directory of the release.
         include_figs (bool): Whether to include the 'figs' subdirectory if it exists.
@@ -159,7 +158,7 @@ def _collect_release_paths(release_root: str, include_figs: bool) -> List[str]:
     if not root.exists():
         raise FileNotFoundError(f'Release root not found: {root}')
 
-    selected: List[str] = []
+    selected = []
     missing = []
     for sub in DEFAULT_RELEASE_SUBDIRS:
         candidate = root / sub
@@ -228,7 +227,7 @@ def main():
         print('---- SKIPPED upload: omitted due to --dry-run.')
         return
 
-    creators: List[Dict] = _load_json_or_string(args.creators_json) or []
+    creators = _load_json_or_string(args.creators_json) or []
     related = _load_json_or_string(args.related_identifiers_json)
 
     dep = push_to_zenodo(token=token, base_url=base_url, files_on_disk=tar_paths,

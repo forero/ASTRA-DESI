@@ -1,7 +1,4 @@
-import json
-import os
-from typing import Dict, List
-
+import json, os
 import numpy as np
 from argparse import Namespace
 from astropy.table import Table, vstack
@@ -168,8 +165,8 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
     Returns:
         The combined table written to disk.
     """
-    parts: List[Table] = []
-    skipped: List[str] = []
+    parts = []
+    skipped = []
     for tr in tracers:
         try:
             rt = process_real_region(real_tables, tr, region, cuts, zone_value=zone_value)
@@ -209,7 +206,7 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
     return tbl
 
 
-def create_config(args: Namespace) -> ReleaseConfig:
+def create_config(args):
     """
     Create the release configuration from command line arguments.
 

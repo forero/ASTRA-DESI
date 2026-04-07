@@ -88,10 +88,8 @@ def resolve_raw_path(raw_dir, zone):
 
 
 def resolve_prob_path(prob_dir: str, zone: str) -> str:
-    candidates = [
-        os.path.join(prob_dir, f'zone_{zone}_probability.fits.gz'),
-        os.path.join(prob_dir, f'zone_{zone}_probability.fits'),
-    ]
+    candidates = [os.path.join(prob_dir, f'zone_{zone}_probability.fits.gz'),
+                  os.path.join(prob_dir, f'zone_{zone}_probability.fits')]
     for path in candidates:
         if os.path.exists(path):
             return path

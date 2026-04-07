@@ -10,11 +10,11 @@ for tr in tracers:
     a = Table.read(f"{base}/{tr}_S_clustering.dat.fits")
     b = Table.read(f"{base}/{tr}_N_clustering.dat.fits")
     t = vstack([a,b])
-     
+
     m = ((t["RA"]>ngc1["RA_min"]) & (t["RA"]<ngc1["RA_max"]) &
          (t["DEC"]>ngc1["DEC_min"]) & (t["DEC"]<ngc1["DEC_max"]))
     print(tr, "->", int(m.sum()), "items in that RA/DEC/Z for zone ngc1")
-    
+
     m = ((t["RA"]>ngc2["RA_min"]) & (t["RA"]<ngc2["RA_max"]) &
          (t["DEC"]>ngc2["DEC_min"]) & (t["DEC"]<ngc2["DEC_max"]))
     print(tr, "->", int(m.sum()), "items in that RA/DEC/Z for zone ngc2")

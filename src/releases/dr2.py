@@ -1,9 +1,5 @@
-import gc
-import os
-from typing import Dict, List
-
+import gc, os
 import numpy as np
-from argparse import Namespace
 from astropy.table import Column, Table
 
 from desiproc.implement_astra import TempTableStore, register_tracer_mapping
@@ -13,7 +9,7 @@ from desiproc.paths import safe_tag, zone_tag
 from .base import ReleaseConfig
 
 
-TRACERS: List[str] = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
+TRACERS = ['BGS_ANY', 'ELG', 'LRG', 'QSO']
 N_RANDOM_FILES = 18
 REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
 RANDOM_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
@@ -80,10 +76,10 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
                 tbl_cached.add_column(Column(np.full(len(tbl_cached), int(zone_value), dtype=np.int32), name='ZONE'))
             return tbl_cached
 
-    skipped: List[str] = []
+    skipped = []
 
     raw_store = None
-    store_cols: List[str] = []
+    store_cols = []
     total_rows = 0
     tmp_base = (os.environ.get('ASTRA_RAW_SPILL_DIR')
                 or os.environ.get('ASTRA_TMPDIR')
@@ -192,7 +188,7 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
     return tbl
 
 
-def create_config(args: Namespace) -> ReleaseConfig:
+def create_config(args):
     """
     Create the release configuration from command line arguments.
 

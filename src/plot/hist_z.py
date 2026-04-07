@@ -1,5 +1,4 @@
-import os
-import argparse
+import os, argparse
 from pathlib import Path
 
 import numpy as np

@@ -1,15 +1,11 @@
-import glob
-import hashlib
-import os
-from typing import Iterable, Optional, Sequence, Tuple
-
+import glob, hashlib, os
 import numpy as np
 import pandas as pd
 from astropy.table import Table
 from astropy.io import fits
 
-from desiproc.paths import ( locate_classification_file, locate_probability_file,
-                            safe_tag, zone_tag,)
+from desiproc.paths import (locate_classification_file, locate_probability_file,
+                            safe_tag, zone_tag)
 
 __all__ = ["resolve_raw_path",
            "resolve_class_path",
@@ -48,7 +44,7 @@ def resolve_raw_path(raw_dir, zone, out_tag=None):
 def resolve_class_path(release_dir, zone, out_tag=None):
     """
     Return the path to the classification FITS file for ``zone``.
-    
+
     Args:
         release_dir (str): Directory containing classification files.
         zone (object): Zone identifier.
@@ -62,7 +58,7 @@ def resolve_class_path(release_dir, zone, out_tag=None):
 def resolve_probability_path(release_dir, zone, out_tag=None):
     """
     Return the path to the probability FITS file for ``zone``.
-    
+
     Args:
         release_dir (str): Directory containing probability files.
         zone (object): Zone identifier.
@@ -78,10 +74,8 @@ def resolve_probability_path(release_dir, zone, out_tag=None):
     base = os.path.join(release_dir, 'probabilities')
     zone_str = zone_tag(zone)
     tsuf = safe_tag(out_tag)
-    candidates = [
-        os.path.join(base, f"zone_{zone_str}{tsuf}_probability.fits.gz"),
-        os.path.join(base, f"zone_{zone_str}{tsuf}_probability.fits"),
-    ]
+    candidates = [os.path.join(base, f"zone_{zone_str}{tsuf}_probability.fits.gz"),
+                  os.path.join(base, f"zone_{zone_str}{tsuf}_probability.fits")]
 
     if not tsuf:
         pattern = os.path.join(base, f"zone_{zone_str}_probability*.fits*")
@@ -94,7 +88,7 @@ def resolve_probability_path(release_dir, zone, out_tag=None):
     raise FileNotFoundError(candidates[0])
 
 
-def table_row_count(path: str, hdu: int = 1) -> int:
+def table_row_count(path, hdu=1):
     """
     Return the number of rows stored in the requested HDU of a FITS table.
     """
@@ -102,7 +96,7 @@ def table_row_count(path: str, hdu: int = 1) -> int:
         return int(hdul[hdu].header.get("NAXIS2", 0))
 
 
-def _stable_int_from_path(path: str) -> int:
+def _stable_int_from_path(path):
     """
     Compute a stable 32-bit integer hash from a filesystem path.
     """
@@ -110,7 +104,7 @@ def _stable_int_from_path(path: str) -> int:
     return int.from_bytes(digest, byteorder="little", signed=False) & 0xFFFFFFFF
 
 
-def _uniq_seq(values: Iterable[str]) -> Tuple[str, ...]:
+def _uniq_seq(values):
     seen = set()
     ordered = []
     for value in values:
@@ -121,12 +115,7 @@ def _uniq_seq(values: Iterable[str]) -> Tuple[str, ...]:
     return tuple(ordered)
 
 
-def load_raw_dataframe(raw_path,
-                       columns: Optional[Iterable[str]] = None,
-                       downcast: bool = True,
-                       row_limit: Optional[int] = None,
-                       randomize: bool = False,
-                       seed: Optional[int] = None):
+def load_raw_dataframe(raw_pat=None, downcast=True, row_limit=None, randomize=False, seed=None):
     """
     Load a raw FITS catalogue into a pandas DataFrame while minimising memory usage.
 
@@ -258,15 +247,16 @@ def load_probability_dataframe(prob_path, include_random=False):
             frame[column] = 0.0 if column != 'TARGETID' else frame.get('TARGETID', pd.Series(dtype=np.int64))
     frame['TARGETID'] = frame['TARGETID'].astype(np.int64, copy=False)
     if include_random:
-        cols = [c for c in ('TARGETID', 'TRACERTYPE', 'RANDITER', 'ISDATA', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT') if c in frame.columns]
+        cols = [c for c in ('TARGETID', 'TRACERTYPE', 'RANDITER', 'ISDATA', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT')
+                if c in frame.columns]
         return frame[cols]
     return frame[['TARGETID', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']]
 
 
-def _normalize_tracertype(value) -> str:
+def _normalize_tracertype(value):
     """
     Normalize tracer type strings to a standard format.
-    
+
     Args:
         value (str | bytes | bytearray): Input tracer type.
     Returns:

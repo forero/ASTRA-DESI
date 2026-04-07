@@ -23,10 +23,10 @@ def r_from_counts(ndata, nrand):
 def classify_from_r(r):
     out = np.full(r.shape, -1, dtype=np.int8)
 
-    out[np.isfinite(r) & (r >= -1.0) & (r <= -0.25)] = 0   # Void
-    out[np.isfinite(r) & (r > -0.25) & (r <= 0.25)] = 1    # Sheet
-    out[np.isfinite(r) & (r > 0.25) & (r <= 0.65)] = 2     # Filament
-    out[np.isfinite(r) & (r > 0.65) & (r <= 1.0)] = 3      # Knot
+    out[np.isfinite(r) & (r >= -1.0) & (r <= -0.25)] = 0 # Void
+    out[np.isfinite(r) & (r > -0.25) & (r <= 0.25)] = 1 # Sheet
+    out[np.isfinite(r) & (r > 0.25) & (r <= 0.65)] = 2 # Filament
+    out[np.isfinite(r) & (r > 0.65) & (r <= 1.0)] = 3 # Knot
 
     return out
 

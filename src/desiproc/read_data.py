@@ -1,6 +1,4 @@
-import os
-import random
-import warnings
+import os, random, warnings
 
 import astropy.units as u
 import numpy as np
@@ -589,15 +587,13 @@ def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table
         float_dtype = np.float32 if downcast else np.float64
         total_out = real_count * n_random
 
-        output_numeric = {
-            'TARGETID': np.empty(total_out, dtype=np.int64),
-            'RA': np.empty(total_out, dtype=float_dtype),
-            'DEC': np.empty(total_out, dtype=float_dtype),
-            'Z': np.empty(total_out, dtype=float_dtype),
-            'XCART': np.empty(total_out, dtype=float_dtype),
-            'YCART': np.empty(total_out, dtype=float_dtype),
-            'ZCART': np.empty(total_out, dtype=float_dtype),
-        }
+        output_numeric = {'TARGETID': np.empty(total_out, dtype=np.int64),
+                          'RA': np.empty(total_out, dtype=float_dtype),
+                          'DEC': np.empty(total_out, dtype=float_dtype),
+                          'Z': np.empty(total_out, dtype=float_dtype),
+                          'XCART': np.empty(total_out, dtype=float_dtype),
+                          'YCART': np.empty(total_out, dtype=float_dtype),
+                          'ZCART': np.empty(total_out, dtype=float_dtype),}
 
         output_extra = {}
         for col in extra_columns:

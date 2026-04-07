@@ -9,7 +9,7 @@ import requests
 def slugify(text: str) -> str:
     """
     Simplified slugify: lowercase, spaces to '-', remove special chars.
-    
+
     Args:
         text (str): The input text to slugify.
     Returns:
@@ -25,7 +25,7 @@ def slugify(text: str) -> str:
 def timestamp_compact() -> str:
     """
     Returns a compact timestamp string: YYYYMMDDTHHMM
-   
+
     Returns:
         str: The compact timestamp.
     """
@@ -35,7 +35,7 @@ def make_unique_dir(parent: pathlib.Path, base_name: str) -> pathlib.Path:
     """
     Create a unique directory under 'parent' with the given 'base_name'. If a directory
     with 'base_name' exists, appends '_copyN' suffix to make it unique.
-    
+
     Args:
         parent (pathlib.Path): The parent directory where to create the new directory.
         base_name (str): The desired base name for the new directory.
@@ -60,7 +60,7 @@ def make_unique_dir(parent: pathlib.Path, base_name: str) -> pathlib.Path:
 def iter_files_recursive(root: pathlib.Path) -> List[pathlib.Path]:
     """
     Recursively list all files under the given root directory.
-    
+
     Args:
         root (pathlib.Path): The root directory to search.
     Returns:
@@ -76,7 +76,7 @@ def iter_files_recursive(root: pathlib.Path) -> List[pathlib.Path]:
 def safe_copy2(src: pathlib.Path, dst: pathlib.Path) -> None:
     """
     Copy a file from src to dst, creating parent directories if needed.
-    
+
     Args:
         src (pathlib.Path): Source file path.
         dst (pathlib.Path): Destination file path.
@@ -88,7 +88,7 @@ def safe_copy2(src: pathlib.Path, dst: pathlib.Path) -> None:
 def safe_copytree(src_dir: pathlib.Path, dst_dir: pathlib.Path) -> None:
     """
     Copy a directory tree from src_dir to dst_dir. If dst_dir exists, appends _copyN to make it unique.
-    
+
     Args:
         src_dir (pathlib.Path): Source directory path.
         dst_dir (pathlib.Path): Destination directory path.
@@ -111,7 +111,7 @@ def ensure_pscratch_copy(source_paths: List[str], pscratch_base_dir: str, stagin
     """
     Copy the given source paths (files or directories) into a unique staging directory
     under the specified pscratch base directory. Optionally keep the directory tree structure.
-    
+
     Args:
         source_paths (List[str]): List of file or directory paths to copy.
         pscratch_base_dir (str): The base directory under which to create the staging area.
@@ -256,7 +256,7 @@ class ZenodoUploader:
     def create_deposition(self, meta: DepositionMeta) -> Dict[str, Any]:
         """
         Create a new deposition with the given metadata.
-        
+
         Args:
             meta (DepositionMeta): The metadata for the deposition.
         Returns:
@@ -270,7 +270,7 @@ class ZenodoUploader:
     def create_new_version(self, deposition_id: int) -> Dict[str, Any]:
         """
         Create a new draft version for an existing deposition.
-        
+
         Args:
             deposition_id (int): The ID of the existing deposition.
         Returns:
@@ -290,7 +290,7 @@ class ZenodoUploader:
     def update_deposition_metadata(self, deposition_id: int, meta: Union[DepositionMeta, Dict[str, Any]]) -> Dict[str, Any]:
         """
         Update metadata for an existing deposition draft.
-        
+
         Args:
             deposition_id (int): The ID of the deposition.
             meta (Union[DepositionMeta, Dict[str, Any]]): The new metadata to set.
@@ -306,7 +306,7 @@ class ZenodoUploader:
     def delete_file(self, deposition_id: int, file_id: int) -> None:
         """
         Remove a file from a deposition draft.
-        
+
         Args:
             deposition_id (int): The ID of the deposition.
             file_id (int): The ID of the file to delete.
@@ -320,7 +320,7 @@ class ZenodoUploader:
     def clear_deposition_files(self, deposition_id: int, files: Optional[List[Dict[str, Any]]]) -> None:
         """
         Delete all files listed from a deposition draft.
-        
+
         Args:
             deposition_id (int): The ID of the deposition.
             files (Optional[List[Dict[str, Any]]]): List of file info dicts from Zenodo.
@@ -336,7 +336,7 @@ class ZenodoUploader:
     def get_deposition(self, deposition_id: int) -> Dict[str, Any]:
         """
         Retrieve details of an existing deposition by its ID.
-        
+
         Args:
             deposition_id (int): The ID of the deposition.
         Returns:
@@ -350,7 +350,7 @@ class ZenodoUploader:
     def upload_file_via_bucket(self, bucket_url: str, filepath: str, dest_name: Optional[str] = None):
         """
         Upload a file (e.g., .tar.gz created from staging folders) to the deposition's bucket.
-        
+
         Args:
             bucket_url (str): The bucket URL from the deposition.
             filepath (str): The local file path to upload.
@@ -369,7 +369,7 @@ class ZenodoUploader:
     def publish(self, deposition_id: int) -> Dict[str, Any]:
         """
         Publish the deposition with the given ID.
-        
+
         Args:
             deposition_id (int): The ID of the deposition to publish.
         Returns:

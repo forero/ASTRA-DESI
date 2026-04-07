@@ -27,7 +27,7 @@ ENV = dict(os.environ)
 ENV.update({'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1',
             'MKL_NUM_THREADS': '1', 'NUMEXPR_NUM_THREADS': '1',})
 
-def run_zone(zone: int):
+def run_zone(zone):
     cmd = common_args + (['--zone', str(zone)] if RELEASE.lower()=='edr' else ['--zones', str(zone)])
     proc = subprocess.run(cmd, check=True, env=ENV,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
