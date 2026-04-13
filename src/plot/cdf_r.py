@@ -145,10 +145,10 @@ def build_zone_mean_cdfs(files_for_zone, xgrid, chunk_rows=500_000,
 
 def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
                                  xbins=400, zones=None, iter_min=None, iter_max=None):
-    colors = {'BGS': 'crimson',
+    colors = {'BGS': 'deepskyblue',
               'LRG': 'green',
               'ELG': 'darkorange',
-              'QSO': 'deepskyblue'}
+              'QSO': 'crimson'}
 
     tracers = ['BGS', 'ELG', 'LRG', 'QSO']
     xgrid = np.linspace(-1.0, 1.0, xbins)
@@ -213,8 +213,9 @@ def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
 
     ax.set_xlim(-1.0, 1.0)
     ax.set_ylim(0.0, 1.0)
-    ax.set_xlabel(r'$r$')
-    ax.set_ylabel(r'CDF')
+    ax.set_xlabel(r'$r$', fontsize=14)
+    ax.set_ylabel(r'CDF', fontsize=14)
+    ax.tick_params(axis='both', labelsize=13)
     # ax.set_title(r'CDF of $r$', pad=10)
 
     leg = ax.legend(loc='upper left', frameon=True)
