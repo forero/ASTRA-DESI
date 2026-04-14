@@ -287,8 +287,10 @@ def plot_main_sequence_hexbin(df_bgs, out_path, cmap, dpi):
     ax.plot(xx, y_bcgv, ls=':', lw=0.9, color='darkgreen')
     ax.plot(xx, y_gvrs, ls=':', lw=0.9, color='firebrick')
 
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(ymin, ymax)
+    # ax.set_xlim(xmin, xmax)
+    # ax.set_ylim(ymin, ymax)
+    ax.set_xlim(9.3, 11.7)
+    ax.set_ylim(-3.0, 3.0)
 
     ax.plot([0.04, 0.10], [0.93, 0.93], transform=ax.transAxes, ls='--', lw=1.2,
             color='black', clip_on=False)
@@ -301,9 +303,12 @@ def plot_main_sequence_hexbin(df_bgs, out_path, cmap, dpi):
     ax.text(0.96, 0.05, 'Red Sequence', transform=ax.transAxes, ha='right', va='bottom',
             fontsize=15,
             color='firebrick', fontweight='bold')
-    ax.text(xmin + 0.20 * (xmax - xmin), ymin + 0.20 * (ymax - ymin), 'Green Valley',
+    x0, x1 = ax.get_xlim()
+    x_text = x0 + 0.02 * (x1 - x0)
+    y_text = m * x_text + 0.5 * (b_bcgv + b_gvrs)
+    ax.text(x_text, y_text, 'Green Valley',
             rotation=angle, rotation_mode='anchor', transform_rotates_text=True,
-            fontsize=15, color='darkgreen')
+            fontsize=15, color='darkgreen', ha='left', va='center')
 
     ax.set_ylabel(r'$\log_{10}(\mathrm{SFR}/M_\odot\,\mathrm{yr}^{-1})$', fontsize=22, labelpad=10)
     ax.set_xlabel(r'$\log_{10}(M_*/M_\odot)$', fontsize=22, labelpad=10)

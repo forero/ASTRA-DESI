@@ -430,15 +430,17 @@ def plot_reference_mass_ssfr(env_data_map, out_path, dpi, low_range=(0.02, 0.1),
                                                'alpha_low': 0.18, 'alpha_high': 0.08})
             env_df = df[df['ENV'] == env].copy()
 
+            plot_low = (label == 'EDR')
             low = env_df[(env_df['Z'] > low_range[0]) & (env_df['Z'] < low_range[1])]
             high = env_df[(env_df['Z'] > high_range[0]) & (env_df['Z'] < high_range[1])]
 
-            xc, ym, elo, ehi = binned_median_zone_scatter(low['LOGM'], low['LOGSSFR'], low['ZONE'],
+            if plot_low:
+                xc, ym, elo, ehi = binned_median_zone_scatter(low['LOGM'], low['LOGSSFR'], low['ZONE'],
                                                           bins=mass_bins, min_n_bin=min_bin_count,
                                                           min_n_zone=min_zone_count)
-            if xc.size:
-                ax.fill_between(xc, ym - elo, ym + ehi, color=style['color'], alpha=style['alpha_low'])
-                ax.plot(xc, ym, marker=style['marker_low'], color=style['color'], lw=1.8, ms=6)
+                if xc.size:
+                    ax.fill_between(xc, ym - elo, ym + ehi, color=style['color'], alpha=style['alpha_low'])
+                    ax.plot(xc, ym, marker=style['marker_low'], color=style['color'], lw=1.8, ms=6)
 
             xc2, ym2, elo2, ehi2 = binned_median_zone_scatter(high['LOGM'], high['LOGSSFR'], high['ZONE'],
                                                                bins=mass_bins, min_n_bin=min_bin_count,
@@ -466,10 +468,11 @@ def plot_reference_mass_ssfr(env_data_map, out_path, dpi, low_range=(0.02, 0.1),
         if label not in env_data_map:
             continue
         style = DATASET_STYLES[label]
-        legend_handles.extend([Line2D([0], [0], color=style['color'], lw=1.8, marker=style['marker_low'], markersize=6,
-                                      label=rf'{label}: ${low_range[0]:.2f}<z<{low_range[1]:.2f}$'),
-                               Line2D([0], [0], color=style['color'], lw=1.5, marker=style['marker_high'], markersize=5,
-                                      label=rf'{label}: ${high_range[0]:.2f}<z<{high_range[1]:.2f}$')])
+        if label == 'EDR':
+            legend_handles.append(Line2D([0], [0], color=style['color'], lw=1.8, marker=style['marker_low'], markersize=6,
+                                          label=rf'{label}: ${low_range[0]:.2f}<z<{low_range[1]:.2f}$'))
+        legend_handles.append(Line2D([0], [0], color=style['color'], lw=1.5, marker=style['marker_high'], markersize=5,
+                                      label=rf'{label}: ${high_range[0]:.2f}<z<{high_range[1]:.2f}$'))
 
     fig.legend(handles=legend_handles, loc='upper center', ncol=2, frameon=False, bbox_to_anchor=(0.5, 1.02))
     fig.tight_layout(rect=[0, 0, 1, 0.94])
