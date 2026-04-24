@@ -1,8 +1,4 @@
-import argparse
-import gzip
-import os
-import shutil
-import sys
+import argparse, gzip, os, shutil, sys
 import time as t
 from pathlib import Path
 
@@ -69,7 +65,7 @@ _GROUP_FITS_COLUMNS = (('TRACERTYPE', '32A'),
 def _group_chunk_rows():
     """
     Get the number of rows per chunk for group output.
-    
+
     Returns:
         int: Number of rows per chunk.
     """
@@ -82,7 +78,7 @@ def _group_chunk_rows():
 def _group_spill_dir():
     """
     Get the temporary spill directory for group processing.
-    
+
     Returns:
         str or None: Path to the spill directory, or None if not set.
     """
@@ -95,7 +91,7 @@ def _group_spill_dir():
 def _ascii_fill(value, size, dtype):
     """
     Create an array of fixed-size ASCII strings filled with the given value.
-    
+
     Args:
         value: Input value to encode.
         size (int): Number of elements in the output array.
@@ -299,7 +295,7 @@ def _locate_raw_path(raw_dir, zone, out_tag=None):
 def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     """
     Get file paths for a given zone number or label.
-    
+
     Args:
         raw_dir (str): Directory containing raw data files.
         class_dir (str): Directory containing classification data files.
@@ -333,7 +329,7 @@ def _get_probability_paths(raw_dir, class_dir, zone, out_tag=None):
 def _read_zone_tables(raw_path, class_path):
     """
     Read the raw and class tables for a given zone.
-    
+
     Args:
         raw_path (str): Path to the raw data file.
         class_path (str): Path to the classification data file.
@@ -450,7 +446,7 @@ def _split_blocks(tracer_labels, randiters):
 def length(data_raw, link_scale=None, **_unused):
     """
     Estimate a linking length from the analytic bounding-box volume.
-    
+
     Args:
         data_raw (Table): Table containing the raw data with 'XCART', 'YCART', 'ZCART' columns.
         link_scale (float, optional): Multiplicative FoF ``b`` parameter. Defaults to
@@ -496,7 +492,7 @@ def length(data_raw, link_scale=None, **_unused):
 def _dbscan_labels(coords, eps):
     """
     Applies DBSCAN (same as FoF) to the given coordinates to find clusters.
-    
+
     Args:
         coords (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
         eps (float): The maximum distance between two samples for one to be
@@ -511,7 +507,7 @@ def _dbscan_labels(coords, eps):
 def _grouped_sum(values, labels, ngrp):
     """
     Computes the sum of values grouped by labels.
-    
+
     Args:
         values (np.ndarray): Array of values to be summed.
         labels (np.ndarray): Array of labels corresponding to the values.
@@ -529,7 +525,7 @@ def _grouped_sum(values, labels, ngrp):
 def _group_inertia(coords, labels):
     """
     Computes the inertia of each group based on its 3D coordinates.
-    
+
     Args:
         coords (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
         labels (np.ndarray): Array of cluster labels for the coordinates.
@@ -581,7 +577,7 @@ def _build_block_rows(ttype, webtype, tids, randiters, isdata,
                       labels, labs, counts, xcm, ycm, zcm, A, B, C, link_len):
     """
     Create structured probability rows for a block.
-    
+
     Args:
         ttype (str): Tracer type.
         webtype (str): Web type.
@@ -625,7 +621,7 @@ def _build_block_rows(ttype, webtype, tids, randiters, isdata,
 def _write_chunked_fits(columns, total_rows, chunk_iter, output_path, meta=None):
     """
     Write a FITS binary table in chunks.
-    
+
     Args:
         columns (list of tuple): List of (name, format) for each column.
         total_rows (int): Total number of rows in the table.
@@ -659,7 +655,7 @@ def _write_chunked_fits(columns, total_rows, chunk_iter, output_path, meta=None)
 def _write_groups_fits(store, out_dir, zone, webtype, out_tag=None, release_tag=None):
     """
     Write the groups stored in `store` to a compressed FITS file.
-    
+
     Args:
         store (TempTableStore): Store containing group rows.
         out_dir (str): Output directory.
@@ -830,7 +826,7 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
 def _default_zones_for_release(release_tag):
     """
     Get default zones for a given release tag.
-    
+
     Args:
         release_tag (str): Release tag (e.g., 'dr1').
     Returns:
@@ -838,7 +834,7 @@ def _default_zones_for_release(release_tag):
     """
     rel = str(release_tag).lower()
     if rel.startswith('dr') or 'ngc' in rel:
-        return ['NGC1', 'NGC2']
+        return ['NGC', 'SGC']
     return [f"{i:02d}" for i in range(20)]
 
 
@@ -853,7 +849,7 @@ def parse_args():
     p.add_argument('--groups-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'groups'),
                    help='Output groups dir')
     p.add_argument('--zones', nargs='+', type=str, default=_default_zones_for_release(release_default),
-                   help='Zone numbers or labels (e.g., 00 01 ... or NGC1 NGC2)')
+                   help='Zone numbers or labels (e.g., 00 01 ... or NGC SGC)')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--source', choices=['data','rand','both'], default='data')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')

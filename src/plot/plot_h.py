@@ -83,10 +83,10 @@ def load_H_obj(path):
 
 
 def plot_joint(summary_dir, outdir, bins=35, xmin=0.0, xmax=0.56, zones=None):
-    colors = {'BGS': 'crimson',
+    colors = {'BGS': 'deepskyblue',
               'LRG': 'green',
               'ELG': 'darkorange',
-              'QSO': 'deepskyblue'}
+              'QSO': 'crimson'}
 
     tracers = ['BGS', 'LRG', 'ELG', 'QSO']
 
@@ -138,8 +138,9 @@ def plot_joint(summary_dir, outdir, bins=35, xmin=0.0, xmax=0.56, zones=None):
         raise RuntimeError()
 
     ax.set_xlim(xmin, xmax)
-    ax.set_xlabel(r'$H$')
-    ax.set_ylabel(r'PDF')
+    ax.set_xlabel(r'$H$', fontsize=13)
+    ax.set_ylabel(r'PDF', fontsize=13)
+    ax.tick_params(axis='both', labelsize=13)
 
     leg = ax.legend(# loc='lower center',
                     # bbox_to_anchor=(0.5, -0.12),

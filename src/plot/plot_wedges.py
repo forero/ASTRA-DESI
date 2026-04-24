@@ -34,7 +34,7 @@ CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
 ALL_WEBTYPES = tuple(CLASS_COLORS.keys())
 ORDERED_TRACERS = ['BGS', 'LRG', 'ELG', 'QSO']
 TRACER_ZLIMS = {'BGS': 0.45, 'LRG': 1.0, 'ELG': 1.4, 'QSO': 2.2}
-DR1_ZONE_CHOICES = ('NGC1', 'NGC2')
+DR1_ZONE_CHOICES = ('NGC', 'SGC')
 DR2_ZONE_CHOICES = ('NGC', 'SGC')
 
 SECTION_BG_COLOR = '#fdfaf3'
@@ -475,7 +475,7 @@ def resolve_zones(release, zone_arg):
     Resolve the list of zones to process based on the release and CLI input.
 
     EDR accepts integers 0..19 or the token ``all`` (default). DR1 expects an
-    explicit zone name (e.g., ``NGC1``). DR2 accepts ``NGC``, ``SGC``, or ``all``.
+    explicit zone name (e.g., ``NGC``). DR2 accepts ``NGC``, ``SGC``, or ``all``.
 
     Args:
         release (str): The release version (e.g., "EDR" or "DR1").
@@ -533,7 +533,7 @@ def resolve_zones(release, zone_arg):
         raise ValueError(f'Unsupported release "{release}" for plotting')
 
     if not tokens:
-        raise ValueError('DR1 release requires specifying --zone (e.g., NGC1).')
+        raise ValueError('DR1 release requires specifying --zone (e.g., NGC).')
 
     zones = []
     for tok in tokens:
@@ -545,7 +545,7 @@ def resolve_zones(release, zone_arg):
         zones.append(tok)
 
     if len(zones) != 1:
-        raise ValueError('DR1 plotting expects a single zone name (e.g., NGC1).')
+        raise ValueError('DR1 plotting expects a single zone name (e.g., NGC).')
     return zones
 
 
@@ -1362,11 +1362,11 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--release', choices=['EDR','DR1','DR2'], default='edr',
-                   help='Dataset release: EDR (zones 00..19), DR1 (NGC1/NGC2) or DR2 (NGC/SGC split)')
+                   help='Dataset release: EDR (zones 00..19), DR1 (NGC/SGC) or DR2 (NGC/SGC split)')
     p.add_argument('--base-dir', default='/pscratch/sd/v/vtorresg/cosmic-web', help='Root directory containing release subdirectories (e.g., edr/raw, edr/groups, edr/probabilities)')
     p.add_argument('--output', default=None, help='Output directory for figures (defaults to {base}/{release}/figs/{mode})')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames (e.g., tracer)')
-    p.add_argument('--zone', type=str, default='all', help='EDR: 0..19 or "all"; DR1: NGC1/NGC2; DR2: NGC/SGC or "all"')
+    p.add_argument('--zone', type=str, default='all', help='EDR: 0..19 or "all"; DR1: NGC/SGC; DR2: NGC/SGC or "all"')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot','all'], default='filament', help='Web classification to load ("all" when plotting types)')
     p.add_argument('--mode', choices=['groups','types','structure'], default='groups', help='Plot style: group colours, web-type colours, or monochrome structure overview')
     p.add_argument('--view', choices=['cone','section'], default='cone',
@@ -1682,11 +1682,9 @@ def main():
             source_iter_line = f"{source_label} - iteration {iter_label}"
         else:
             source_iter_line = source_label
-        mode_kwargs = {
-            'groups': dict(color_mode='group', title=f"{webtype_arg.capitalize()}s in zone {zone_label}\n{source_iter_line}"),
-            'types': dict(color_mode='webtype', title=f"Zone {zone_label}", webtype_order=legend_order),
-            'structure': dict(color_mode='mono', title=f"Zone {zone_label} - {source_iter_line}")
-        }
+        mode_kwargs = {'groups': dict(color_mode='group', title=f"{webtype_arg.capitalize()}s in zone {zone_label}\n{source_iter_line}"),
+                       'types': dict(color_mode='webtype', title=f"Zone {zone_label}", webtype_order=legend_order),
+                       'structure': dict(color_mode='mono', title=f"Zone {zone_label} - {source_iter_line}")}
 
         mode_args = mode_kwargs[mode]
         webtype_for_plot = webtype_arg if mode == 'groups' else 'all'

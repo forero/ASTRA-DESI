@@ -1,7 +1,5 @@
-import gc
+import gc, os, shutil
 import multiprocessing as mp
-import os
-import shutil
 import tempfile
 
 import numpy as np

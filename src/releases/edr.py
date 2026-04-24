@@ -1,8 +1,5 @@
 import os
-from typing import Dict, List, Set
-
 import numpy as np
-from argparse import Namespace
 from astropy.table import Table, vstack
 
 from desiproc.read_data import generate_randoms, process_real
@@ -131,7 +128,7 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, trac
     Returns:
         The combined raw table for the specified zone.
     """
-    parts: List[Table] = []
+    parts = []
     for tr in tracers:
         rt = process_real(real_tables, tr, zone, north_rosettes)
         parts.append(rt)
@@ -160,7 +157,7 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, trac
     return tbl
 
 
-def create_config(args: Namespace) -> ReleaseConfig:
+def create_config(args):
     """
     Create the EDR release configuration.
 

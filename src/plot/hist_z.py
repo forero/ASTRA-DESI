@@ -1,5 +1,4 @@
-import os
-import argparse
+import os, argparse
 from pathlib import Path
 
 import numpy as np
@@ -63,10 +62,10 @@ def load_redshift_for_tracer(base, tracer, zones, chunk_rows=500_000):
 
 
 def plot_histogram(base, zones, outdir, bins=30, zmin=0.0, zmax=3.5, chunk_rows=500_000):
-    colors = {'BGS': 'crimson',
+    colors = {'BGS': 'deepskyblue',
               'LRG': 'green',
               'ELG': 'darkorange',
-              'QSO': 'deepskyblue'}
+              'QSO': 'crimson'}
 
     tracers = ['BGS', 'LRG', 'ELG', 'QSO']
 
@@ -97,8 +96,9 @@ def plot_histogram(base, zones, outdir, bins=30, zmin=0.0, zmax=3.5, chunk_rows=
     if not plotted:
         raise RuntimeError()
     ax.set_xlim(zmin, zmax)
-    ax.set_xlabel(r'$Z$')
-    ax.set_ylabel(r'$N_{\mathrm{Gal}}/\Delta Z$')
+    ax.set_xlabel(r'$z$', fontsize=13)
+    ax.set_ylabel(r'$N_{\mathrm{Gal}}/\Delta z$', fontsize=13)
+    ax.tick_params(axis='both', labelsize=13)
     # ax.set_yscale('log')
 
     leg = ax.legend(loc='upper right')

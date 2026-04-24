@@ -1,5 +1,4 @@
-import os
-import json, argparse
+import os, json, argparse
 from pathlib import Path
 
 import numpy as np
