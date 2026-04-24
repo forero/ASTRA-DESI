@@ -25,11 +25,11 @@ os.environ.setdefault('ASTRA_PROB_SKIP_COMBINED', '1')
 
 def _read_groups_compat(groups_dir, zone, webtype, out_tag=None):
     """
-    Read groups FITS using a zone tag that supports numeric or string labels (e.g., 'NGC1').
+    Read groups FITS using a zone tag that supports numeric or string labels (e.g., 'NGC').
 
     Args:
         groups_dir (str): Directory containing groups files.
-        zone (int or str): Zone number (0-99) or label (e.g., 'NGC1').
+        zone (int or str): Zone number (0-99) or label (e.g., 'NGC').
         webtype (str): Webtype to read ('void','sheet','filament','knot').
         out_tag (str or None): Optional tag appended to filenames.
     Returns:
@@ -53,7 +53,7 @@ def _read_raw_min_compat(raw_dir, class_dir, zone, out_tag=None):
     Args:
         raw_dir (str): Directory containing raw files.
         class_dir (str): Directory containing classification files (not used here).
-        zone (int or str): Zone number (0-99) or label (e.g., 'NGC1').
+        zone (int or str): Zone number (0-99) or label (e.g., 'NGC').
         out_tag (str or None): Optional tag appended to filenames.
     Returns:
         Astropy Table: Table read from the specified raw file with selected columns.
@@ -574,11 +574,13 @@ def main():
                        help='Override the default chunk size used when writing FITS outputs.')
 
         p.add_argument('--release', choices=['EDR','DR1','DR2'], default='EDR',
-                       help='Data release: EDR (rosettes), DR1 (NGC1/NGC2 boxes), DR2 (full-sky NGC/SGC split)')
-        p.add_argument('--region', choices=['N','S'], default='N', help='Region for DR1 (N=NGC, S=SGC). Ignored for EDR.')
+                       help='Data release: EDR (rosettes), DR1 (mask-based NGC/SGC), DR2 (full-sky NGC/SGC split)')
+        p.add_argument('--region', choices=['N','S'], default='N',
+                       help='Legacy argument kept for compatibility; ignored by DR1/DR2.')
         p.add_argument('--zones', nargs='+', type=str, default=None,
-                       help='For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.')
-        p.add_argument('--config', type=str, default=None, help='Optional JSON file with cuts per label for DR1 (keys like NGC1/NGC2).')
+                       help='For DR1/DR2: zone labels to run (e.g., NGC SGC). For EDR, ignored if --zone is given.')
+        p.add_argument('--config', type=str, default=None,
+                       help='Optional DR1 JSON config (e.g., {"mask_dir": "...", "zones": ["NGC","SGC"]}).')
 
         args = p.parse_args()
 

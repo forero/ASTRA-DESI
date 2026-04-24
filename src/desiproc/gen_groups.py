@@ -834,7 +834,7 @@ def _default_zones_for_release(release_tag):
     """
     rel = str(release_tag).lower()
     if rel.startswith('dr') or 'ngc' in rel:
-        return ['NGC1', 'NGC2']
+        return ['NGC', 'SGC']
     return [f"{i:02d}" for i in range(20)]
 
 
@@ -849,7 +849,7 @@ def parse_args():
     p.add_argument('--groups-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'groups'),
                    help='Output groups dir')
     p.add_argument('--zones', nargs='+', type=str, default=_default_zones_for_release(release_default),
-                   help='Zone numbers or labels (e.g., 00 01 ... or NGC1 NGC2)')
+                   help='Zone numbers or labels (e.g., 00 01 ... or NGC SGC)')
     p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
     p.add_argument('--source', choices=['data','rand','both'], default='data')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')

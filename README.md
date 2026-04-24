@@ -89,7 +89,7 @@ python src/main.py \
   --class-out /path/to/work/dr1/class \
   --groups-out /path/to/work/dr1/groups \
   --plot-output /path/to/work/dr1/figs \
-  --zones NGC1 NGC2 \
+  --zones NGC SGC \
   --tracers BGS_BRIGHT ELG \
   --n-random 100 \
   --r-lower -0.9 --r-upper 0.9 \
@@ -124,8 +124,8 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
 
 - `jobs/run_edr.sbatch` submits one SLURM array per EDR zone, running the full pipeline
   (including plotting). Scratch outputs are written under `/pscratch/.../edr/`.
-- `jobs/run_dr1.sbatch` is adapted to DR1; edit the `ZLABELS` and `TRACERS_BY_ZONE`
-  arrays to match the desired zones/tracers. The script also enforces
+- `jobs/run_dr1.sbatch` is adapted to DR1; edit `ZLABELS` to match the desired
+  zones. The script also enforces
   `PAIR_NJOBS_CAP`, capping multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
 
 

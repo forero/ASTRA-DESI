@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=astra_dr1
 #SBATCH --account=desi
-#SBATCH --partition=regular
-#SBATCH --time=00:30:00
+#SBATCH -q regular
+#SBATCH --time=01:30:00
 #SBATCH --mem=0
 #SBATCH --array=0-1%1
 #SBATCH -C cpu
@@ -15,6 +15,7 @@
 set -euo pipefail
 
 module load python/3.12
+source ~/venvs/my-umap-env/bin/activate
 
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -34,6 +35,7 @@ export PAIR_NJOBS_CAP=${PAIR_NJOBS_CAP:-128}
 
 PROJECT_ROOT=$PWD
 MAIN_SCRIPT="${PROJECT_ROOT}/src/main.py"
+MASK_SCRIPT="${PROJECT_ROOT}/src/releases/dr1_mask.py"
 
 CLUSTER_DIR="/global/cfs/cdirs/desi/public/dr1/vac/dr1/lss/guadalupe/v1.0/LSScats/clustering"
 SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr1"
@@ -44,10 +46,16 @@ GROUPS_OUT="${SCRATCH_ROOT}/groups"
 PLOTS_OUT="${SCRATCH_ROOT}/figs"
 LOGDIR="${SCRATCH_ROOT}/logs"
 PAIR_SPILL="${SCRATCH_ROOT}/pair_spill"
+MASK_DIR="${SCRATCH_ROOT}/masks/bright_dark"
+MASK_NSIDE=${MASK_NSIDE:-128}
+MASK_TILE_RADIUS_DEG=${MASK_TILE_RADIUS_DEG:-1.605}
+MASK_MIN_TILES=${MASK_MIN_TILES:-4}
+MASK_MIN_LSS_OBJECTS=${MASK_MIN_LSS_OBJECTS:-1}
 
-mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}" "${PAIR_SPILL}"
+mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}" "${PAIR_SPILL}" "${MASK_DIR}"
+export ASTRA_DR1_MASK_DIR="${MASK_DIR}"
 
-ZLABELS=("NGC1" "NGC2")
+ZLABELS=("NGC" "SGC")
 CONFIG_JSON=${CONFIG_JSON:-}
 
 if (( SLURM_ARRAY_TASK_ID >= ${#ZLABELS[@]} )); then
@@ -62,6 +70,28 @@ if [[ -n ${CONFIG_JSON} ]]; then
 fi
 
 LOG_PREFIX="${LOGDIR}/zone_${ZONE_LABEL}"
+
+REQUIRED_MASKS=("${MASK_DIR}/dr1_mask_bright_nside${MASK_NSIDE}_ngc.fits"
+                "${MASK_DIR}/dr1_mask_bright_nside${MASK_NSIDE}_sgc.fits"
+                "${MASK_DIR}/dr1_mask_dark_nside${MASK_NSIDE}_ngc.fits"
+                "${MASK_DIR}/dr1_mask_dark_nside${MASK_NSIDE}_sgc.fits")
+NEED_MASKS=0
+for mask_path in "${REQUIRED_MASKS[@]}"; do
+  if [[ ! -s "${mask_path}" ]]; then
+    NEED_MASKS=1
+    break
+  fi
+done
+
+if (( NEED_MASKS == 1 )); then
+  echo "--> generating DR1 bright/dark NGC/SGC masks in ${MASK_DIR}"
+  python "${MASK_SCRIPT}" \
+    --out-dir "${MASK_DIR}" \
+    --nside "${MASK_NSIDE}" \
+    --tile-radius-deg "${MASK_TILE_RADIUS_DEG}" \
+    --min-tiles "${MASK_MIN_TILES}" \
+    --min-lss-objects "${MASK_MIN_LSS_OBJECTS}"
+fi
 
 srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
      /usr/bin/time -f $'%E elapsed\n%U user CPU\n%S sys CPU\n%P CPU%%\n%M KB max RSS\n' \

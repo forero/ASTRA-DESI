@@ -581,7 +581,7 @@ def run_compare_mode(args):
         else:
             print('[warn] DR1 base sample is empty before cone selection')
 
-        fallback_zone = normalize_zone_tag(args.cosmos_zone_dr1) if args.cosmos_zone_dr1 is not None else 'NGC1'
+        fallback_zone = normalize_zone_tag(args.cosmos_zone_dr1) if args.cosmos_zone_dr1 is not None else 'NGC'
         print(f'[warn] Falling back to DR1 zone={fallback_zone} for cosmos comparison')
         dr1_summary = build_cosmos_summary(df_dr1, z_range=(0.1, 0.5), zone_filter=fallback_zone, n_boot=args.nboot)
 

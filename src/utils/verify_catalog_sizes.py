@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from astropy.table import Table
 
-ZONE_RE = re.compile(r'zone_(\d{2})')
+ZONE_RE = re.compile(r'^zone_(?P<zone>[^_.]+)', re.IGNORECASE)
 
 
 def _existing(base, stem):
@@ -19,8 +19,13 @@ def _discover_zones(raw_dir):
     for path in raw_dir.glob('zone_*' + '*.fits*'):
         match = ZONE_RE.search(path.name)
         if match:
-            found.add(int(match.group(1)))
-    return sorted(found)
+            found.add(str(match.group('zone')).upper())
+
+    def _zone_sort_key(value):
+        text = str(value)
+        return (0, int(text)) if text.isdigit() else (1, text)
+
+    return sorted(found, key=_zone_sort_key)
 
 
 def _load_table(path, include=None):
@@ -88,7 +93,7 @@ def parse_args():
     p.add_argument('--raw_dir', type=Path, default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/raw')
     p.add_argument('--class_dir', type=Path, default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/classification')
     p.add_argument('--prob_dir', type=Path, default='/pscratch/sd/v/vtorresg/cosmic-web/dr1/probabilities')
-    p.add_argument('--zones', nargs='*', type=int, default=['NGC2','NGC1'])
+    p.add_argument('--zones', nargs='*', type=str, default=['NGC', 'SGC'])
     p.add_argument('--expected-random', type=int, default=100)
     return p.parse_args()
 
@@ -100,7 +105,8 @@ def main():
     prob_dir = args.prob_dir
 
     if args.zones:
-        zones = sorted(set(args.zones))
+        zones = sorted({str(z).upper() for z in args.zones},
+                       key=lambda value: (0, int(value)) if str(value).isdigit() else (1, str(value)))
     else:
         zones = _discover_zones(raw_dir)
         if not zones:

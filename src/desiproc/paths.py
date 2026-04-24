@@ -73,6 +73,16 @@ def _tracer_subdir(tag):
     return head if head else 'combined'
 
 
+def _uses_tag_subdir(tag):
+    """
+    Return True when ``tag`` is a tracer label that should live under tracer/zone dirs.
+    """
+    if tag is None:
+        return False
+    head = _tracer_subdir(tag)
+    return head in {'bgs', 'elg', 'lrg', 'qso'}
+
+
 def zone_prefix(zone, tag=None):
     """
     Return the base name used for zone-specific outputs.
@@ -153,7 +163,7 @@ def classification_path(base_dir, zone, tag=None):
     """
     root = _subdir(base_dir, 'classification')
     fname = classification_filename(zone, tag)
-    if tag is None:
+    if not _uses_tag_subdir(tag):
         return os.path.join(root, fname)
     tracer = _tracer_subdir(tag)
     zone_dir = zone_tag(zone).lower()
@@ -172,7 +182,7 @@ def probability_path(base_dir, zone, tag=None):
     """
     root = _subdir(base_dir, 'probabilities')
     fname = probability_filename(zone, tag)
-    if tag is None:
+    if not _uses_tag_subdir(tag):
         return os.path.join(root, fname)
     tracer = _tracer_subdir(tag)
     zone_dir = zone_tag(zone).lower()
@@ -236,9 +246,12 @@ def locate_classification_file(base_dir, zone, tag=None):
     """
     fname = classification_filename(zone, tag)
     zone_dir = zone_tag(zone).lower()
+    legacy_tag_dir = os.path.join(_subdir(base_dir, 'classification'),
+                                  _tracer_subdir(tag), zone_dir, fname)
     candidates = [classification_path(base_dir, zone, tag),
                   os.path.join(_subdir(base_dir, 'classification'), fname),
-                  os.path.join(_subdir(base_dir, 'classification'), zone_dir, fname),]
+                  os.path.join(_subdir(base_dir, 'classification'), zone_dir, fname),
+                  legacy_tag_dir,]
     for path in candidates:
         if os.path.exists(path):
             return path
@@ -260,9 +273,12 @@ def locate_probability_file(base_dir, zone, tag=None):
     """
     fname = probability_filename(zone, tag)
     zone_dir = zone_tag(zone).lower()
+    legacy_tag_dir = os.path.join(_subdir(base_dir, 'probabilities'),
+                                  _tracer_subdir(tag), zone_dir, fname)
     candidates = [probability_path(base_dir, zone, tag),
                   os.path.join(_subdir(base_dir, 'probabilities'), fname),
-                  os.path.join(_subdir(base_dir, 'probabilities'), zone_dir, fname),]
+                  os.path.join(_subdir(base_dir, 'probabilities'), zone_dir, fname),
+                  legacy_tag_dir,]
     for path in candidates:
         if os.path.exists(path):
             return path

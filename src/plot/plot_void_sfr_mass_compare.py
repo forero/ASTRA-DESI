@@ -380,7 +380,7 @@ def main():
 
     zones_edr = select_zones(raw_edr, zones_arg=args.zones_edr, max_zones=args.max_zones_edr)
     if args.zones_dr1 is None:
-        default_dr1 = ['NGC1', 'NGC2']
+        default_dr1 = ['NGC', 'SGC']
         resolved, missing = resolve_zone_list(raw_dr1, default_dr1)
         if missing:
             print(f'[warn] default DR1 zones not found, falling back to all zones: {missing}')

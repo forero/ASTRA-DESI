@@ -1,9 +1,12 @@
-import json, os
+import glob, json, os, re
+import astropy.units as u
+import healpy as hp
 import numpy as np
 from argparse import Namespace
-from astropy.table import Table, vstack
+from astropy.coordinates import SkyCoord
+from astropy.cosmology import Planck18
+from astropy.table import Column, Table, vstack
 
-from desiproc.read_data import generate_randoms_region, process_real_region
 from desiproc.paths import safe_tag, zone_tag
 
 from .base import ReleaseConfig
@@ -15,10 +18,17 @@ RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.
 N_RANDOM_FILES = 18
 REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
 RANDOM_COLUMNS = REAL_COLUMNS
-DEFAULT_CUTS = {'NGC1': {'RA_min': 110, 'RA_max': 260, 'DEC_min': -10, 'DEC_max': 8},
-                'NGC2': {'RA_min': 180, 'RA_max': 260, 'DEC_min': 30, 'DEC_max': 40}}
-ZONE_VALUES = {'NGC1': 1001, 'NGC2': 1002}
+DEFAULT_ZONES = ['NGC', 'SGC']
+ZONE_ALIASES = {'NGC': 'NGC', 'SGC': 'SGC'}
+ZONE_VALUES = {'NGC': 1001, 'SGC': 1002}
 TRACER_ALIAS = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso', 'lrg': 'LRG', 'qso': 'QSO'}
+TRACER_MASK_PROGRAM = {'BGS_BRIGHT': 'bright',
+                       'ELG_LOPnotqso': 'dark',
+                       'LRG': 'dark',
+                       'QSO': 'dark'}
+MASK_PROGRAMS = ('bright', 'dark')
+MASK_ZONE_SUFFIX = {'NGC': 'ngc', 'SGC': 'sgc'}
+MASK_NSIDE_RE = re.compile(r'_nside(?P<nside>\d+)_')
 EMLINE_CATALOG_PATH = ('/global/cfs/cdirs/desi/public/dr1/vac/dr1/stellar-mass-emline/'
                        'v1.0/dr1_galaxy_stellarmass_lineinfo_v1.0.fits')
 EMLINE_REQUIRED_COLUMNS = ('TARGETID', 'ZERR', 'FLUX_G', 'FLUX_R')
@@ -145,14 +155,311 @@ def _append_emline_columns(raw_table, emline_best):
     return raw_table
 
 
-def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tables,
-                     output_raw, n_random, zone_value, out_tag, release_tag):
+def _normalize_zone_label(zone):
     """
-    Build and persist the DR1 raw table for ``zone_label`` applying ``cuts``.
+    Normalize a user-provided DR1 zone token to ``NGC`` or ``SGC``.
+
+    Args:
+        zone: Input zone token.
+    Returns:
+        str: Normalized zone label.
+    Raises:
+        RuntimeError: If the label is unknown.
+    """
+    key = str(zone).strip().upper()
+    label = ZONE_ALIASES.get(key)
+    if label is None:
+        known = ', '.join(sorted(ZONE_ALIASES))
+        raise RuntimeError(f'Unknown DR1 zone "{zone}". Allowed labels: {known}')
+    return label
+
+
+def _compute_cartesian(tbl, dtype=np.float64):
+    """
+    Add Cartesian coordinates (XCART/YCART/ZCART) to ``tbl``.
+
+    Args:
+        tbl: Input table with RA, DEC, Z columns.
+        dtype: Desired data type for the Cartesian columns.
+    Returns:
+        Table: The input table with added Cartesian coordinate columns.
+    """
+    z = np.asarray(tbl['Z'], dtype=float)
+    dist = Planck18.comoving_distance(z)
+    ra = np.asarray(tbl['RA'], dtype=float) * u.deg
+    dec = np.asarray(tbl['DEC'], dtype=float) * u.deg
+    sc = SkyCoord(ra=ra, dec=dec, distance=dist)
+    tbl['XCART'] = np.asarray(sc.cartesian.x.value, dtype=dtype)
+    tbl['YCART'] = np.asarray(sc.cartesian.y.value, dtype=dtype)
+    tbl['ZCART'] = np.asarray(sc.cartesian.z.value, dtype=dtype)
+    return tbl
+
+
+def _ensure_zone_column(tbl, zone_value):
+    """
+    Overwrite/create ``ZONE`` column with a constant synthetic zone value.
+
+    Args:
+        tbl: Input table to modify.
+        zone_value: Integer value to assign to the ZONE column.
+    Returns:
+        Table: The input table with the ZONE column set to the specified value.
+    """
+    if 'ZONE' in tbl.colnames:
+        tbl.remove_column('ZONE')
+    tbl.add_column(Column(np.full(len(tbl), int(zone_value), dtype=np.int32), name='ZONE'))
+    return tbl
+
+
+def _extract_nside_from_path(path):
+    """
+    Return the NSIDE encoded in a DR1 mask filename.
+
+    Args:
+        path (str): The path to the mask file.
+    Returns:
+        int: The NSIDE value or -1 if not found.
+    """
+    match = MASK_NSIDE_RE.search(os.path.basename(path))
+    if match is None:
+        return -1
+    return int(match.group('nside'))
+
+
+def _resolve_mask_dir(parsed_args, user_cfg):
+    """
+    Resolve the DR1 mask directory.
+    Priority: ``ASTRA_DR1_MASK_DIR`` env > config ``mask_dir`` > sibling of ``raw_out``.
+
+    Args:
+        parsed_args: Parsed command line arguments.
+        user_cfg: User configuration dictionary loaded from JSON config file.
+    Returns:
+        str: The resolved absolute path to the DR1 mask directory.
+    """
+    env_mask_dir = os.environ.get('ASTRA_DR1_MASK_DIR')
+    if env_mask_dir:
+        return os.path.abspath(os.path.expanduser(env_mask_dir))
+
+    cfg_mask_dir = user_cfg.get('mask_dir')
+    if isinstance(cfg_mask_dir, str) and cfg_mask_dir.strip():
+        return os.path.abspath(os.path.expanduser(cfg_mask_dir))
+
+    raw_parent = os.path.abspath(os.path.join(parsed_args.raw_out, os.pardir))
+    return os.path.join(raw_parent, 'masks', 'bright_dark')
+
+
+def _load_dr1_masks(mask_dir):
+    """
+    Load bright/dark NGC/SGC HEALPix masks generated by dr1_mask.py.
+
+    Args:
+        mask_dir: Directory containing the DR1 mask files.
+    Returns:     A tuple (masks, paths, nside) where:
+        - masks: A nested dictionary of boolean arrays with structure masks[program][zone_label].
+        - paths: A nested dictionary of file paths with structure paths[program][zone_label].
+        - nside: The NSIDE value of the loaded HEALPix maps (must be consistent across all masks).
+    Raises:
+        FileNotFoundError: If no mask files are found for a program/zone combination.
+        RuntimeError: If the loaded masks have inconsistent NSIDE or npix values.
+    """
+    masks = {program: {} for program in MASK_PROGRAMS}
+    paths = {program: {} for program in MASK_PROGRAMS}
+    expected_nside = None
+    expected_npix = None
+
+    for program in MASK_PROGRAMS:
+        for zone_label, zone_suffix in MASK_ZONE_SUFFIX.items():
+            pattern = os.path.join(mask_dir, f'dr1_mask_{program}_nside*_{zone_suffix}.fits')
+            candidates = glob.glob(pattern)
+            if not candidates:
+                raise FileNotFoundError(f'No DR1 mask file matches {pattern}')
+            selected = max(candidates, key=_extract_nside_from_path)
+            values = hp.read_map(selected, dtype=np.int16)
+            arr = np.asarray(values)
+            nside = hp.get_nside(arr)
+            npix = arr.size
+
+            if expected_nside is None:
+                expected_nside = nside
+                expected_npix = npix
+            elif (nside != expected_nside) or (npix != expected_npix):
+                raise RuntimeError('DR1 mask maps have inconsistent NSIDE/npix')
+
+            mask_bool = arr > 0
+            masks[program][zone_label] = mask_bool
+            paths[program][zone_label] = selected
+
+    return masks, paths, expected_nside
+
+
+def _mask_table_rows(tbl, pixel_mask, nside):
+    """
+    Filter rows by HEALPix pixel mask using RA/DEC.
+
+    Args:
+        tbl: Input table with 'RA' and 'DEC' columns.
+        pixel_mask: Boolean array where True indicates pixels to keep.
+        nside: NSIDE of the HEALPix pixelization used for the mask.
+    Returns:
+        Table: A subset of the input table containing only rows that fall within the True pixels of the mask.
+    """
+    if len(tbl) == 0:
+        return tbl
+
+    ra = np.asarray(tbl['RA'], dtype=np.float64)
+    dec = np.asarray(tbl['DEC'], dtype=np.float64)
+    valid = np.isfinite(ra) & np.isfinite(dec)
+    keep = np.zeros(len(tbl), dtype=bool)
+
+    if np.any(valid):
+        theta = np.radians(90.0 - dec[valid])
+        phi = np.radians(np.mod(ra[valid], 360.0))
+        pix = hp.ang2pix(nside, theta, phi)
+        keep[valid] = pixel_mask[pix]
+
+    return tbl[keep]
+
+
+def _collect_real_region_table(real_tables, tracer, region):
+    """
+    Merge hemisphere real tables into one region table.
+
+    Args:
+        real_tables: Dictionary with real tables per tracer and hemisphere.
+        tracer: Tracer name to collect.
+        region: Region label (e.g. 'N', 'S', 'ALL').
+    Returns:
+        Table: The combined real table for the specified tracer and region.
+    Raises:
+        KeyError: If no data is found for the specified tracer and region.
+    """
+    region = str(region).upper()
+    if region == 'ALL':
+        parts = []
+        for hemi in ('N', 'S'):
+            tbl = real_tables[tracer].get(hemi)
+            if tbl is not None:
+                parts.append(tbl)
+        if not parts:
+            raise KeyError(f'No data for tracer {tracer} in any hemisphere')
+        return vstack(parts, metadata_conflicts='silent') if len(parts) > 1 else parts[0]
+    return real_tables[tracer][region]
+
+
+def _collect_random_region_tables(random_tables, tracer, region):
+    """
+    Collect random tables for one tracer and region.
+
+    Args:
+        random_tables: Dictionary with random tables per tracer and hemisphere.
+        tracer: Tracer name to collect.
+        region: Region label (e.g. 'N', 'S', 'ALL').
+    Returns:
+        list of Table: A list of random tables for the specified tracer and region.
+    """
+    region = str(region).upper()
+    if region == 'ALL':
+        tables = []
+        hemi_dict = random_tables[tracer]
+        for hemi in ('N', 'S'):
+            tables.extend(list(hemi_dict.get(hemi, {}).values()))
+        return tables
+    return list(random_tables[tracer][region].values())
+
+
+def _process_real_region_masked(real_tables, tracer, region, pixel_mask, nside, zone_value):
+    """
+    Return masked DR1 real table for one tracer.
+
+    Args:
+        real_tables: Dictionary with real tables per tracer and hemisphere.
+        tracer: Tracer name to process.
+        region: Region label (e.g. 'N', 'S', 'ALL').
+        pixel_mask: Boolean array where True indicates pixels to keep.
+        nside: NSIDE of the HEALPix pixelization used for the mask.
+        zone_value: Integer value to assign to the ZONE column.
+    Returns:
+        Table: The processed real table for the specified tracer and region,
+                with HEALPix mask applied and Cartesian coordinates computed.
+    """
+    base_tbl = _collect_real_region_table(real_tables, tracer, region)
+    sel = _mask_table_rows(base_tbl, pixel_mask, nside)
+    if len(sel) == 0:
+        raise ValueError(f'No entries for {tracer} in region {region} after HEALPix mask')
+    sel = _ensure_zone_column(sel.copy(), zone_value)
+    sel = _compute_cartesian(sel)
+    sel['TRACERTYPE'] = tracer
+    sel['RANDITER'] = np.full(len(sel), -1, dtype=np.int32)
+    return sel
+
+
+def _generate_randoms_region_masked(random_tables, tracer, region, pixel_mask, nside,
+                                    n_random, real_count, zone_value):
+    """
+    Return random catalogues sampled from the masked DR1 random pool.
+
+    Args:
+        random_tables: Dictionary with random tables per tracer and hemisphere.
+        tracer: Tracer name to process.
+        region: Region label (e.g. 'N', 'S', 'ALL').
+        pixel_mask: Boolean array where True indicates pixels to keep.
+        nside: NSIDE of the HEALPix pixelization used for the mask.
+        n_random: Number of random catalogues to generate.
+        real_count: Number of random entries to sample per catalogue (should match the real count).
+        zone_value: Integer value to assign to the ZONE column.
+    Returns:
+        Table: The combined random table for the specified tracer and region, with HEALPix
+               mask applied and Cartesian coordinates computed.
+     Raises:
+        KeyError: If no random tables are found for the specified tracer and region.
+        ValueError: If no random entries remain after masking or if the available
+                    randoms are fewer than the real count.
+    """
+    tables = _collect_random_region_tables(random_tables, tracer, region)
+    if not tables:
+        raise KeyError(f'No random tables for {tracer} in region {region}')
+
+    zone_tables = []
+    total_after_mask = 0
+    for tbl in tables:
+        sel = _mask_table_rows(tbl, pixel_mask, nside)
+        if len(sel) == 0:
+            continue
+        sel = _ensure_zone_column(sel.copy(), zone_value)
+        zone_tables.append(sel)
+        total_after_mask += len(sel)
+
+    if total_after_mask == 0:
+        raise ValueError(f'No random entries for {tracer} in region {region} after HEALPix mask')
+    if total_after_mask < real_count:
+        raise ValueError(f'Region {region} randoms have only {total_after_mask} points after mask (< {real_count})')
+
+    zone_tables_xyz = []
+    for sel in zone_tables:
+        zone_tables_xyz.append(_compute_cartesian(sel.copy()))
+    pool = vstack(zone_tables_xyz, metadata_conflicts='silent')
+
+    samples = []
+    for j in range(n_random):
+        rng = np.random.default_rng(j)
+        rows = rng.choice(len(pool), real_count, replace=False)
+        samp = pool[rows]
+        samp['TRACERTYPE'] = tracer
+        samp['RANDITER'] = np.full(len(samp), j, dtype=np.int32)
+        samples.append(samp)
+
+    return vstack(samples, metadata_conflicts='silent')
+
+
+def build_raw_region(zone_label, region, tracers, real_tables, random_tables,
+                     output_raw, n_random, zone_value, out_tag, release_tag,
+                     zone_masks, nside):
+    """
+    Build and persist the DR1 raw table for ``zone_label`` applying HEALPix masks.
 
     Args:
         zone_label: Label for the zone being processed.
-        cuts: Dictionary with the cuts to apply.
         region: Region label (e.g. 'N', 'S', 'ALL').
         tracers: List of tracers to process.
         real_tables: Dictionary with real tables per tracer.
@@ -162,25 +469,33 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
         zone_value: Integer value to assign to the ZONE column.
         out_tag: Optional tag to append to the output file name.
         release_tag: Release tag string or None.
+        zone_masks: Mapping ``{'bright': bool[npix], 'dark': bool[npix]}``.
+        nside: HEALPix NSIDE for ``zone_masks``.
     Returns:
-        The combined table written to disk.
+        Table: The combined table written to disk.
     """
     parts = []
     skipped = []
     for tr in tracers:
+        program = TRACER_MASK_PROGRAM.get(tr)
+        if program is None:
+            raise RuntimeError(f'No DR1 mask program configured for tracer {tr}')
+        pixel_mask = zone_masks[program]
+
         try:
-            rt = process_real_region(real_tables, tr, region, cuts, zone_value=zone_value)
+            rt = _process_real_region_masked(real_tables, tr, region, pixel_mask, nside, zone_value=zone_value)
         except ValueError as exc:
-            print(f'[warn] {tr} empty after cuts in region {region}: {exc}')
+            print(f'[warn] {tr} empty after mask in zone {zone_label} ({program}): {exc}')
             skipped.append(tr)
             continue
         parts.append(rt)
         count = len(rt)
-        rpt = generate_randoms_region(random_tables, tr, region, cuts, n_random, count, zone_value=zone_value)
+        rpt = _generate_randoms_region_masked(random_tables, tr, region, pixel_mask, nside,
+                                              n_random, count, zone_value=zone_value)
         parts.append(rpt)
 
     if not parts:
-        raise ValueError(f'No data in region {region} for cuts {cuts} (tracers tried: {tracers})')
+        raise ValueError(f'No data in region {region} for zone {zone_label} (tracers tried: {tracers})')
 
     tbl = vstack(parts)
     if 'RANDITER' in tbl.colnames:
@@ -215,20 +530,39 @@ def create_config(args):
     Returns:
         The release configuration object.
     """
-    cuts = {label: values.copy() for label, values in DEFAULT_CUTS.items()}
+    user_cfg = {}
     if args.config:
         with open(args.config, 'r', encoding='utf-8') as handle:
-            user_cuts = json.load(handle)
-        cuts.update({str(k): {key: float(val) for key, val in v.items()} for k, v in user_cuts.items()})
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise RuntimeError('--config for DR1 must be a JSON object')
+        user_cfg = loaded
 
     if args.zones is not None:
-        zones = [str(z) for z in args.zones]
+        zones = [_normalize_zone_label(z) for z in args.zones]
+    elif isinstance(user_cfg.get('zones'), list):
+        zones = [_normalize_zone_label(z) for z in user_cfg['zones']]
     else:
-        zones = sorted(cuts.keys())
+        zones = list(DEFAULT_ZONES)
 
-    missing = [z for z in zones if z not in cuts]
-    if missing:
-        raise RuntimeError(f'No cuts configured: {", ".join(missing)}')
+    dedup = []
+    seen = set()
+    for zone in zones:
+        if zone in seen:
+            continue
+        seen.add(zone)
+        dedup.append(zone)
+    zones = dedup
+
+    mask_dir = _resolve_mask_dir(args, user_cfg)
+    all_masks, mask_paths, mask_nside = _load_dr1_masks(mask_dir)
+
+    for program in MASK_PROGRAMS:
+        for zone in DEFAULT_ZONES:
+            path = mask_paths[program][zone]
+            pix = int(all_masks[program][zone].sum())
+            print(f'[dr1] mask {program}/{zone}: {path} (pixels={pix})', flush=True)
+    print(f'[dr1] using DR1 mask_dir={mask_dir} nside={mask_nside}', flush=True)
 
     def _build(zone, real_tables, random_tables, sel_tracers, parsed_args, release_tag):
         """
@@ -244,12 +578,13 @@ def create_config(args):
         Returns:
             The combined table written to disk.
         """
-        label = str(zone)
+        label = _normalize_zone_label(zone)
         zone_value = ZONE_VALUES.get(label, 9999)
-        zone_cuts = cuts[label]
-        return build_raw_region(label, zone_cuts, 'ALL', sel_tracers, real_tables, random_tables,
+        zone_masks = {program: all_masks[program][label] for program in MASK_PROGRAMS}
+        return build_raw_region(label, 'ALL', sel_tracers, real_tables, random_tables,
                                 parsed_args.raw_out, parsed_args.n_random, zone_value,
-                                out_tag=parsed_args.out_tag, release_tag=release_tag)
+                                out_tag=parsed_args.out_tag, release_tag=release_tag,
+                                zone_masks=zone_masks, nside=mask_nside)
 
     return ReleaseConfig(name='DR1', release_tag='DR1', tracers=TRACERS, tracer_alias=TRACER_ALIAS,
                          real_suffix=REAL_SUFFIX, random_suffix=RANDOM_SUFFIX,

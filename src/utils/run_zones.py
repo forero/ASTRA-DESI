@@ -37,7 +37,11 @@ if __name__ == '__main__':
     if RELEASE.lower() == 'edr':
         zones = list(range(20))
     else:
-        zones = ['NGC1', 'NGC2']
+        zones = ['NGC', 'SGC']
+
+    def _zone_label(value):
+        return f'{int(value):02d}' if isinstance(value, int) else str(value)
+
     max_workers = min(4, cpu_count())
     print(f'Using {max_workers} workers')
     results = []
@@ -48,16 +52,16 @@ if __name__ == '__main__':
             z = futs[fut]
             try:
                 zone, out, err = fut.result()
-                print(f'[OK] zone {zone:02d}')
+                print(f'[OK] zone {_zone_label(zone)}')
                 if err.strip():
-                    print(f'[zone {zone:02d} STDERR]\n{err}')
+                    print(f'[zone {_zone_label(zone)} STDERR]\n{err}')
                 results.append(zone)
             except subprocess.CalledProcessError as e:
-                print(f'[FAIL] zone {z:02d} exit={e.returncode}')
+                print(f'[FAIL] zone {_zone_label(z)} exit={e.returncode}')
                 print('STDOUT:\n', e.stdout)
                 print('STDERR:\n', e.stderr)
             except Exception as e:
-                print(f'[EXC] zone {z:02d}: {e!r}')
+                print(f'[EXC] zone {_zone_label(z)}: {e!r}')
 
     done = sorted(results)
     missing = sorted(set(zones) - set(done))
