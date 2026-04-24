@@ -8,7 +8,9 @@ from group_finder.astra import (add_cartesian_to_all,
 from group_finder.make_cat import (build_point_membership_table,
                              consolidate_group_info,
                              write_group_table_fits)
-from group_finder.read_data import (DEFAULT_COLUMNS, DEFAULT_CUTS,
+from group_finder.read_data import (DEFAULT_CAPS_DR1,
+                              DEFAULT_COLUMNS,
+                              DEFAULT_DR1_MASK_DIR,
                               DEFAULT_RA_MAX,
                               DEFAULT_RA_MIN,
                               DEFAULT_TRACER_ALIASES_DR1,
@@ -25,7 +27,7 @@ DEFAULT_DATA_DIR_DR1 = '/global/cfs/cdirs/desi/public/dr1/vac/dr1/lss/guadalupe/
 DEFAULT_OUTPUT_DIR = '/pscratch/sd/v/vtorresg/astra-voids/v1.0/'
 DEFAULT_LOG_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'logs')
 DEFAULT_CAPS_BY_RELEASE = {'dr2': ['NGC', 'SGC'],
-                           'dr1': ['NGC1', 'NGC2']}
+                           'dr1': list(DEFAULT_CAPS_DR1)}
 
 
 def parse_args():
@@ -35,9 +37,11 @@ def parse_args():
     parser.add_argument('--data-dir', default=None)
     parser.add_argument('--output-dir', default=DEFAULT_OUTPUT_DIR)
     parser.add_argument('--log-dir', default=DEFAULT_LOG_DIR)
+    parser.add_argument('--mask-dir', default=None,
+                        help='DR1 HEALPix mask directory; ASTRA_DR1_MASK_DIR overrides this')
 
     parser.add_argument('--tracers', nargs='+', default=None, choices=list(DEFAULT_TRACERS_ALL))
-    parser.add_argument('--caps', nargs='+', default=None, choices=['NGC', 'SGC', 'NGC1', 'NGC2'])
+    parser.add_argument('--caps', nargs='+', default=None, choices=['NGC', 'SGC'])
 
     parser.add_argument('--random-index', type=int, default=0)
     parser.add_argument('--seed', type=int, default=12345)
@@ -100,11 +104,14 @@ def _configure_release_args(args):
         if invalid_tracers:
             raise ValueError(f'Invalid tracers for DR1: {invalid_tracers}. Expected subset of {list(valid_tracers)}')
 
-        invalid_caps = [cap for cap in args.caps if cap not in DEFAULT_CUTS]
+        invalid_caps = [cap for cap in args.caps if cap not in DEFAULT_CAPS_BY_RELEASE['dr1']]
         if invalid_caps:
-            raise ValueError(f'Invalid caps for DR1: {invalid_caps}. Expected subset of {list(DEFAULT_CUTS)}')
-        args.cap_cuts = {cap: DEFAULT_CUTS[cap] for cap in args.caps}
+            raise ValueError('Invalid caps for DR1: '
+                             f'{invalid_caps}. Expected subset of {DEFAULT_CAPS_BY_RELEASE["dr1"]}')
+        args.cap_cuts = None
         args.tracer_aliases = dict(DEFAULT_TRACER_ALIASES_DR1)
+        if args.mask_dir is None:
+            args.mask_dir = os.environ.get('ASTRA_DR1_MASK_DIR', DEFAULT_DR1_MASK_DIR)
     else:
         invalid_tracers = [tracer for tracer in args.tracers if tracer not in DEFAULT_TRACERS_DR2]
         if invalid_tracers:
@@ -117,6 +124,7 @@ def _configure_release_args(args):
                              f'{invalid_caps}. Expected subset of {DEFAULT_CAPS_BY_RELEASE["dr2"]}')
         args.cap_cuts = None
         args.tracer_aliases = None
+        args.mask_dir = None
 
 
 def run_pipeline(args):
@@ -149,6 +157,7 @@ def run_pipeline(args):
                                            cap_cuts=args.cap_cuts,
                                            release=args.release,
                                            tracer_aliases=args.tracer_aliases,
+                                           mask_dir=args.mask_dir,
                                            seed=args.seed,
                                            verbose=verbose)
         validate_required_keys(all_data, tracers=args.tracers, caps=args.caps)
