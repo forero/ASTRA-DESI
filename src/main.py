@@ -17,7 +17,6 @@ def _bool_env(name, default=False):
         return default
     return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
-# Set default environment variables for per-iteration classification/probability
 os.environ.setdefault('ASTRA_CLASS_SPLIT_ITER', '1')
 os.environ.setdefault('ASTRA_CLASS_SKIP_COMBINED', '1')
 os.environ.setdefault('ASTRA_PROB_SPLIT_ITER', '1')
@@ -141,13 +140,11 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_med, r_upper,
         prob_file = probability_path(output_class, zone, out_tag)
 
         zone_header = zone_tag(zone)
-        meta = {
-            'ZONE': zone_header,
-            'RELEASE': str(release_tag) if release_tag is not None else 'UNKNOWN',
-            'RLOWER': float(r_lower),
-            'RMED': float(r_med),
-            'RUPPER': float(r_upper),
-        }
+        meta = {'ZONE': zone_header,
+                'RELEASE': str(release_tag) if release_tag is not None else 'UNKNOWN',
+                'RLOWER': float(r_lower),
+                'RMED': float(r_med),
+                'RUPPER': float(r_upper),}
 
         for path in (pairs_file, class_file, prob_file):
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -573,12 +570,12 @@ def main():
         p.add_argument('--chunk-rows', type=int, default=None,
                        help='Override the default chunk size used when writing FITS outputs.')
 
-        p.add_argument('--release', choices=['EDR','DR1','DR2'], default='EDR',
-                       help='Data release: EDR (rosettes), DR1 (mask-based NGC/SGC), DR2 (full-sky NGC/SGC split)')
+        p.add_argument('--release', choices=['EDR','DR1','DR2','DR3'], default='EDR',
+                       help='Data release: EDR (rosettes), DR1 (mask-based NGC/SGC), DR2 (full-sky NGC/SGC split), DR3 (nonKP clustering)')
         p.add_argument('--region', choices=['N','S'], default='N',
-                       help='Legacy argument kept for compatibility; ignored by DR1/DR2.')
+                       help='Legacy argument kept for compatibility; ignored by DR1/DR2/DR3.')
         p.add_argument('--zones', nargs='+', type=str, default=None,
-                       help='For DR1/DR2: zone labels to run (e.g., NGC SGC). For EDR, ignored if --zone is given.')
+                       help='For DR1/DR2/DR3: zone labels to run (e.g., NGC SGC). For EDR, ignored if --zone is given.')
         p.add_argument('--config', type=str, default=None,
                        help='Optional DR1 JSON config (e.g., {"mask_dir": "...", "zones": ["NGC","SGC"]}).')
 
@@ -666,7 +663,7 @@ def main():
 
         real_tables, random_tables = {}, {}
         need_preload = True
-        if release_config.use_dr2_preload and release_config.name.upper() == 'DR2':
+        if release_config.use_dr2_preload:
             suffix = safe_tag(args.out_tag)
             def _raw_exists(zone):
                 ztag = zone_tag(zone)

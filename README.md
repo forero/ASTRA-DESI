@@ -2,7 +2,7 @@
 
 Implementation of the [ASTRA algorithm](https://arxiv.org/abs/2404.01124) adapted to the
 Dark Energy Spectroscopic Instrument (DESI) clustering catalogues. The pipeline supports
-the **Early Data Release (EDR)** plus **Data Releases 1 and 2 (DR1/DR2)** and produces
+the **Early Data Release (EDR)** plus **Data Releases 1, 2, and 3 (DR1/DR2/DR3)** and produces
 per-zone classifications of the cosmic web into **voids, sheets, filaments, and knots**.
 
 
@@ -56,7 +56,7 @@ Each zone produces a consistent set of artefacts stored under the release root
 
 Key CLI options:
 
-- `--release {EDR,DR1,DR2}` selects the catalogue layout.
+- `--release {EDR,DR1,DR2,DR3}` selects the catalogue layout.
 - `--r-lower` and `--r-upper` control the asymmetric thresholds used when classifying
   web types (defaults: `-0.9`, `0.9`).
 - `--tracers` can restrict processing to a subset of tracer prefixes.
@@ -127,6 +127,14 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
 - `jobs/run_dr1.sbatch` is adapted to DR1; edit `ZLABELS` to match the desired
   zones. The script also enforces
   `PAIR_NJOBS_CAP`, capping multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
+- `jobs/run_dr3.sbatch` processes one DR3 tracer/zone in per-iteration shards.
+  Edit `TRACER_LABEL` and `ZONE_LABEL` inside the sbatch before submitting. Submit
+  once with the default `MODE=iter`, then set `MODE=prob` inside the sbatch and submit
+  again after the iteration job finishes to build the aggregate probability file.
+
+  ```bash
+  sbatch jobs/run_dr3.sbatch
+  ```
 
 
 ## Visualisation tools

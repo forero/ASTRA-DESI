@@ -30,11 +30,12 @@ def _progress(message: str) -> None:
     Print a progress message when verbose progress is enabled.
     """
     if os.environ.get('ASTRA_PROGRESS'):
-        print(f'[progress] {message}', flush=True)
+        print(f'progress --> {message}', flush=True)
 
 
 def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_raw,
-                       n_random, zone_value, out_tag, release_tag):
+                       n_random, zone_value, out_tag, release_tag,
+                       tracer_ids=None, tracer_full_labels=None, log_label='dr2'):
     """
     Build and persist the DR2 raw table for ``zone_label``.
 
@@ -52,6 +53,9 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
         The combined table written to disk.
     """
     tag_suffix = safe_tag(out_tag)
+    tracer_ids = TRACER_IDS if tracer_ids is None else tracer_ids
+    tracer_full_labels = TRACER_FULL_LABELS if tracer_full_labels is None else tracer_full_labels
+    log_label = str(log_label).lower()
     out_path = os.path.join(output_raw, f'zone_{zone_label}{tag_suffix}.fits.gz')
     existing_path = None
     if os.path.exists(out_path):
@@ -64,9 +68,9 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
     if existing_path is not None:
         try:
             cached = Table.read(existing_path, memmap=True)
-            print(f'[dr2] reuse existing raw {existing_path}', flush=True)
+            print(f'{log_label} --> reuse existing raw {existing_path}', flush=True)
         except Exception as exc:
-            print(f'[dr2] warning: cannot read existing raw {existing_path} ({exc}); rebuilding', flush=True)
+            print(f'{log_label} --> warning: cannot read existing raw {existing_path} ({exc}); rebuilding', flush=True)
         else:
             _progress(f'zone {zone_label}: reusing cached raw table {existing_path}')
             tbl_cached = cached.copy()
@@ -102,18 +106,18 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
             chunk = chunk[store_cols]
         arr = np.asarray(chunk.as_array())
         if raw_store is None:
-            raw_store = TempTableStore(arr.dtype, prefix=f'dr2_raw_{zone_label}', base_dir=tmp_base)
+            raw_store = TempTableStore(arr.dtype, prefix=f'{log_label}_raw_{zone_label}', base_dir=tmp_base)
         raw_store.append(arr)
         total_rows += len(chunk)
         _progress(f'zone {zone_label}: appended {len(chunk)} rows (cumulative {total_rows})')
 
     for tr in tracers:
-        tracer_id = TRACER_IDS.get(tr)
+        tracer_id = tracer_ids.get(tr)
         try:
             rt = process_real_dr2(real_tables, tr, zone_label, zone_value=zone_value,
                                   tracer_id=tracer_id, include_tracertype=False, downcast=True)
         except ValueError as exc:
-            print(f'[warn] {tr} empty in DR2 zone {zone_label}: {exc}')
+            print(f'{log_label} --> warning: {tr} empty in {log_label.upper()} zone {zone_label}: {exc}')
             skipped.append(tr)
             continue
         _progress(f'zone {zone_label}: processing tracer {tr} real sample ({len(rt)} rows)')
@@ -128,7 +132,7 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
         gc.collect()
 
     if raw_store is None:
-        raise ValueError(f'No data in DR2 zone {zone_label} (tracers tried: {tracers})')
+        raise ValueError(f'No data in {log_label.upper()} zone {zone_label} (tracers tried: {tracers})')
 
     combined_memmap = raw_store.as_array()
     combined = np.array(combined_memmap, copy=True)
@@ -161,9 +165,9 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
             data_mask = mask & (randiters == -1)
             rand_mask = mask & (randiters != -1)
             if data_mask.any():
-                labels[data_mask] = TRACER_FULL_LABELS.get((int(tid), True), b'UNKNOWN')
+                labels[data_mask] = tracer_full_labels.get((int(tid), True), b'UNKNOWN')
             if rand_mask.any():
-                labels[rand_mask] = TRACER_FULL_LABELS.get((int(tid), False), b'UNKNOWN')
+                labels[rand_mask] = tracer_full_labels.get((int(tid), False), b'UNKNOWN')
         removed_trtype = Column(labels.astype('U24'), name='TRACERTYPE')
         tbl.add_column(removed_trtype)
         del labels
@@ -184,7 +188,7 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
     _progress(f'zone {zone_label}: completed raw FITS {out_path}')
 
     if skipped:
-        print(f'[info] In DR2 {zone_label} skipped tracers (empty): {", ".join(skipped)}')
+        print(f'{log_label} --> info: In {log_label.upper()} {zone_label} skipped tracers (empty): {", ".join(skipped)}')
     return tbl
 
 

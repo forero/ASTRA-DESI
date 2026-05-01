@@ -10,6 +10,7 @@ from scipy.spatial import Delaunay
 __all__ = ['TempTableStore',
            'register_tracer_mapping',
            'generate_pairs',
+           'generate_pairs_for_iterations',
            'save_pairs_fits',
            'load_pairs_fits',
            'build_class_rows_from_pairs',
@@ -564,7 +565,7 @@ def _gp_process_iter(j):
         tuple[np.ndarray | None, np.ndarray | None]: Pair and classification rows.
     """
     tids, rand_sub, coords, is_data, tracer, tracer_id = _GP_SHARED
-    print(f'[astra] tracer={tracer} iter={j}', flush=True)
+    print(f'astra --> tracer={tracer} iter={j}', flush=True)
     mask = is_data | (rand_sub == j)
     if not mask.any():
         return None, None
@@ -572,13 +573,13 @@ def _gp_process_iter(j):
                             tracer_id=tracer_id)
 
 
-def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
+def generate_pairs_for_iterations(tbl, iterations, n_jobs=None, spill_dir=None):
     """
-    Run the pair-generation pipeline for all tracers in ``tbl``.
+    Run the pair-generation pipeline for selected random iterations.
 
     Args:
         tbl (Table): Input table containing data and random catalogues.
-        n_random (int): Total number of random iterations available.
+        iterations (iterable[int]): Random iteration identifiers to process.
         n_jobs (int, optional): Parallel worker count; defaults to available CPUs.
         spill_dir (str | None): Optional directory where temporary chunks are stored.
     Returns:
@@ -591,10 +592,14 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
                      or os.environ.get('PSCRATCH')
                      or os.environ.get('TMPDIR'))
 
+    iter_values = [int(j) for j in iterations]
+    if not iter_values:
+        raise ValueError('At least one random iteration must be requested.')
+
     pair_store = TempTableStore(_PAIR_ROW_DTYPE, prefix='pairs', base_dir=spill_dir)
     class_store = TempTableStore(_CLASS_ROW_DTYPE, prefix='class', base_dir=spill_dir)
-    print(f'[astra] pair chunks -> {pair_store.tmpdir}')
-    print(f'[astra] class chunks -> {class_store.tmpdir}')
+    print(f'astra --> pair chunks -> {pair_store.tmpdir}')
+    print(f'astra --> class chunks -> {class_store.tmpdir}')
 
     if n_jobs is None:
         env_val = os.environ.get('SLURM_CPUS_PER_TASK', '').strip()
@@ -605,7 +610,7 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
                 cpu_env = 1
         else:
             cpu_env = os.cpu_count() or 1
-        n_jobs = max(1, min(cpu_env, int(n_random)))
+        n_jobs = max(1, min(cpu_env, len(iter_values)))
         cap_val = os.environ.get('PAIR_NJOBS_CAP', '').strip()
         if cap_val:
             try:
@@ -629,14 +634,14 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
                                              initializer=_gp_init_worker,
                                              initargs=(tids, rand_sub, coords, is_data,
                                                        tracer_label, tracer_id)) as pool:
-                for pr, cr in pool.imap_unordered(_gp_process_iter, range(n_random)):
+                for pr, cr in pool.imap_unordered(_gp_process_iter, iter_values):
                     if pr is not None and pr.size:
                         pair_store.append(pr)
                     if cr is not None and cr.size:
                         class_store.append(cr)
         else:
-            for j in range(n_random):
-                print(f'[astra] tracer={tracer_label} iter={j}', flush=True)
+            for j in iter_values:
+                print(f'astra --> tracer={tracer_label} iter={j}', flush=True)
                 mask = is_data | (rand_sub == j)
                 if not mask.any():
                     continue
@@ -648,6 +653,23 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
                     class_store.append(cr)
 
     return pair_store, class_store, {}
+
+
+def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
+    """
+    Run the pair-generation pipeline for all tracers in ``tbl``.
+
+    Args:
+        tbl (Table): Input table containing data and random catalogues.
+        n_random (int): Total number of random iterations available.
+        n_jobs (int, optional): Parallel worker count; defaults to available CPUs.
+        spill_dir (str | None): Optional directory where temporary chunks are stored.
+    Returns:
+        tuple[TempTableStore, TempTableStore, dict]: Disk-backed pair and classification
+        stores plus an (empty) placeholder for backwards compatibility.
+    """
+    return generate_pairs_for_iterations(tbl, range(int(n_random)), n_jobs=n_jobs,
+                                         spill_dir=spill_dir)
 
 
 def _coerce_structured_rows(rows, dtype):
