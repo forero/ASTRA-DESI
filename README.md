@@ -5,6 +5,9 @@ Dark Energy Spectroscopic Instrument (DESI) clustering catalogues. The pipeline 
 the **Early Data Release (EDR)** plus **Data Releases 1 and 2 (DR1/DR2)** and produces
 per-zone classifications of the cosmic web into **voids, sheets, filaments, and knots**.
 
+> Zapata-Zuluaga et al., *The Cosmic Web in the DESI Early Data Release: A Probabilistic Environment Catalog*, arXiv:2604.01456.  
+> https://doi.org/10.48550/arXiv.2604.01456
+
 
 ## Requirements
 
