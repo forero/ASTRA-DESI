@@ -106,6 +106,12 @@ def read_fastspec(path):
 
 
 def filter_lss_with_fastspec(lss, fsf, args):
+    '''
+    Filter the LSS catalog by joining with the fastspecfit catalog on TARGETID,
+    then applying cuts on absolute magnitude and redshift.
+    The Mr cut is applied after an evolution correction that depends on redshift,
+    with a pivot redshift and a slope specified by args (DESIVAST paper).
+    '''
     cat = join(lss, fsf, keys='TARGETID', join_type='inner',
                table_names=['lss', 'fsf'], metadata_conflicts='silent')
 
@@ -129,6 +135,10 @@ def filter_lss_with_fastspec(lss, fsf, args):
 
 
 def build_filtered_data_by_cap(args, fsf, log_fh, verbose):
+    '''
+    Build the filtered data tables for each cap, either by reading separate files
+    for each cap or by reading a single file and splitting by healpix masks.
+    '''
     sample_counts = {'n_fastspec': len(fsf),
                      'n_lss': 0,
                      'n_join': 0,
@@ -166,6 +176,11 @@ def build_filtered_data_by_cap(args, fsf, log_fh, verbose):
 
 
 def available_random_indices(data_dir):
+    '''
+    Look for random catalog files in the data directory and extract the available
+    random index values for both N and S hemispheres. Return the sorted list of
+    indices that have files for both hemispheres.
+    '''
     pattern = os.path.join(data_dir, f'{TRACER}_N_*_clustering.ran.fits')
     n_files = glob.glob(pattern)
     regex = re.compile(r'_N_(\d+)_clustering\.ran\.fits$')
@@ -182,6 +197,9 @@ def available_random_indices(data_dir):
 
 
 def resolve_random_index(data_dir, iteration, requested_index):
+    '''
+    Determine the random catalog index to use for this run.
+    '''
     if requested_index is not None:
         return int(requested_index), available_random_indices(data_dir)
 
@@ -192,6 +210,11 @@ def resolve_random_index(data_dir, iteration, requested_index):
 
 
 def read_randoms(data_dir, random_index, z_max=None):
+    '''
+    Read the random catalogs for both hemispheres for the given random index,
+    and optionally apply a redshift cut.
+    Return a single table with all random points.
+    '''
     tables = []
     for hemi in ('N', 'S'):
         path = os.path.join(data_dir, f'{TRACER}_{hemi}_{random_index}_clustering.ran.fits')
@@ -206,6 +229,11 @@ def read_randoms(data_dir, random_index, z_max=None):
 
 
 def read_random_for_cap(data_dir, cap, random_index, z_max=None):
+    '''
+    Read the random catalog for the given cap and random index,
+    and optionally apply a redshift cut.
+    Return the table of random points for this cap.
+    '''
     hemi = CAP_TO_HEMI[cap]
     path = os.path.join(data_dir, f'{TRACER}_{hemi}_{random_index}_clustering.ran.fits')
     if not os.path.exists(path):
@@ -218,6 +246,9 @@ def read_random_for_cap(data_dir, cap, random_index, z_max=None):
 
 
 def subsample_random(random_table, n_target, seed):
+    '''
+    Subsample the random table to have n_target rows, using the given seed for reproducibility.
+    '''
     if n_target < 0:
         raise ValueError(f'---- n_target must be >= 0, got {n_target}')
     if n_target == 0:
@@ -234,6 +265,10 @@ def subsample_random(random_table, n_target, seed):
 
 
 def gaussian_kernel_1d(sigma):
+    '''
+    Create a 1D Gaussian kernel with the given standard deviation (sigma).
+    The kernel is truncated at 4*sigma and normalized to sum to 1.
+    '''
     if sigma <= 0.0:
         return np.array([1.0], dtype=np.float64)
     radius = max(1, int(np.ceil(4.0 * sigma)))
@@ -243,6 +278,9 @@ def gaussian_kernel_1d(sigma):
 
 
 def smooth_histogram(counts, sigma):
+    '''
+    Smooth the histogram counts using a Gaussian kernel with the given sigma.
+    '''
     counts = np.asarray(counts, dtype=np.float64)
     kernel = gaussian_kernel_1d(sigma)
     radius = len(kernel) // 2
@@ -255,19 +293,17 @@ def smooth_histogram(counts, sigma):
 
 
 def sample_redshifts_from_smooth_nz(data_z, n_target, args, seed):
-    if args.random_z_bins < 1:
-        raise ValueError('--random-z-bins must be >= 1')
+    '''
+    Sample n_target redshifts from a smoothed version of the data redshift distribution.
+    '''
     z_low = 0.0
     z_high = float(args.z_max)
-    if z_high <= z_low:
-        raise ValueError(f'Invalid redshift range: {z_low}..{z_high}')
-
     counts, edges = np.histogram(data_z, bins=args.random_z_bins,
                                  range=(z_low, z_high))
     weights = smooth_histogram(counts, args.random_z_smooth_sigma)
     total = float(np.sum(weights))
     if total <= 0.0:
-        raise RuntimeError('------------- Cannot build smoothed random n(z): all bins have zero weight.')
+        raise RuntimeError('------------- Cant build smoothed random n(z): all bins have zero weight.')
 
     rng = np.random.default_rng(seed)
     probabilities = weights / total
@@ -277,6 +313,15 @@ def sample_redshifts_from_smooth_nz(data_z, n_target, args, seed):
 
 
 def match_random_redshifts_to_data(random_table, data_table, args, seed):
+    '''
+    Adjust the redshifts of the random table to match the distribution of the data table,
+    according to the mode specified in args.random_z_mode.
+     - 'original': keep the original random redshifts (after any z cut applied on read)
+     - 'resample': resample redshifts from the data redshifts with replacement
+     - 'smooth': sample redshifts from a smoothed version of the data n(z) distribution
+     In all cases, the returned table has the same number of rows as random_table,
+     but the Z column may be modified to match the data distribution.
+    '''
     if args.random_z_mode == 'original':
         return random_table.copy(copy_data=True)
 
@@ -338,6 +383,15 @@ def patch_header(path, args, cap, random_index, seed, data_count, rand_count,
 
 def run_case(args, cap, data_table, rand_table, cosmo, random_index, seed,
              sample_counts, available_indices, log_fh, verbose):
+    '''
+    Run the full group finding process for a single cap, including:
+        - Adding Cartesian coordinates to data and random tables
+        - Computing neighbor statistics and adding to tables
+        - Running watershed to assign group IDs
+        - Consolidating group info into a group table
+        - Building point membership table
+        - Writing output FITS file with group and point tables
+    '''
     output_path = output_path_for(args, cap)
     if os.path.exists(output_path) and not args.overwrite:
         log_message(log_fh, f'Case={cap} skipped output_exists path={output_path}',
