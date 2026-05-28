@@ -46,9 +46,7 @@ def parse_args():
     parser.add_argument('--mr-limit', type=float, default=-20.0)
     parser.add_argument('--e-corr-slope', type=float, default=0.97)
     parser.add_argument('--z-pivot', type=float, default=0.1)
-    parser.add_argument('--random-z-mode', choices=['original', 'resample', 'smooth'], default='smooth')
-    parser.add_argument('--random-z-bins', type=int, default=80)
-    parser.add_argument('--random-z-smooth-sigma', type=float, default=2.0)
+    parser.add_argument('--random-z-mode', choices=['original', 'data-z'], default='data-z')
 
     parser.add_argument('--h', type=float, default=0.6736)
     parser.add_argument('--omega-m', type=float, default=0.315)
@@ -263,66 +261,20 @@ def subsample_random(random_table, n_target, seed):
     return random_table[idx].copy()
 
 
-def gaussian_kernel_1d(sigma):
-    '''
-    Create a 1D Gaussian kernel with the given standard deviation (sigma).
-    The kernel is truncated at 4*sigma and normalized to sum to 1.
-    '''
-    if sigma <= 0.0:
-        return np.array([1.0], dtype=np.float64)
-    radius = max(1, int(np.ceil(4.0 * sigma)))
-    x = np.arange(-radius, radius + 1, dtype=np.float64)
-    kernel = np.exp(-0.5 * (x / sigma) ** 2)
-    return kernel / np.sum(kernel)
-
-
-def smooth_histogram(counts, sigma):
-    '''
-    Smooth the histogram counts using a Gaussian kernel with the given sigma.
-    '''
-    counts = np.asarray(counts, dtype=np.float64)
-    kernel = gaussian_kernel_1d(sigma)
-    radius = len(kernel) // 2
-    if radius == 0:
-        return counts.copy()
-    padded = np.pad(counts, radius, mode='edge')
-    smoothed = np.convolve(padded, kernel, mode='same')[radius:-radius]
-    smoothed[smoothed < 0.0] = 0.0
-    return smoothed
-
-
-def sample_redshifts_from_smooth_nz(data_z, n_target, args, seed):
-    '''
-    Sample n_target redshifts from a smoothed version of the data redshift distribution.
-    '''
-    z_low = 0.0
-    z_high = float(args.z_max)
-    counts, edges = np.histogram(data_z, bins=args.random_z_bins,
-                                 range=(z_low, z_high))
-    weights = smooth_histogram(counts, args.random_z_smooth_sigma)
-    total = float(np.sum(weights))
-    if total <= 0.0:
-        raise RuntimeError('------------- Cant build smoothed random n(z): all bins have zero weight.')
-
-    rng = np.random.default_rng(seed)
-    probabilities = weights / total
-    bin_idx = rng.choice(len(probabilities), size=n_target, p=probabilities)
-    z_new = rng.uniform(edges[bin_idx], edges[bin_idx + 1])
-    return z_new.astype(np.float64)
-
-
 def match_random_redshifts_to_data(random_table, data_table, args, seed):
     '''
     Adjust the redshifts of the random table to match the distribution of the data table,
     according to the mode specified in args.random_z_mode.
      - 'original': keep the original random redshifts (after any z cut applied on read)
-     - 'resample': resample redshifts from the data redshifts with replacement
-     - 'smooth': sample redshifts from a smoothed version of the data n(z) distribution
+     - 'data-z': assign the data redshifts in random order when counts match,
+       otherwise draw data redshifts with replacement
      In all cases, the returned table has the same number of rows as random_table,
      but the Z column may be modified to match the data distribution.
     '''
     if args.random_z_mode == 'original':
         return random_table.copy(copy_data=True)
+    if args.random_z_mode != 'data-z':
+        raise ValueError()
 
     out = random_table.copy(copy_data=True)
     if len(out) == 0:
@@ -330,11 +282,13 @@ def match_random_redshifts_to_data(random_table, data_table, args, seed):
 
     data_z = np.asarray(data_table['Z'], dtype=np.float64)
     data_z = data_z[np.isfinite(data_z) & (data_z >= 0.0) & (data_z <= args.z_max)]
+    if len(data_z) == 0:
+        raise RuntimeError('------------- Cant assign random Z values: data table has no finite Z in range.')
     rng = np.random.default_rng(seed)
-    if args.random_z_mode == 'resample':
-        z_new = rng.choice(data_z, size=len(out), replace=True).astype(np.float64)
+    if len(out) == len(data_z):
+        z_new = rng.permutation(data_z).astype(np.float64)
     else:
-        z_new = sample_redshifts_from_smooth_nz(data_z, len(out), args, seed)
+        z_new = rng.choice(data_z, size=len(out), replace=True).astype(np.float64)
 
     out['Z'] = z_new
     return out
@@ -368,8 +322,6 @@ def patch_header(path, args, cap, random_index, seed, data_count, rand_count,
         hdr['ECORR'] = (float(args.e_corr_slope), 'Mr evolution correction slope')
         hdr['ZPIVOT'] = (float(args.z_pivot), 'Mr evolution correction pivot redshift')
         hdr['RZMODE'] = (args.random_z_mode, 'Rand Z mode')
-        hdr['RZBINS'] = (int(args.random_z_bins), 'Rand n(z) bins')
-        hdr['RZSIG'] = (float(args.random_z_smooth_sigma), 'Rand n(z) sigma')
         hdr['NDATCAP'] = (int(data_count), 'Data points in this cap after cuts')
         hdr['NRANCAP'] = (int(rand_count), 'Random points used in this cap')
         hdr['NLSS'] = (int(sample_counts['n_lss']), 'Input LSS BGS rows')
