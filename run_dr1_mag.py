@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse, glob, json, os, re, time
 import numpy as np
 import fitsio
