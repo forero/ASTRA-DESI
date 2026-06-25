@@ -53,6 +53,9 @@ def parse_args():
     parser.add_argument('--r-threshold', type=float, default=-0.25)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
+    parser.add_argument('--edge-radial-buffer', type=float, default=20.0)
+    parser.add_argument('--edge-angular-buffer', type=float, default=1.0)
+    parser.add_argument('--edge-cartesian-buffer', type=float, default=None)
 
     parser.add_argument('--overwrite', action='store_true', default=False)
     parser.add_argument('--quiet', action='store_true', default=False)
@@ -133,6 +136,12 @@ def run_pipeline(args):
         raise ValueError(f'RA bounds must satisfy ra_min < ra_max, got {args.ra_min} >= {args.ra_max}')
     if args.min_group_size < 1:
         raise ValueError(f'min_group_size must be >= 1, got {args.min_group_size}')
+    if args.edge_radial_buffer < 0:
+        raise ValueError(f'edge_radial_buffer must be >= 0, got {args.edge_radial_buffer}')
+    if args.edge_angular_buffer is not None and args.edge_angular_buffer < 0:
+        args.edge_angular_buffer = None
+    if args.edge_cartesian_buffer is not None and args.edge_cartesian_buffer < 0:
+        raise ValueError(f'edge_cartesian_buffer must be >= 0, got {args.edge_cartesian_buffer}')
 
     os.makedirs(args.log_dir, exist_ok=True)
     run_tag = time.strftime('%Y%m%d_%H%M%S', time.gmtime())
@@ -216,9 +225,17 @@ def run_pipeline(args):
                                                      rand_table=rand_tbl,
                                                      cosmo=cosmo, h=args.h,
                                                      group_col='GROUPID',
-                                                     min_rand_for_shape=3)
+                                                     min_rand_for_shape=3,
+                                                     edge_radial_buffer=args.edge_radial_buffer,
+                                                     edge_angular_buffer_deg=args.edge_angular_buffer,
+                                                     edge_cartesian_buffer=args.edge_cartesian_buffer)
+                if 'EDGE' in group_table.colnames:
+                    n_edge = int(sum(group_table['EDGE']))
+                    edge_msg = f' edge={n_edge} clean={len(group_table) - n_edge}'
+                else:
+                    edge_msg = ''
                 _log(log_fh, f'Case={key} Step=consolidate_groups done elapsed_s={time.time() - t_step:.3f} '
-                             f'n_voids={len(group_table)}',
+                             f'n_voids={len(group_table)}{edge_msg}',
                      verbose=verbose)
 
                 t_step = time.time()
