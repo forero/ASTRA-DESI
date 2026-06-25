@@ -43,6 +43,15 @@ _GROUP_ROW_DTYPE = np.dtype([('TRACERTYPE', _GROUP_TRACER_DTYPE),
                              ('A', np.float32),
                              ('B', np.float32),
                              ('C', np.float32),
+                             ('X1', np.float32),
+                             ('X2', np.float32),
+                             ('X3', np.float32),
+                             ('Y1', np.float32),
+                             ('Y2', np.float32),
+                             ('Y3', np.float32),
+                             ('Z1', np.float32),
+                             ('Z2', np.float32),
+                             ('Z3', np.float32),
                              ('LINKLEN', np.float32),
                              ('ISDATA', np.bool_)])
 
@@ -58,6 +67,15 @@ _GROUP_FITS_COLUMNS = (('TRACERTYPE', '32A'),
                        ('A', 'E'),
                        ('B', 'E'),
                        ('C', 'E'),
+                       ('X1', 'E'),
+                       ('X2', 'E'),
+                       ('X3', 'E'),
+                       ('Y1', 'E'),
+                       ('Y2', 'E'),
+                       ('Y3', 'E'),
+                       ('Z1', 'E'),
+                       ('Z2', 'E'),
+                       ('Z3', 'E'),
                        ('LINKLEN', 'E'),
                        ('ISDATA', 'L'))
 
@@ -530,9 +548,10 @@ def _group_inertia(coords, labels):
         coords (np.ndarray): Array of shape (N, 3) containing 3D coordinates.
         labels (np.ndarray): Array of cluster labels for the coordinates.
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        Returns labels, counts of points in each group, and the center of mass
-        (xcm, ycm, zcm) and the semi-axis lengths (A, B, C) of the inertia ellipsoid.
+        Tuple[np.ndarray, ...]:
+        Returns labels, counts of points in each group, the center of mass
+        (xcm, ycm, zcm), semi-axis lengths (A, B, C), and axis-vector
+        components of the inertia ellipsoid.
     """
     labs, counts = np.unique(labels, return_counts=True)
     ngrp = labs.size
@@ -566,15 +585,28 @@ def _group_inertia(coords, labels):
     M[:,0,2] = Sxz; M[:,2,0] = Sxz
     M[:,1,2] = Syz; M[:,2,1] = Syz
 
-    vals = np.linalg.eigvalsh(M)
-    vals = np.clip(vals, 0, None)
-    A = np.sqrt(vals[:,2]); B = np.sqrt(vals[:,1]); C = np.sqrt(vals[:,0])
+    vals, vecs = np.linalg.eigh(M)
+    order = np.argsort(vals, axis=1)[:, ::-1]
+    vals = np.take_along_axis(vals, order, axis=1)
+    vec_order = np.repeat(order[:, np.newaxis, :], 3, axis=1)
+    vecs = np.take_along_axis(vecs, vec_order, axis=2)
 
-    return labs.astype(np.int32), counts.astype(np.int32), xcm, ycm, zcm, A, B, C
+    for igrp in range(ngrp):
+        for iaxis in range(3):
+            col = vecs[igrp, :, iaxis]
+            anchor = int(np.argmax(np.abs(col)))
+            if np.isfinite(col[anchor]) and col[anchor] < 0.0:
+                vecs[igrp, :, iaxis] *= -1.0
+
+    vals = np.clip(vals, 0, None)
+    A = np.sqrt(vals[:,0]); B = np.sqrt(vals[:,1]); C = np.sqrt(vals[:,2])
+
+    return labs.astype(np.int32), counts.astype(np.int32), xcm, ycm, zcm, A, B, C, vecs
 
 
 def _build_block_rows(ttype, webtype, tids, randiters, isdata,
-                      labels, labs, counts, xcm, ycm, zcm, A, B, C, link_len):
+                      labels, labs, counts, xcm, ycm, zcm, A, B, C,
+                      axis_vectors, link_len):
     """
     Create structured probability rows for a block.
 
@@ -593,6 +625,8 @@ def _build_block_rows(ttype, webtype, tids, randiters, isdata,
         A (np.ndarray): Semi-axis A for each cluster.
         B (np.ndarray): Semi-axis B for each cluster.
         C (np.ndarray): Semi-axis C for each cluster.
+        axis_vectors (np.ndarray): Unit eigenvectors for each cluster with shape
+            (N_GROUPS, 3, 3). Column j is the vector for axis j.
         link_len (float): Linking length used in clustering.
     Returns:
         np.ndarray: Structured array of group rows.
@@ -613,6 +647,15 @@ def _build_block_rows(ttype, webtype, tids, randiters, isdata,
     rows['A'] = A[idx].astype(np.float32, copy=False)
     rows['B'] = B[idx].astype(np.float32, copy=False)
     rows['C'] = C[idx].astype(np.float32, copy=False)
+    rows['X1'] = axis_vectors[idx, 0, 0].astype(np.float32, copy=False)
+    rows['X2'] = axis_vectors[idx, 0, 1].astype(np.float32, copy=False)
+    rows['X3'] = axis_vectors[idx, 0, 2].astype(np.float32, copy=False)
+    rows['Y1'] = axis_vectors[idx, 1, 0].astype(np.float32, copy=False)
+    rows['Y2'] = axis_vectors[idx, 1, 1].astype(np.float32, copy=False)
+    rows['Y3'] = axis_vectors[idx, 1, 2].astype(np.float32, copy=False)
+    rows['Z1'] = axis_vectors[idx, 2, 0].astype(np.float32, copy=False)
+    rows['Z2'] = axis_vectors[idx, 2, 1].astype(np.float32, copy=False)
+    rows['Z3'] = axis_vectors[idx, 2, 2].astype(np.float32, copy=False)
     rows['LINKLEN'] = np.full(n, float(link_len), dtype=np.float32)
     rows['ISDATA'] = isdata.astype(bool, copy=False)
     return rows
@@ -806,11 +849,12 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
 
             coords = np.column_stack((x_block, y_block, z_block)).astype(np.float32, copy=False)
             labels = _dbscan_labels(coords, eps)
-            labs, counts, xcm, ycm, zcm, A, B, C = _group_inertia(coords, labels)
+            labs, counts, xcm, ycm, zcm, A, B, C, axis_vectors = _group_inertia(coords, labels)
 
             rows = _build_block_rows(ttype, webtype,
                                      tids_block, rand_block, isdata_block,
                                      labels, labs, counts, xcm, ycm, zcm, A, B, C,
+                                     axis_vectors,
                                      link_len=eps)
             store.append(rows)
 

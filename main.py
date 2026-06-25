@@ -24,7 +24,7 @@ from group_finder.watershed import assign_group_ids_to_tables, run_watershed
 
 DEFAULT_DATA_DIR_DR2 = '/global/cfs/cdirs/desi/survey/catalogs/DA2/LSS/loa-v1/LSScats/v1.1/nonKP/'
 DEFAULT_DATA_DIR_DR1 = '/global/cfs/cdirs/desi/public/dr1/vac/dr1/lss/guadalupe/v1.0/LSScats/clustering'
-DEFAULT_OUTPUT_DIR = '/pscratch/sd/v/vtorresg/astra-voids/v1.0/'
+DEFAULT_OUTPUT_DIR = '/pscratch/sd/v/vtorresg/cosmic-web/dr1/void-cat'
 DEFAULT_LOG_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'logs')
 DEFAULT_CAPS_BY_RELEASE = {'dr2': ['NGC', 'SGC'],
                            'dr1': list(DEFAULT_CAPS_DR1)}
@@ -33,12 +33,11 @@ DEFAULT_CAPS_BY_RELEASE = {'dr2': ['NGC', 'SGC'],
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--release', choices=['dr2', 'dr1'], default='dr2')
+    parser.add_argument('--release', choices=['dr2', 'dr1'], default='dr1')
     parser.add_argument('--data-dir', default=None)
     parser.add_argument('--output-dir', default=DEFAULT_OUTPUT_DIR)
     parser.add_argument('--log-dir', default=DEFAULT_LOG_DIR)
-    parser.add_argument('--mask-dir', default=None,
-                        help='DR1 HEALPix mask directory; ASTRA_DR1_MASK_DIR overrides this')
+    parser.add_argument('--mask-dir', default=None)
 
     parser.add_argument('--tracers', nargs='+', default=None, choices=list(DEFAULT_TRACERS_ALL))
     parser.add_argument('--caps', nargs='+', default=None, choices=['NGC', 'SGC'])

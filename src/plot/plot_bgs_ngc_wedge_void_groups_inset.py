@@ -1,4 +1,4 @@
-import argparse, os
+import argparse, glob, os, re
 from pathlib import Path
 
 import fitsio
@@ -23,7 +23,9 @@ DEFAULT_RAW = '/pscratch/sd/v/vtorresg/cosmic-web/dr2/raw/zone_NGC_BGS.fits.gz'
 DEFAULT_PROB = ('/pscratch/sd/v/vtorresg/cosmic-web/dr2/probabilities/bgs/ngc/'
                 'zone_NGC_BGS_probability_iterdata.fits.gz')
 DEFAULT_CACHE = 'cache/zone_NGC_BGS_target_class_cache.fits.gz'
-DEFAULT_VOIDS = '/pscratch/sd/v/vtorresg/astra-voids/v1.0/voids_BGS_ANY_NGC.fits'
+DEFAULT_CLASS_GLOB = '/pscratch/sd/v/vtorresg/cosmic-web/dr2/classification/bgs/ngc/zone_NGC_BGS_iter*.fits.gz'
+DEFAULT_RANDOM_VOID_CACHE = 'cache/zone_NGC_BGS_random_void_any_iter_cache.fits.gz'
+DEFAULT_VOIDS = '/pscratch/sd/v/vtorresg/cosmic-web/dr2/void-cat-v2/dr2/voids_BGS_ANY_NGC.fits'
 DEFAULT_OUTPUT = 'plots/bgs_ngc_wedge_void_groups_inset.png'
 
 CLASS_NAMES = np.array(['Void', 'Sheet', 'Filament', 'Knot'], dtype='U8')
@@ -39,6 +41,18 @@ def parse_args():
     p.add_argument('--prob-input', default=DEFAULT_PROB)
     p.add_argument('--class-cache', default=DEFAULT_CACHE)
     p.add_argument('--rebuild-cache', action='store_true')
+    p.add_argument('--classification-glob', default=DEFAULT_CLASS_GLOB)
+    p.add_argument('--random-void-cache', default=DEFAULT_RANDOM_VOID_CACHE)
+    p.add_argument('--rebuild-random-void-cache', action='store_true')
+    p.add_argument('--random-iterations', default='all')
+    p.add_argument('--random-chunk-size', type=int, default=1_000_000)
+    p.add_argument('--random-void-background', dest='random_void_background', action='store_true')
+    p.add_argument('--no-random-void-background', dest='random_void_background', action='store_false')
+    p.set_defaults(random_void_background=True)
+    p.add_argument('--random-void-color', default='#f2f2f2')
+    p.add_argument('--random-void-point-size', type=float, default=0.015)
+    p.add_argument('--random-void-alpha', type=float, default=0.12)
+    p.add_argument('--zoom-random-void-point-scale', type=float, default=1.8)
     p.add_argument('--void-input', default=DEFAULT_VOIDS)
     p.add_argument('--output', default=DEFAULT_OUTPUT)
     p.add_argument('--slice-width-deg', type=float, default=6.0)
@@ -50,7 +64,7 @@ def parse_args():
     p.add_argument('--point-size', dest='galaxy_point_size', type=float, default=0.03)
     p.add_argument('--galaxy-point-size', dest='galaxy_point_size', type=float, default=0.03)
     p.add_argument('--alpha', type=float, default=0.45)
-    p.add_argument('--void-center-size', type=float, default=3.0)
+    p.add_argument('--void-center-size', type=float, default=1.0)
     p.add_argument('--void-alpha', type=float, default=0.95)
     p.add_argument('--void-ellipse-alpha', type=float, default=0.9)
     p.add_argument('--void-ellipse-lw', type=float, default=0.4)
@@ -82,19 +96,19 @@ def parse_args():
     p.add_argument('--hide-legend', action='store_true')
     p.add_argument('--plot-void-class', action='store_true')
 
-    p.add_argument('--zoom-ra-min', type=float, default=214.0)
-    p.add_argument('--zoom-ra-max', type=float, default=226.0)
+    p.add_argument('--zoom-ra-min', type=float, default=None)
+    p.add_argument('--zoom-ra-max', type=float, default=None)
     p.add_argument('--zoom-r-min', type=float, default=0.0)
     p.add_argument('--zoom-r-max', type=float, default=300.0)
-    p.add_argument('--zoom-ra-tick-step', type=float, default=5.0)
+    p.add_argument('--zoom-ra-tick-step', type=float, default=15.0)
     p.add_argument('--zoom-r-tick-step', type=float, default=100.0)
     p.add_argument('--zoom-point-scale', type=float, default=2.2)
     p.add_argument('--zoom-galaxy-point-scale', type=float, default=0.3)
     p.add_argument('--zoom-alpha-boost', type=float, default=0.15)
-    p.add_argument('--inset-left', type=float, default=0.61)
-    p.add_argument('--inset-bottom', type=float, default=0.56)
-    p.add_argument('--inset-width', type=float, default=0.31)
-    p.add_argument('--inset-height', type=float, default=0.31)
+    p.add_argument('--inset-left', type=float, default=0.49)
+    p.add_argument('--inset-bottom', type=float, default=0.42)
+    p.add_argument('--inset-width', type=float, default=0.40)
+    p.add_argument('--inset-height', type=float, default=0.40)
 
     return p.parse_args()
 
@@ -110,6 +124,228 @@ def find_first_non_data_row(hdu, data_randiter):
         else:
             hi = mid
     return lo
+
+
+def find_first_non_isdata_row(hdu):
+    nrows = hdu.get_nrows()
+    lo, hi = 0, nrows
+    while lo < hi:
+        mid = (lo + hi) // 2
+        value = bool(hdu.read(columns=['ISDATA'], rows=[mid])['ISDATA'][0])
+        if value:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def parse_iteration_spec(spec):
+    text = str(spec).strip().lower()
+    if text in ('', 'all', '*'):
+        return None
+
+    out = set()
+    for item in text.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if '-' in item:
+            lo_text, hi_text = item.split('-', 1)
+            lo = int(lo_text)
+            hi = int(hi_text)
+            if hi < lo:
+                raise ValueError(f'Invalid iteration range: {item}')
+            out.update(range(lo, hi + 1))
+        else:
+            out.add(int(item))
+
+    if not out:
+        raise ValueError(f'No iterations parsed from --random-iterations={spec!r}.')
+    return out
+
+
+def iteration_from_path(path):
+    match = re.search(r'iter(\d+)', path.name)
+    if not match:
+        raise ValueError(f'Could not parse iteration number from {path}.')
+    return int(match.group(1))
+
+
+def select_iteration_paths(pattern, iteration_spec):
+    wanted = parse_iteration_spec(iteration_spec)
+    paths = [Path(p) for p in glob.glob(pattern)]
+    pairs = [(iteration_from_path(path), path) for path in paths]
+    if wanted is not None:
+        pairs = [(iteration, path) for iteration, path in pairs if iteration in wanted]
+    pairs.sort(key=lambda item: item[0])
+    if not pairs:
+        raise RuntimeError(f'No classification files matched {pattern!r} and iterations {iteration_spec!r}.')
+    return pairs
+
+
+def read_r_thresholds(class_path):
+    with fitsio.FITS(str(class_path)) as fobj:
+        header = fobj[1].read_header()
+    return float(header['RLOWER']), float(header['RMED']), float(header['RUPPER'])
+
+
+def r_class_code(n_data, n_rand, thresholds):
+    denom = n_data + n_rand
+    r_value = np.divide(n_data - n_rand,
+                        denom,
+                        out=np.zeros(len(n_data), dtype=np.float32),
+                        where=denom != 0.0)
+    return np.digitize(r_value, thresholds, right=False).astype(np.uint8), r_value
+
+
+def empty_random_void_array():
+    return np.empty(0, dtype=[('TARGETID', 'i8'),
+                              ('RANDITER', 'i4'),
+                              ('RA', 'f8'),
+                              ('DEC', 'f8'),
+                              ('Z', 'f8'),
+                              ('R_VALUE', 'f4')])
+
+
+def build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
+                            data_randiter, chunk_size, dec_bounds):
+    if chunk_size <= 0:
+        raise ValueError('--random-chunk-size must be positive.')
+
+    iter_paths = select_iteration_paths(class_pattern, iteration_spec)
+    thresholds = read_r_thresholds(iter_paths[0][1])
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_random = 0
+    total_void = 0
+    total_written = 0
+    wrote_table = False
+    header = {'RLOWER': thresholds[0],
+              'RMED': thresholds[1],
+              'RUPPER': thresholds[2],
+              'SOURCE': 'random-voids',
+              'ITERSPEC': iteration_spec}
+    if dec_bounds is not None:
+        header['DECLO'] = dec_bounds[0]
+        header['DECHI'] = dec_bounds[1]
+
+    with fitsio.FITS(str(raw_path)) as raw_fobj, fitsio.FITS(str(cache_path), 'rw', clobber=True) as out_fobj:
+        raw_hdu = raw_fobj[1]
+        raw_nrows = raw_hdu.get_nrows()
+        n_data_raw = find_first_non_data_row(raw_hdu, data_randiter=data_randiter)
+
+        for iter_idx, class_path in iter_paths:
+            with fitsio.FITS(str(class_path)) as class_fobj:
+                class_hdu = class_fobj[1]
+                n_class_rows = class_hdu.get_nrows()
+                n_class_data = find_first_non_isdata_row(class_hdu)
+                n_class_random = n_class_rows - n_class_data
+                raw_start = n_data_raw * (iter_idx + 1)
+                raw_stop = raw_start + n_class_random
+                if raw_stop > raw_nrows:
+                    raise RuntimeError('Raw row block for iteration '
+                                       f'{iter_idx} exceeds raw catalog size: '
+                                       f'{raw_start:,}..{raw_stop:,} > {raw_nrows:,}.')
+
+                iter_random = 0
+                iter_void = 0
+                iter_written = 0
+                for start in range(0, n_class_random, chunk_size):
+                    stop = min(start + chunk_size, n_class_random)
+                    class_rows = np.arange(n_class_data + start, n_class_data + stop, dtype=np.int64)
+                    class_arr = class_hdu.read(columns=['TARGETID', 'RANDITER', 'NDATA', 'NRAND'],
+                                               rows=class_rows)
+
+                    n_data = np.asarray(class_arr['NDATA'], dtype=np.float32)
+                    n_rand = np.asarray(class_arr['NRAND'], dtype=np.float32)
+                    class_codes, r_value = r_class_code(n_data=n_data, n_rand=n_rand,
+                                                        thresholds=thresholds)
+                    void_mask = class_codes == 0
+
+                    iter_random += len(class_arr)
+                    if not np.any(void_mask):
+                        continue
+
+                    iter_void += int(void_mask.sum())
+                    raw_rows = raw_start + np.arange(start, stop, dtype=np.int64)
+                    raw_arr = raw_hdu.read(columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z'],
+                                           rows=raw_rows[void_mask])
+
+                    if not np.array_equal(raw_arr['TARGETID'], class_arr['TARGETID'][void_mask]):
+                        raise RuntimeError('TARGETID order mismatch between raw and classification rows '
+                                           f'for iteration {iter_idx}.')
+                    if not np.all(raw_arr['RANDITER'] == class_arr['RANDITER'][void_mask]):
+                        raise RuntimeError('RANDITER mismatch between raw and classification rows '
+                                           f'for iteration {iter_idx}.')
+
+                    ra = np.asarray(raw_arr['RA'], dtype=np.float64)
+                    dec = np.asarray(raw_arr['DEC'], dtype=np.float64)
+                    redshift = np.asarray(raw_arr['Z'], dtype=np.float64)
+                    finite = np.isfinite(ra) & np.isfinite(dec) & np.isfinite(redshift)
+                    if dec_bounds is not None:
+                        finite &= (dec >= dec_bounds[0]) & (dec <= dec_bounds[1])
+                    if not np.any(finite):
+                        continue
+
+                    out = np.empty(len(ra[finite]), dtype=empty_random_void_array().dtype)
+                    out['TARGETID'] = np.asarray(raw_arr['TARGETID'], dtype=np.int64)[finite]
+                    out['RANDITER'] = np.asarray(raw_arr['RANDITER'], dtype=np.int32)[finite]
+                    out['RA'] = ra[finite]
+                    out['DEC'] = dec[finite]
+                    out['Z'] = redshift[finite]
+                    out['R_VALUE'] = np.asarray(r_value[void_mask], dtype=np.float32)[finite]
+
+                    if wrote_table:
+                        out_fobj[-1].append(out)
+                    else:
+                        out_fobj.write(out, extname='RANDOM_VOIDS', header=header)
+                        wrote_table = True
+                    iter_written += len(out)
+
+                total_random += iter_random
+                total_void += iter_void
+                total_written += iter_written
+                print(f'[random-voids] iter {iter_idx:03d}: scanned {iter_random:,} random rows, '
+                      f'void={iter_void:,}, cached={iter_written:,}', flush=True)
+
+        if not wrote_table:
+            out_fobj.write(empty_random_void_array(), extname='RANDOM_VOIDS', header=header)
+
+    status = (f'rebuilt:{len(iter_paths)}iters:'
+              f'scanned={total_random:,}:void={total_void:,}:written={total_written:,}:'
+              f'R<{thresholds[0]:.3f}')
+    if dec_bounds is not None:
+        status += f':DEC=[{dec_bounds[0]:.3f},{dec_bounds[1]:.3f}]'
+    return fitsio.read(str(cache_path), columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z', 'R_VALUE']), status
+
+
+def load_or_build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
+                                    data_randiter, chunk_size, dec_bounds, rebuild):
+    if (not rebuild) and cache_path.exists():
+        with fitsio.FITS(str(cache_path)) as fobj:
+            header = fobj[1].read_header()
+            cached_has_dec = 'DECLO' in header and 'DECHI' in header
+            if cached_has_dec and dec_bounds is None:
+                raise RuntimeError(f'{cache_path} was built with a DEC prefilter. '
+                                   'Use --rebuild-random-void-cache or a different '
+                                   '--random-void-cache for a full-range random plot.')
+            if cached_has_dec and dec_bounds is not None:
+                cached_dec = (float(header['DECLO']), float(header['DECHI']))
+                if not np.allclose(cached_dec, dec_bounds, rtol=0.0, atol=1.0e-6):
+                    raise RuntimeError(f'{cache_path} was built for DEC={cached_dec}, '
+                                       f'but this run needs DEC={dec_bounds}. '
+                                       'Use --rebuild-random-void-cache or a different '
+                                       '--random-void-cache.')
+            arr = fobj[1].read(columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z', 'R_VALUE'])
+        return arr, f'loaded:{len(arr):,}'
+
+    return build_random_void_cache(raw_path=raw_path,
+                                   class_pattern=class_pattern,
+                                   iteration_spec=iteration_spec,
+                                   cache_path=cache_path,
+                                   data_randiter=data_randiter,
+                                   chunk_size=chunk_size,
+                                   dec_bounds=dec_bounds)
 
 
 def select_auto_dec0(dec, width_deg, step_deg):
@@ -289,6 +525,18 @@ def _ellipse_theta_r(theta0, r0, a, b, npts):
     return theta, r
 
 
+def _radial_label_rotation(ax, theta_deg, r_min, r_max):
+    theta = np.deg2rad(theta_deg)
+    r0 = float(r_min)
+    r1 = float(r_max)
+    if not np.isfinite(r0) or not np.isfinite(r1) or r0 == r1:
+        return 0.0
+
+    p0 = ax.transData.transform((theta, r0))
+    p1 = ax.transData.transform((theta, r1))
+    return float(np.degrees(np.arctan2(p1[1] - p0[1], p1[0] - p0[0])))
+
+
 def _xyz_to_radec(x, y, z):
     r = np.sqrt(x * x + y * y + z * z)
     ra = np.degrees(np.arctan2(y, x)) % 360.0
@@ -340,7 +588,10 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
                    plot_ellipses=True, galaxy_theta=None, galaxy_r=None, galaxy_cls=None,
                    class_names=None, class_colors=None, galaxy_point_size=None,
                    member_theta=None, member_r=None, member_colors=None,
-                   member_point_size=None, member_alpha=None):
+                   member_point_size=None, member_alpha=None,
+                   random_void_theta=None, random_void_r=None,
+                   random_void_color='white', random_void_point_size=0.02,
+                   random_void_alpha=0.12):
     axins = fig.add_axes(inset_rect, projection='polar', facecolor=bg_color)
     axins.set_theta_zero_location('N')
     axins.set_theta_direction(1)
@@ -350,6 +601,18 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
               & (theta_deg <= theta_zoom_max_deg)
               & (void_r >= r_zoom_min)
               & (void_r <= r_zoom_max))
+
+    if random_void_theta is not None and random_void_r is not None:
+        rv_deg = np.rad2deg(random_void_theta)
+        rv_zoom = ((rv_deg >= theta_zoom_min_deg)
+                   & (rv_deg <= theta_zoom_max_deg)
+                   & (random_void_r >= r_zoom_min)
+                   & (random_void_r <= r_zoom_max))
+        if np.any(rv_zoom):
+            axins.scatter(random_void_theta[rv_zoom], random_void_r[rv_zoom],
+                          s=random_void_point_size, c=random_void_color,
+                          alpha=random_void_alpha, linewidths=0,
+                          rasterized=True, zorder=0)
 
     if galaxy_theta is not None and galaxy_r is not None and galaxy_cls is not None:
         gdeg = np.rad2deg(galaxy_theta)
@@ -414,8 +677,13 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
     if len(ra_tick_values) > 0:
         max_ra_ticks = 7
         if len(ra_tick_values) > max_ra_ticks:
-            idx = np.linspace(0, len(ra_tick_values) - 1, max_ra_ticks).round().astype(int)
-            ra_tick_values = ra_tick_values[idx]
+            step_factor = int(np.ceil((len(ra_tick_values) - 1) / (max_ra_ticks - 1)))
+            tick_step = ra_tick_step * step_factor
+            ra_min = theta_zoom_min_deg + ra_center_deg
+            ra_max = theta_zoom_max_deg + ra_center_deg
+            ra_tick_values = np.arange(np.ceil(ra_min / tick_step) * tick_step,
+                                       np.floor(ra_max / tick_step) * tick_step + 0.5 * tick_step,
+                                       tick_step,)
 
         axins.set_xticks(np.deg2rad(ra_tick_values - ra_center_deg))
         axins.set_xticklabels([rf'${t:.0f}^\circ$' for t in ra_tick_values], fontsize=8)
@@ -432,7 +700,26 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
         axins.set_yticklabels([rf'${int(t):d}$' for t in rticks], fontsize=8)
         axins.set_rlabel_position(theta_zoom_min_deg + 0.12 * dtheta)
 
-    axins.tick_params(colors='white', labelsize=8)
+    axins.tick_params(axis='x', colors='white', labelsize=8, pad=-3)
+    axins.tick_params(axis='y', colors='white', labelsize=8, pad=-2)
+
+    axins.text(0.5, 0.85, r'$\alpha\;(\mathrm{RA})$',
+            transform=axins.transAxes, ha='center', va='bottom',
+            fontsize=12, color='white', rotation=6,
+            rotation_mode='anchor', clip_on=False)
+
+    r_axis_theta_deg = theta_zoom_min_deg + 0.2 * dtheta
+    r_axis_rotation = _radial_label_rotation(axins, r_axis_theta_deg,
+                                            r_zoom_min, r_zoom_max)
+
+    r_label_radius = r_zoom_min + 0.3 * (r_zoom_max - r_zoom_min)
+
+    # axins.text(np.deg2rad(r_axis_theta_deg), r_label_radius,
+    #         r'$r\,[\mathrm{Mpc}]$',
+    #         fontsize=12, color='white',
+    #         rotation=r_axis_rotation,
+    #         rotation_mode='anchor', ha='left', va='center',
+    #         clip_on=False)
 
     th1 = np.deg2rad(theta_zoom_min_deg)
     th2 = np.deg2rad(theta_zoom_max_deg)
@@ -457,6 +744,7 @@ def main():
     raw_path = Path(args.raw_input)
     prob_path = Path(args.prob_input)
     cache_path = Path(args.class_cache)
+    random_void_cache_path = Path(args.random_void_cache)
     void_path = Path(args.void_input)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -513,10 +801,49 @@ def main():
     z_slice = redshift[in_slice]
     cls_slice = mapped_class[in_slice]
 
+    random_void_ra = np.array([], dtype=np.float64)
+    random_void_dec = np.array([], dtype=np.float64)
+    random_void_z = np.array([], dtype=np.float64)
+    random_void_r_value = np.array([], dtype=np.float32)
+    random_void_status = 'disabled'
+    n_random_void_total = 0
+    n_random_void_finite = 0
+    if args.random_void_background:
+        random_arr, random_void_status = load_or_build_random_void_cache(
+            raw_path=raw_path,
+            class_pattern=args.classification_glob,
+            iteration_spec=args.random_iterations,
+            cache_path=random_void_cache_path,
+            data_randiter=args.data_randiter,
+            chunk_size=args.random_chunk_size,
+            dec_bounds=(dec_lo, dec_hi),
+            rebuild=args.rebuild_random_void_cache)
+        n_random_void_total = len(random_arr)
+        if n_random_void_total > 0:
+            random_void_ra = np.asarray(random_arr['RA'], dtype=np.float64)
+            random_void_dec = np.asarray(random_arr['DEC'], dtype=np.float64)
+            random_void_z = np.asarray(random_arr['Z'], dtype=np.float64)
+            random_void_r_value = np.asarray(random_arr['R_VALUE'], dtype=np.float32)
+            finite_random = (np.isfinite(random_void_ra)
+                             & np.isfinite(random_void_dec)
+                             & np.isfinite(random_void_z))
+            finite_random &= (random_void_dec >= dec_lo) & (random_void_dec <= dec_hi)
+            random_void_ra = random_void_ra[finite_random]
+            random_void_dec = random_void_dec[finite_random]
+            random_void_z = random_void_z[finite_random]
+            random_void_r_value = random_void_r_value[finite_random]
+            n_random_void_finite = len(random_void_ra)
+
     z_max = float(np.max(z_slice))
+    if len(random_void_z) > 0:
+        z_max = max(z_max, float(np.max(random_void_z)))
     z_grid = np.linspace(0.0, z_max + 0.02, args.z_grid_size, dtype=np.float64)
     r_grid_mpc = Planck18.comoving_distance(z_grid).value
     r_slice_mpc = np.interp(z_slice, z_grid, r_grid_mpc)
+    random_void_r_mpc = np.interp(random_void_z, z_grid, r_grid_mpc) if len(random_void_z) > 0 else np.array([], dtype=np.float64)
+    random_void_in_r = random_void_r_mpc <= args.rmax_mpc
+    random_void_theta = np.deg2rad(random_void_ra - args.ra_center_deg) if len(random_void_ra) > 0 else np.array([], dtype=np.float64)
+    n_random_void_rmax = int(np.count_nonzero(random_void_in_r))
 
     n_total_slice = int(in_slice.sum())
     in_r = r_slice_mpc <= args.rmax_mpc
@@ -671,12 +998,18 @@ def main():
 
     ra_min = float(np.min(ra_slice))
     ra_max = float(np.max(ra_slice))
+    if n_random_void_rmax > 0:
+        ra_min = min(ra_min, float(np.min(random_void_ra[random_void_in_r])))
+        ra_max = max(ra_max, float(np.max(random_void_ra[random_void_in_r])))
     if len(void_ra) > 0:
         ra_min = min(ra_min, float(np.min(void_ra)))
         ra_max = max(ra_max, float(np.max(void_ra)))
 
     theta_min_deg = float(np.rad2deg(np.min(theta)))
     theta_max_deg = float(np.rad2deg(np.max(theta)))
+    if n_random_void_rmax > 0:
+        theta_min_deg = min(theta_min_deg, float(np.rad2deg(np.min(random_void_theta[random_void_in_r]))))
+        theta_max_deg = max(theta_max_deg, float(np.rad2deg(np.max(random_void_theta[random_void_in_r]))))
     if len(void_ra) > 0:
         theta_void = np.deg2rad(void_ra - args.ra_center_deg)
         theta_min_deg = min(theta_min_deg, float(np.rad2deg(np.min(theta_void))))
@@ -686,6 +1019,16 @@ def main():
     ax = fig.add_subplot(111, projection='polar', facecolor=args.bg_color)
     ax.set_theta_zero_location('N')
     ax.set_theta_direction(1)
+
+    if args.random_void_background and n_random_void_rmax > 0:
+        ax.scatter(random_void_theta[random_void_in_r],
+                   random_void_r_mpc[random_void_in_r],
+                   s=args.random_void_point_size,
+                   c=args.random_void_color,
+                   alpha=args.random_void_alpha,
+                   linewidths=0,
+                   rasterized=True,
+                   zorder=0)
 
     if args.plot_galaxies:
         for code, cname in enumerate(CLASS_NAMES):
@@ -750,12 +1093,19 @@ def main():
                  pad=28,
                  color='white',)
 
+    ax.text(0.2, 0.215, rf'$\delta = {args.slice_width_deg:.0f}^\circ$',
+            transform=ax.transAxes, ha='left', va='center',
+            fontsize=20, color='white', rotation=-7,
+            clip_on=False)
+
     theta_plot = theta[in_r]
     r_plot = r_slice_mpc[in_r]
     cls_plot = cls_slice[in_r]
 
-    theta_zoom_min_deg = args.zoom_ra_min - args.ra_center_deg
-    theta_zoom_max_deg = args.zoom_ra_max - args.ra_center_deg
+    theta_zoom_min_deg = theta_min_deg if args.zoom_ra_min is None else args.zoom_ra_min - args.ra_center_deg
+    theta_zoom_max_deg = theta_max_deg if args.zoom_ra_max is None else args.zoom_ra_max - args.ra_center_deg
+    if theta_zoom_min_deg >= theta_zoom_max_deg:
+        raise ValueError('Inset RA range must satisfy --zoom-ra-min < --zoom-ra-max.')
 
     add_void_inset(fig=fig, ax=ax, void_theta=void_theta, void_r=void_r_mpc,
                    void_ids=void_ids, void_a=void_a, void_b=void_b, void_reff=void_reff,
@@ -772,10 +1122,24 @@ def main():
                    galaxy_cls=(cls_plot if args.plot_galaxies else None), class_names=CLASS_NAMES, class_colors=CLASS_COLORS,
                    galaxy_point_size=(args.galaxy_point_size * args.zoom_galaxy_point_scale), member_theta=member_theta,
                    member_r=member_r, member_colors=member_colors, member_point_size=(args.member_point_size * args.zoom_point_scale),
-                   member_alpha=min(1.0, args.member_alpha + args.zoom_alpha_boost),)
+                   member_alpha=min(1.0, args.member_alpha + args.zoom_alpha_boost),
+                   random_void_theta=(random_void_theta if args.random_void_background else None),
+                   random_void_r=(random_void_r_mpc if args.random_void_background else None),
+                   random_void_color=args.random_void_color,
+                   random_void_point_size=args.random_void_point_size * args.zoom_random_void_point_scale,
+                   random_void_alpha=min(1.0, args.random_void_alpha + args.zoom_alpha_boost),)
 
     if not args.hide_legend:
         handles = []
+        if args.random_void_background and n_random_void_rmax > 0:
+            handles.append(Line2D([0], [0],
+                                  marker='o',
+                                  linestyle='',
+                                  markersize=5,
+                                  markerfacecolor=args.random_void_color,
+                                  markeredgecolor='none',
+                                  label='Random voids',
+                                  alpha=min(0.8, max(args.random_void_alpha * 3.0, 0.25))))
         if args.plot_galaxies:
             handles.append(Line2D([0], [0],
                            marker='o',
@@ -822,6 +1186,8 @@ def main():
     print(f'Raw FITS: {raw_path}')
     print(f'Prob FITS: {prob_path}')
     print(f'Class cache: {cache_path} ({cache_status})')
+    print(f'Classification glob: {args.classification_glob}')
+    print(f'Random void cache: {random_void_cache_path} ({random_void_status})')
     print(f'Void catalog: {void_path}')
     if h_key:
         print(f'Void catalog h: {h_void:.6f} (from {h_key})')
@@ -832,6 +1198,9 @@ def main():
           f'in DEC slice={n_void_slice:,} | in rmax={n_void_rmax:,}')
     if args.plot_members:
         print(f'Void members: total={n_members_total:,} | plotted={n_members_plotted:,}')
+    if args.random_void_background:
+        print(f'Random void background: total={n_random_void_total:,} | '
+              f'finite={n_random_void_finite:,} | in rmax={n_random_void_rmax:,}')
     print(f'Output PNG: {out_path}')
     print(f'Total rows in raw FITS: {n_total:,}')
     print(f'Rows kept as real galaxies (RANDITER={args.data_randiter}): {n_data:,}')

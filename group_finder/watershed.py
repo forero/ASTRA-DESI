@@ -147,15 +147,37 @@ def assign_group_ids_to_tables(data_table, rand_table, group_of, group_col='GROU
     rand_table[group_col] = np.asarray(group_of[n_data:], dtype=np.int32)
 
 
-def compute_semi_axes(x_members, y_members, z_members, x_cm, y_cm, z_cm):
+def _fix_eigenvector_signs(eigenvectors):
+    '''
+    Apply a deterministic sign convention to eigenvectors.
+
+    Eigenvectors are directions, so v and -v are mathematically equivalent. For
+    catalog output, choose the sign where the largest absolute component is
+    positive so reruns do not flip signs arbitrarily for the same tensor.
+    '''
+    vectors = np.asarray(eigenvectors, dtype=np.float64).copy()
+    for j in range(vectors.shape[1]):
+        col = vectors[:, j]
+        anchor = int(np.argmax(np.abs(col)))
+        if np.isfinite(col[anchor]) and col[anchor] < 0.0:
+            vectors[:, j] *= -1.0
+    return vectors
+
+
+def compute_semi_axes(x_members, y_members, z_members, x_cm, y_cm, z_cm,
+                      return_vectors=False):
     '''
     Compute principal semi-axes from the inertia tensor of group members.
 
     Parameters:
         - x_members, y_members, z_members: Lists of x, y, z coordinates of group members.
         - x_cm, y_cm, z_cm: Coordinates of the center of-mass of the group.
+        - return_vectors: If True, also return the unit eigenvectors associated
+                          with the sorted semi-axes.
     Returns:
         - semi_axes: Array of the three principal semi-axes lengths, sorted in descending order.
+        - axis_vectors: Optional array with shape (3, 3). Column j is the
+                        Cartesian unit vector for semi_axes[j].
     '''
     dx = np.asarray(x_members, dtype=np.float64) - x_cm
     dy = np.asarray(y_members, dtype=np.float64) - y_cm
@@ -163,7 +185,10 @@ def compute_semi_axes(x_members, y_members, z_members, x_cm, y_cm, z_cm):
 
     n = len(dx)
     if n == 0:
-        return np.array([np.nan, np.nan, np.nan], dtype=np.float64)
+        semi_axes = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
+        if return_vectors:
+            return semi_axes, np.full((3, 3), np.nan, dtype=np.float64)
+        return semi_axes
 
     r2 = dx * dx + dy * dy + dz * dz
 
@@ -178,9 +203,13 @@ def compute_semi_axes(x_members, y_members, z_members, x_cm, y_cm, z_cm):
                         [i_xy, i_yy, i_yz],
                         [i_xz, i_yz, i_zz]], dtype=np.float64)
 
-    eigenvalues = np.linalg.eigvalsh(inertia)
-    eigenvalues = np.sort(eigenvalues)[::-1]
+    eigenvalues, eigenvectors = np.linalg.eigh(inertia)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = _fix_eigenvector_signs(eigenvectors[:, order])
     eigenvalues = np.clip(eigenvalues, 0.0, None)
 
     semi_axes = np.sqrt(eigenvalues / n)
+    if return_vectors:
+        return semi_axes, eigenvectors
     return semi_axes

@@ -1,0 +1,394 @@
+import argparse, json, os, time
+
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+
+import numpy as np
+from astropy.io import fits
+from astropy.table import Table
+import fitsio
+
+from group_finder.astra import (add_cartesian_columns,
+                                add_neighbor_columns_to_tables,
+                                build_cosmology,
+                                compute_neighbor_statistics)
+from group_finder.make_cat import (build_point_membership_table,
+                                   consolidate_group_info)
+from group_finder.watershed import assign_group_ids_to_tables, run_watershed
+from run_dr2_voids_three_cosmologies import common_void_table
+
+
+DEFAULT_MOCK_DIR = '/pscratch/sd/h/hrincon/LSScats/testfibers'
+DEFAULT_OUTPUT_DIR = '/pscratch/sd/v/vtorresg/void_catalog/fiber_assignment'
+DEFAULT_H = 0.6736
+DEFAULT_OMEGA_M = 0.315
+DEFAULT_RA_MIN = 83.0
+DEFAULT_RA_MAX = 302.0
+BASE_COLUMNS = ('TARGETID', 'RA', 'DEC', 'Z')
+TRACERS = ('BGS', 'LRG', 'ELG', 'QSO')
+
+
+def utc_timestamp():
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+
+
+def log_message(log_fh, message, verbose=True):
+    line = f'[{utc_timestamp()}] {message}'
+    log_fh.write(line + '\n')
+    log_fh.flush()
+    if verbose:
+        print(message, flush=True)
+
+
+def normalize_tracer(value):
+    aliases = {'BGS': 'BGS',
+               'BGS_ANY': 'BGS',
+               'BGS_BRIGHT': 'BGS',
+               'LRG': 'LRG',
+               'ELG': 'ELG',
+               'ELGNOTQSO': 'ELG',
+               'ELG_NOTQSO': 'ELG',
+               'ELG_LOPNOTQSO': 'ELG',
+               'QSO': 'QSO'}
+    key = str(value).strip().upper()
+    if key not in aliases:
+        allowed = ', '.join(TRACERS)
+        raise argparse.ArgumentTypeError(f'Invalid tracer {value!r}. Expected one of: {allowed}')
+    return aliases[key]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('tracer', type=normalize_tracer)
+    parser.add_argument('--mock-dir', default=DEFAULT_MOCK_DIR)
+    parser.add_argument('--output-dir', default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument('--log-dir', default=None)
+    parser.add_argument('--mock-kind', choices=['altmtl', 'complete'], default='altmtl')
+    parser.add_argument('--split-caps', dest='split_caps', action='store_true', default=True)
+    parser.add_argument('--no-split-caps', dest='split_caps', action='store_false')
+    parser.add_argument('--caps', nargs='+', default=['NGC', 'SGC'], choices=['NGC', 'SGC'])
+    parser.add_argument('--ra-min', type=float, default=DEFAULT_RA_MIN)
+    parser.add_argument('--ra-max', type=float, default=DEFAULT_RA_MAX)
+    parser.add_argument('--z-min', type=float, default=None)
+    parser.add_argument('--z-max', type=float, default=None)
+    parser.add_argument('--bgs-mr-limit', type=float, default=None)
+    parser.add_argument('--h', type=float, default=DEFAULT_H)
+    parser.add_argument('--omega-m', type=float, default=DEFAULT_OMEGA_M)
+    parser.add_argument('--seed', type=int, default=12345)
+    parser.add_argument('--random-factor', type=float, default=1.0)
+    parser.add_argument('--r-threshold', type=float, default=-0.25)
+    parser.add_argument('--min-group-size', type=int, default=4)
+    parser.add_argument('--min-rand-for-shape', type=int, default=3)
+    parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
+    parser.add_argument('--include-membership', action='store_true')
+    parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--quiet', action='store_true')
+    return parser.parse_args()
+
+
+def mock_path(mock_dir, tracer, mock_kind):
+    return os.path.join(mock_dir, f'{tracer}_{mock_kind}.fits')
+
+
+def random_path(mock_dir, tracer):
+    return os.path.join(mock_dir, f'{tracer}_randoms.fits')
+
+
+def output_path(output_dir, tracer, mock_kind, region):
+    if region == 'ALL':
+        return os.path.join(output_dir, f'voids_{tracer}_{mock_kind}.fits')
+    return os.path.join(output_dir, f'voids_{tracer}_{mock_kind}_{region}.fits')
+
+
+def columns_to_read(path, extra=()):
+    with fits.open(path, memmap=True) as hdul:
+        names = set(hdul[1].columns.names)
+    cols = [col for col in BASE_COLUMNS if col in names]
+    missing = [col for col in BASE_COLUMNS if col not in names]
+    if missing:
+        raise KeyError(f'{path} missing required columns: {missing}')
+    for col in extra:
+        if col in names and col not in cols:
+            cols.append(col)
+    return cols
+
+
+def read_fits_columns(path, columns):
+    if fitsio is not None:
+        return Table(fitsio.read(path, ext=1, columns=list(columns)))
+
+    with fits.open(path, memmap=True) as hdul:
+        data = hdul[1].data
+        out = Table()
+        for col in columns:
+            out[col] = data[col]
+        return out
+
+
+def read_mock_table(path, args, is_random=False):
+    extra = ['R_MAG_ABS'] if args.tracer == 'BGS' else []
+    cols = columns_to_read(path, extra=extra)
+    table = read_fits_columns(path, cols)
+
+    mask = (np.isfinite(np.asarray(table['RA'], dtype=np.float64)) &
+            np.isfinite(np.asarray(table['DEC'], dtype=np.float64)) &
+            np.isfinite(np.asarray(table['Z'], dtype=np.float64)))
+    z = np.asarray(table['Z'], dtype=np.float64)
+    if args.z_min is not None:
+        mask &= z >= float(args.z_min)
+    if args.z_max is not None:
+        mask &= z <= float(args.z_max)
+
+    if args.tracer == 'BGS' and args.bgs_mr_limit is not None:
+        if 'R_MAG_ABS' not in table.colnames:
+            kind = 'random' if is_random else 'data'
+            raise KeyError(f'BGS {kind} table {path} has no R_MAG_ABS column')
+        mr = np.asarray(table['R_MAG_ABS'], dtype=np.float64)
+        mask &= np.isfinite(mr) & (mr <= float(args.bgs_mr_limit))
+
+    return table[mask]
+
+
+def split_regions(table, args):
+    if not args.split_caps:
+        return {'ALL': table}
+
+    ra = np.asarray(table['RA'], dtype=np.float64)
+    ngc = (ra >= args.ra_min) & (ra <= args.ra_max)
+    all_regions = {'NGC': table[ngc], 'SGC': table[~ngc]}
+    return {cap: all_regions[cap] for cap in args.caps}
+
+
+def subsample_randoms(random_table, n_data, factor, rng):
+    n_target = int(round(float(factor) * int(n_data)))
+    if n_target < 0:
+        raise ValueError(f'--random-factor must be non-negative, got {factor}')
+    if n_target == 0:
+        return random_table[:0].copy()
+    if len(random_table) < n_target:
+        raise ValueError('Not enough random points after cuts: '
+                         f'requested {n_target}, available {len(random_table)}')
+    if len(random_table) == n_target:
+        return random_table.copy(copy_data=True)
+    idx = rng.choice(len(random_table), size=n_target, replace=False)
+    return random_table[idx].copy(copy_data=True)
+
+
+def write_mock_void_fits(group_table, output, tracer, mock_kind, region,
+                         data_path, randoms_path, omega_m, args,
+                         point_table=None):
+    os.makedirs(os.path.dirname(output) or '.', exist_ok=True)
+    voids = common_void_table(group_table)
+
+    primary = fits.PrimaryHDU()
+    hdr = primary.header
+    hdr['RELEASE'] = ('MOCK', 'Catalog class')
+    hdr['MOCKTYPE'] = (mock_kind, 'Input mock type')
+    hdr['TRACER'] = (tracer, 'Mock tracer')
+    hdr['CAP'] = (region, 'ALL, NGC, or SGC')
+    hdr['H'] = (float(args.h), 'h = H0 / 100')
+    hdr['OMEGA_M'] = (float(omega_m), 'Matter density parameter')
+    hdr['SEED'] = (int(args.seed), 'Random subsampling seed')
+    hdr['RANFAC'] = (float(args.random_factor), 'Random/data count ratio')
+    hdr['RTHRESH'] = (float(args.r_threshold), 'Watershed R threshold')
+    hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
+    hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
+    hdr['WMODE'] = (args.mode, 'Watershed mode')
+    hdr['NVOIDS'] = (len(voids), 'Number of voids')
+    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF, X/Y/Z, semi-axes')
+    hdr['UNITSAX'] = ('unitless', 'Units for X1..Z3 axis-vector columns')
+    hdr['AXVEC'] = ('Xj,Yj,Zj', 'Unit-vector components for axis j')
+    hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
+    hdr['ZUNIT'] = ('redshift', 'Units for REDSHIFT')
+    hdr['ELLIPDEF'] = ('1-(J1/J3)**0.25', 'Ellipticity definition')
+    hdr['J1J3'] = ('(a^2+b^2)/(b^2+c^2)', 'a<=b<=c axes')
+    hdr['IN_DATA'] = (os.path.basename(data_path), 'Input mock file')
+    hdr['IN_RAND'] = (os.path.basename(randoms_path), 'Input random file')
+    if args.z_min is not None:
+        hdr['ZMIN'] = (float(args.z_min), 'Minimum redshift cut')
+    if args.z_max is not None:
+        hdr['ZMAX'] = (float(args.z_max), 'Maximum redshift cut')
+    if args.bgs_mr_limit is not None:
+        hdr['MRLIM'] = (float(args.bgs_mr_limit), 'BGS R_MAG_ABS upper cut')
+    if point_table is not None:
+        hdr['NPOINTS'] = (len(point_table), 'Rows in POINT_MEMBERSHIP')
+
+    hdus = [primary, fits.BinTableHDU(data=voids.as_array(), name='VOIDS')]
+    if point_table is not None:
+        hdus.append(fits.BinTableHDU(data=point_table.as_array(),
+                                     name='POINT_MEMBERSHIP'))
+    fits.HDUList(hdus).writeto(output, overwrite=args.overwrite)
+
+
+def run_region(data_table, random_table, tracer, mock_kind, region,
+               data_path, randoms_path, output, cosmo, args, log_fh, verbose):
+    if os.path.exists(output) and not args.overwrite:
+        log_message(log_fh, f'skip existing {output}', verbose=verbose)
+        return output
+
+    t0 = time.time()
+    data_tbl = data_table.copy(copy_data=True)
+    rand_tbl = random_table.copy(copy_data=True)
+    log_message(log_fh, f'case start tracer={tracer} mock={mock_kind} '
+                        f'region={region} n_data={len(data_tbl)} '
+                        f'n_rand={len(rand_tbl)}',
+                        verbose=verbose)
+
+    step = time.time()
+    add_cartesian_columns(data_tbl, cosmo=cosmo, h=args.h)
+    add_cartesian_columns(rand_tbl, cosmo=cosmo, h=args.h)
+    log_message(log_fh, f'case={tracer}/{mock_kind}/{region} cartesian '
+                        f'elapsed_s={time.time() - step:.3f}',
+                        verbose=verbose)
+
+    step = time.time()
+    stats = compute_neighbor_statistics(data_tbl, rand_tbl)
+    add_neighbor_columns_to_tables(data_tbl, rand_tbl, stats)
+    rvals = stats['r_values']
+    log_message(log_fh, f'case={tracer}/{mock_kind}/{region} neighbors '
+                        f'elapsed_s={time.time() - step:.3f} '
+                        f'n={len(rvals)} min={float(rvals.min()):.3f} '
+                        f'max={float(rvals.max()):.3f}',
+                        verbose=verbose)
+
+    step = time.time()
+    ws = run_watershed(neighbors=stats['neighbors'],
+                       r_values=stats['r_values'],
+                       r_threshold=args.r_threshold,
+                       min_group_size=args.min_group_size,
+                       mode=args.mode)
+    assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
+                               group_col='GROUPID')
+    log_message(log_fh, f'case={tracer}/{mock_kind}/{region} watershed '
+                        f'elapsed_s={time.time() - step:.3f} '
+                        f'groups={ws['n_groups']} assigned={ws['n_assigned']} '
+                        f'unassigned={len(ws['group_of']) - ws['n_assigned']}',
+                        verbose=verbose)
+
+    step = time.time()
+    group_table = consolidate_group_info(data_table=data_tbl,
+                                         rand_table=rand_tbl,
+                                         cosmo=cosmo,
+                                         h=args.h,
+                                         group_col='GROUPID',
+                                         min_rand_for_shape=args.min_rand_for_shape)
+    log_message(log_fh, f'case={tracer}/{mock_kind}/{region} consolidate '
+                        f'elapsed_s={time.time() - step:.3f} '
+                        f'n_voids={len(group_table)}',
+                        verbose=verbose)
+
+    point_table = None
+    if args.include_membership:
+        step = time.time()
+        point_table = build_point_membership_table(data_tbl, rand_tbl,
+                                                   group_col='GROUPID')
+        log_message(log_fh, f'case={tracer}/{mock_kind}/{region} membership '
+                            f'elapsed_s={time.time() - step:.3f} '
+                            f'n_points={len(point_table)}',
+                            verbose=verbose)
+
+    step = time.time()
+    write_mock_void_fits(group_table=group_table,
+                         output=output,
+                         tracer=tracer,
+                         mock_kind=mock_kind,
+                         region=region,
+                         data_path=data_path,
+                         randoms_path=randoms_path,
+                         omega_m=args.omega_m,
+                         args=args,
+                         point_table=point_table)
+    log_message(log_fh, f'case={tracer}/{mock_kind}/{region} write '
+                        f'elapsed_s={time.time() - step:.3f} output={output}',
+                        verbose=verbose)
+    log_message(log_fh, f'case done tracer={tracer} mock={mock_kind} '
+                        f'region={region} elapsed_s={time.time() - t0:.3f}',
+                        verbose=verbose)
+    return output
+
+
+def main():
+    args = parse_args()
+    verbose = not args.quiet
+    args.mock_dir = os.path.abspath(os.path.expanduser(args.mock_dir))
+    args.output_dir = os.path.abspath(os.path.expanduser(args.output_dir))
+
+    data_path = mock_path(args.mock_dir, args.tracer, args.mock_kind)
+    randoms_path = random_path(args.mock_dir, args.tracer)
+    regions = args.caps if args.split_caps else ['ALL']
+    outputs = [output_path(args.output_dir, args.tracer, args.mock_kind, region)
+               for region in regions]
+
+    if args.dry_run:
+        print(f'Input data:    {data_path}')
+        print(f'Input randoms: {randoms_path}')
+        print('Planned output FITS files:')
+        for path in outputs:
+            print(path)
+        return
+
+    log_dir = args.log_dir or os.path.join(args.output_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir,
+                            f'run_fiber_assignment_{args.tracer}_{args.mock_kind}_'
+                            f'{time.strftime("%Y%m%d_%H%M%S", time.gmtime())}.log')
+
+    with open(log_path, 'a', encoding='utf-8') as log_fh:
+        t0 = time.time()
+        log_message(log_fh, f'run start log_file={log_path}', verbose=verbose)
+        log_message(log_fh, f'config={json.dumps(vars(args), sort_keys=True)}',
+                    verbose=verbose)
+
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(data_path)
+        if not os.path.exists(randoms_path):
+            raise FileNotFoundError(randoms_path)
+
+        step = time.time()
+        data = read_mock_table(data_path, args, is_random=False)
+        randoms = read_mock_table(randoms_path, args, is_random=True)
+        log_message(log_fh, f'loaded inputs elapsed_s={time.time() - step:.3f} '
+                            f'n_data={len(data)} n_random_available={len(randoms)}',
+                            verbose=verbose)
+
+        data_regions = split_regions(data, args)
+        random_regions = split_regions(randoms, args)
+        rng = np.random.default_rng(args.seed)
+        cosmo = build_cosmology(h=args.h, omega_m=args.omega_m)
+
+        written = []
+        for region, output in zip(regions, outputs):
+            region_seed = int(rng.integers(0, np.iinfo(np.int32).max))
+            region_rng = np.random.default_rng(region_seed)
+            rand_sub = subsample_randoms(random_regions[region],
+                                         n_data=len(data_regions[region]),
+                                         factor=args.random_factor,
+                                         rng=region_rng)
+            log_message(log_fh, f'region={region} data={len(data_regions[region])} '
+                                f'random_available={len(random_regions[region])} '
+                                f'random_used={len(rand_sub)} seed={region_seed}',
+                                verbose=verbose)
+            written.append(run_region(data_table=data_regions[region],
+                                      random_table=rand_sub,
+                                      tracer=args.tracer,
+                                      mock_kind=args.mock_kind,
+                                      region=region,
+                                      data_path=data_path,
+                                      randoms_path=randoms_path,
+                                      output=output,
+                                      cosmo=cosmo,
+                                      args=args,
+                                      log_fh=log_fh,
+                                      verbose=verbose))
+
+        log_message(log_fh, f'run complete elapsed_s={time.time() - t0:.3f}',
+                    verbose=verbose)
+        log_message(log_fh, 'outputs=' + json.dumps(written, indent=2),
+                    verbose=verbose)
+
+
+if __name__ == '__main__':
+    main()
