@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=ast_ls
+#SBATCH --job-name=qso_sgc
 #SBATCH --account=desi
 #SBATCH -q regular
 #SBATCH -C cpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=3:00:00
+#SBATCH --time=01:00:00
 #SBATCH --mem=0
 #SBATCH --hint=nomultithread
 #SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr3_%j.out
@@ -31,7 +31,7 @@ N_RANDOM=${N_RANDOM:-1}
 N_RANDOM_FILES=${N_RANDOM_FILES:-18}
 MODE=${MODE:-iter}
 
-TRACER_LABEL="LRG"
+TRACER_LABEL="QSO"
 ZONE_LABEL="SGC"
 
 PROJECT_ROOT=$PWD
@@ -40,7 +40,7 @@ export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 ITER_SCRIPT="${PROJECT_ROOT}/src/utils/run_dr3_iterations.py"
 PROB_SCRIPT="${PROJECT_ROOT}/src/utils/build_dr3_probabilities.py"
 
-CLUSTER_DIR="/global/cfs/cdirs/desi/survey/catalogs/DA3/LSS/daily/LSScats/test/nonKP/"
+CLUSTER_DIR="/global/cfs/cdirs/desi/survey/catalogs/DA3/LSS/matterhorn-v2/LSScats/test/nonKP/"
 SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr3"
 
 RAW_OUT="${SCRATCH_ROOT}/raw"
