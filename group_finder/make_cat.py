@@ -2,32 +2,36 @@ import os
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
-from astropy.cosmology import z_at_value
 import astropy.units as u
+import healpy as hp
 
 try:
-    from .watershed import compute_semi_axes
+    from .watershed import BOUNDARY_ID, compute_semi_axes
 except ImportError:
-    from watershed import compute_semi_axes
+    from watershed import BOUNDARY_ID, compute_semi_axes
 
 
 GROUP_COLUMNS = ('VOID_ID', 'N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
                  'RA', 'DEC', 'REDSHIFT', 'X', 'Y', 'Z',
-                 'R_EFF', 'SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C',
+                 'R_EFF', 'R_RMS', 'R_VOL',
+                 'SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C',
                  'CHI_MIN_GROUP', 'CHI_MAX_GROUP', 'CHI_CENTER',
                  'D_RADIAL_EDGE', 'CHI_MIN_SAMPLE', 'CHI_MAX_SAMPLE',
                  'X_MIN_GROUP', 'X_MAX_GROUP', 'Y_MIN_GROUP', 'Y_MAX_GROUP',
                  'Z_MIN_GROUP', 'Z_MAX_GROUP', 'D_CART_EDGE',
                  'X_MIN_SAMPLE', 'X_MAX_SAMPLE', 'Y_MIN_SAMPLE', 'Y_MAX_SAMPLE',
                  'Z_MIN_SAMPLE', 'Z_MAX_SAMPLE',
+                 'GEOM_BAD',
                  'EDGE', 'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
                  'TOUCHES_RA_EDGE', 'TOUCHES_DEC_EDGE',
+                 'TOUCHES_HEALPIX_EDGE', 'CENTER_NEAR_HEALPIX_EDGE',
                  'TOUCHES_CART_EDGE', 'CENTER_NEAR_CART_EDGE')
 
 GROUP_DTYPES = (np.int32, np.int32, np.int32,
                 np.float64, np.float64, np.float64,
                 np.float64, np.float64, np.float64,
                 np.float64, np.float64, np.float64,
+                np.float64, np.float64,
                 np.float64,
                 np.float64, np.float64, np.float64,
                 np.float64, np.float64, np.float64,
@@ -35,9 +39,17 @@ GROUP_DTYPES = (np.int32, np.int32, np.int32,
                 np.float64, np.float64, np.float64,
                 np.float64, np.float64, np.float64, np.float64,
                 np.float64, np.float64,
+                np.bool_,
                 np.bool_, np.bool_, np.bool_,
                 np.bool_, np.bool_,
+                np.bool_, np.bool_,
                 np.bool_, np.bool_)
+
+ELLIPTICITY_DEFINITION = '1-(J1/J3)**0.25'
+J1J3_DEFINITION = 'SEMI_AXIS_C^2/SEMI_AXIS_A^2'
+AXIS_VECTOR_COLUMNS = ('X1', 'X2', 'X3',
+                       'Y1', 'Y2', 'Y3',
+                       'Z1', 'Z2', 'Z3')
 
 
 def _empty_group_table():
@@ -54,20 +66,20 @@ def _empty_group_table():
 def comoving_distance_to_redshift(dist_mpc, cosmo, z_max_init=2.0, n_grid=20000):
     '''
     Convert comoving distance in Mpc to redshift using the provided cosmology.
-    This implementation uses direct inversion with z_at_value (no interpolation grid).
+    This implementation inverts the distance-redshift relation with a dense
+    interpolation grid. Calling z_at_value once per void is prohibitively slow
+    for watershed catalogs with O(1e5) groups.
 
     Parameters:
         - dist_mpc: Array of comoving distances in Mpc to convert to redshift.
         - cosmo: Astropy cosmology instance to use for distance-redshift conversion.
-        - z_max_init: Unused (kept only for backward compatibility).
-        - n_grid: Unused (kept only for backward compatibility).
+        - z_max_init: Initial maximum redshift for the interpolation grid.
+        - n_grid: Number of grid samples used for interpolation.
     Returns:
         - Array of redshift values corresponding to the input comoving distances.
     Raises:
         - ValueError: If any finite comoving distance is negative.
     '''
-    _ = (z_max_init, n_grid)
-
     dist_mpc = np.asarray(dist_mpc, dtype=np.float64)
     if dist_mpc.size == 0:
         return np.array([], dtype=np.float64)
@@ -77,9 +89,25 @@ def comoving_distance_to_redshift(dist_mpc, cosmo, z_max_init=2.0, n_grid=20000)
         raise ValueError('Comoving distance must be non-negative')
 
     z_vals = np.full(dist_mpc.shape, np.nan, dtype=np.float64)
-    finite_idx = np.where(np.isfinite(dist_mpc))[0]
-    for i in finite_idx:
-        z_vals[i] = float(z_at_value(cosmo.comoving_distance, dist_mpc[i] * u.Mpc))
+    finite = np.isfinite(dist_mpc)
+    if not np.any(finite):
+        return z_vals
+
+    max_dist = float(np.nanmax(dist_mpc[finite]))
+    if max_dist == 0.0:
+        z_vals[finite] = 0.0
+        return z_vals
+
+    z_max = max(float(z_max_init), 1.0e-4)
+    n_grid = max(int(n_grid), 2)
+    z_grid = np.linspace(0.0, z_max, n_grid, dtype=np.float64)
+    chi_grid = cosmo.comoving_distance(z_grid).to_value(u.Mpc)
+    while chi_grid[-1] < max_dist:
+        z_max *= 2.0
+        z_grid = np.linspace(0.0, z_max, n_grid, dtype=np.float64)
+        chi_grid = cosmo.comoving_distance(z_grid).to_value(u.Mpc)
+
+    z_vals[finite] = np.interp(dist_mpc[finite], chi_grid, z_grid)
 
     return z_vals
 
@@ -150,6 +178,72 @@ def _sample_geometry_bounds(data_table, rand_table):
             bounds['dec_max'] = float(np.nanmax(dec))
 
     return bounds
+
+
+def _solid_angle_from_bounds(bounds):
+    '''
+    Solid angle of a simple RA/DEC rectangle in steradians.
+    '''
+    if not all(np.isfinite(bounds[name])
+               for name in ('ra_min', 'ra_max', 'dec_min', 'dec_max')):
+        return np.nan
+
+    ra_min = float(bounds['ra_min']) % 360.0
+    ra_max = float(bounds['ra_max']) % 360.0
+    ra_width = (ra_max - ra_min) % 360.0
+    if ra_width == 0.0 and float(bounds['ra_max']) > float(bounds['ra_min']):
+        ra_width = 360.0
+    dec_min = np.radians(np.clip(float(bounds['dec_min']), -90.0, 90.0))
+    dec_max = np.radians(np.clip(float(bounds['dec_max']), -90.0, 90.0))
+    omega = np.radians(ra_width) * (np.sin(dec_max) - np.sin(dec_min))
+    return float(omega) if omega > 0.0 else np.nan
+
+
+def _solid_angle_from_randoms(rand_table, n_ra=360, n_sin_dec=180):
+    '''
+    Estimate angular footprint area from occupied equal-area RA/sin(DEC) cells.
+    '''
+    if 'RA' not in rand_table.colnames or 'DEC' not in rand_table.colnames:
+        return np.nan
+
+    ra = np.asarray(rand_table['RA'], dtype=np.float64)
+    dec = np.asarray(rand_table['DEC'], dtype=np.float64)
+    finite = np.isfinite(ra) & np.isfinite(dec) & (dec >= -90.0) & (dec <= 90.0)
+    if not np.any(finite):
+        return np.nan
+
+    n_ra = max(int(n_ra), 1)
+    n_sin_dec = max(int(n_sin_dec), 1)
+    ra = np.mod(ra[finite], 360.0)
+    sin_dec = np.sin(np.radians(dec[finite]))
+
+    ra_idx = np.floor(ra / 360.0 * n_ra).astype(np.int64)
+    dec_idx = np.floor((sin_dec + 1.0) * 0.5 * n_sin_dec).astype(np.int64)
+    ra_idx = np.clip(ra_idx, 0, n_ra - 1)
+    dec_idx = np.clip(dec_idx, 0, n_sin_dec - 1)
+    cell_ids = ra_idx * n_sin_dec + dec_idx
+    n_occupied = np.unique(cell_ids).size
+    omega_cell = 4.0 * np.pi / float(n_ra * n_sin_dec)
+    return float(n_occupied * omega_cell)
+
+
+def _estimate_survey_volume(rand_table, bounds):
+    '''
+    Estimate the comoving survey volume in (Mpc/h)^3 for uniform randoms.
+    '''
+    chi_min = float(bounds['chi_min'])
+    chi_max = float(bounds['chi_max'])
+    if not (np.isfinite(chi_min) and np.isfinite(chi_max) and chi_max > chi_min):
+        return np.nan, np.nan
+
+    omega = _solid_angle_from_randoms(rand_table)
+    if not np.isfinite(omega) or omega <= 0.0:
+        omega = _solid_angle_from_bounds(bounds)
+    if not np.isfinite(omega) or omega <= 0.0:
+        return np.nan, np.nan
+
+    volume = omega * (chi_max ** 3 - chi_min ** 3) / 3.0
+    return float(volume), float(omega)
 
 
 def _flag_radial_edge(chi_members, chi_center, edge_scale, bounds,
@@ -265,11 +359,84 @@ def _flag_angular_edge(rand_table, member_idx, bounds, edge_angular_buffer_deg):
     return touches_ra, touches_dec
 
 
+def _healpix_pixels(hp, nside, ra_deg, dec_deg, nest=False):
+    '''
+    Convert RA/DEC arrays to HEALPix pixels, returning pixels and a finite mask.
+    '''
+    ra = np.asarray(ra_deg, dtype=np.float64)
+    dec = np.asarray(dec_deg, dtype=np.float64)
+    valid = np.isfinite(ra) & np.isfinite(dec) & (dec >= -90.0) & (dec <= 90.0)
+    pix = np.full(ra.shape, -1, dtype=np.int64)
+    if np.any(valid):
+        theta = np.radians(90.0 - dec[valid])
+        phi = np.radians(np.mod(ra[valid], 360.0))
+        pix[valid] = hp.ang2pix(int(nside), theta, phi, nest=nest)
+    return pix, valid
+
+
+def _build_healpix_edge_mask(rand_table, nside=256, min_randoms_per_pix=3,
+                             edge_buffer_deg=1.0, nest=False):
+    '''
+    Build a buffered angular-edge HEALPix mask from random catalogue positions.
+    '''
+    if nside is None or int(nside) <= 0:
+        raise ValueError('HEALPix edge masking is required; healpix_edge_nside must be a positive integer.')
+    if 'RA' not in rand_table.colnames or 'DEC' not in rand_table.colnames:
+        raise KeyError('HEALPix edge masking requires RA and DEC columns in the random catalogue.')
+
+    nside = int(nside)
+    min_randoms_per_pix = max(int(min_randoms_per_pix), 1)
+    npix = hp.nside2npix(nside)
+    pix, valid = _healpix_pixels(hp, nside, rand_table['RA'], rand_table['DEC'],
+                                 nest=nest)
+    if not np.any(valid):
+        raise RuntimeError('HEALPix edge masking failed: no finite random RA/DEC values.')
+
+    counts = np.bincount(pix[valid], minlength=npix)
+    mask = counts >= min_randoms_per_pix
+    observed = np.flatnonzero(mask)
+    if observed.size == 0:
+        raise RuntimeError('HEALPix edge masking failed: no observed pixels passed '
+                           f'min_randoms_per_pix={min_randoms_per_pix}. Lower '
+                           '--healpix-edge-min-randoms or use a lower --healpix-edge-nside.')
+
+    neighbors = hp.get_all_neighbours(nside, observed, nest=nest)
+    valid_neighbors = neighbors >= 0
+    safe_neighbors = np.where(valid_neighbors, neighbors, observed[None, :])
+    edge_flags = np.any(valid_neighbors & ~mask[safe_neighbors], axis=0)
+    edge_pix = np.zeros(npix, dtype=bool)
+    edge_pix[observed] = edge_flags
+
+    edge_buffered = edge_pix.copy()
+    buffer_deg = 0.0 if edge_buffer_deg is None else max(float(edge_buffer_deg), 0.0)
+    if buffer_deg > 0.0 and np.any(edge_pix):
+        radius = np.radians(buffer_deg)
+        for pix_id in np.flatnonzero(edge_pix):
+            vec = hp.pix2vec(nside, int(pix_id), nest=nest)
+            nearby = hp.query_disc(nside, vec, radius, nest=nest)
+            edge_buffered[nearby] = True
+
+    return {'hp': hp,
+            'nside': nside,
+            'nest': bool(nest),
+            'min_randoms_per_pix': min_randoms_per_pix,
+            'edge_buffer_deg': buffer_deg,
+            'mask': mask,
+            'edge_pix': edge_pix,
+            'edge_buffered': edge_buffered,
+            'n_observed_pix': int(np.count_nonzero(mask)),
+            'n_edge_pix': int(np.count_nonzero(edge_pix)),
+            'n_buffered_edge_pix': int(np.count_nonzero(edge_buffered))}
+
+
 def consolidate_group_info(data_table, rand_table, cosmo, h,
                            group_col='GROUPID', min_rand_for_shape=3,
                            edge_radial_buffer=20.0,
                            edge_angular_buffer_deg=1.0,
-                           edge_cartesian_buffer=None):
+                           edge_cartesian_buffer=None,
+                           healpix_edge_nside=256,
+                           healpix_edge_min_randoms=3,
+                           healpix_edge_nest=False):
     '''
     Consolidate group information from data and random tables to create a group table with properties.
 
@@ -289,10 +456,18 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                                    flags are disabled.
         - edge_cartesian_buffer: Cartesian X/Y/Z buffer in Mpc/h for edge
                                  flags. If None, uses edge_radial_buffer.
+        - healpix_edge_nside: Required HEALPix NSIDE for angular footprint
+                              edge flags. Must be positive.
+        - healpix_edge_min_randoms: Minimum randoms per pixel for the angular
+                                    footprint mask.
+        - healpix_edge_nest: Use NESTED HEALPix ordering if True.
     Returns:
         - An Astropy Table containing consolidated group information, including VOID_ID, N_DATA_IN_GROUP,
-          N_RAND_IN_GROUP, RA, DEC, REDSHIFT, X, Y, Z, R_EFF, SEMI_AXIS_A, SEMI_AXIS_B, and SEMI_AXIS_C for
-          each group.
+          N_RAND_IN_GROUP, RA, DEC, REDSHIFT, X, Y, Z, R_EFF, R_RMS, R_VOL,
+          SEMI_AXIS_A, SEMI_AXIS_B, SEMI_AXIS_C, EDGE, and GEOM_BAD for each
+          group. R_RMS is the previous RMS radius. R_VOL is the
+          equivalent-volume radius from N_rand/nbar_rand, and R_EFF is R_VOL
+          when finite.
     '''
     data_gids = np.asarray(data_table[group_col], dtype=np.int32)
     rand_gids = np.asarray(rand_table[group_col], dtype=np.int32)
@@ -319,8 +494,6 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                                                         return_index=True,
                                                         return_counts=True)
 
-    rows = []
-    dist_mpc_list = []
     bounds = _sample_geometry_bounds(data_table=data_table, rand_table=rand_table)
     cart_buffer = edge_radial_buffer if edge_cartesian_buffer is None else edge_cartesian_buffer
     if cart_buffer is None:
@@ -329,99 +502,266 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
     x_rand_all = np.asarray(rand_table['X_CART'], dtype=np.float64)
     y_rand_all = np.asarray(rand_table['Y_CART'], dtype=np.float64)
     z_rand_all = np.asarray(rand_table['Z_CART'], dtype=np.float64)
+    x_members = x_rand_all[rand_idx_sorted]
+    y_members = y_rand_all[rand_idx_sorted]
+    z_members = z_rand_all[rand_idx_sorted]
 
-    for i, gid in enumerate(unique_rand_gid.tolist()):
-        start = int(rand_start[i])
-        stop = start + int(rand_count[i])
-        member_idx = rand_idx_sorted[start:stop]
+    n_group = len(unique_rand_gid)
+    n_rand = rand_count.astype(np.int32)
+    n_float = rand_count.astype(np.float64)
 
-        n_rand = int(stop - start)
-        n_data = int(data_sizes[gid]) if gid < len(data_sizes) else 0
+    n_data = np.zeros(n_group, dtype=np.int32)
+    in_data_sizes = unique_rand_gid < len(data_sizes)
+    if np.any(in_data_sizes):
+        n_data[in_data_sizes] = data_sizes[unique_rand_gid[in_data_sizes]].astype(np.int32)
 
-        x_members = x_rand_all[member_idx]
-        y_members = y_rand_all[member_idx]
-        z_members = z_rand_all[member_idx]
-        chi_members = np.sqrt(x_members * x_members +
-                              y_members * y_members +
-                              z_members * z_members)
+    sum_x = np.add.reduceat(x_members, rand_start)
+    sum_y = np.add.reduceat(y_members, rand_start)
+    sum_z = np.add.reduceat(z_members, rand_start)
+    sum_x2 = np.add.reduceat(x_members * x_members, rand_start)
+    sum_y2 = np.add.reduceat(y_members * y_members, rand_start)
+    sum_z2 = np.add.reduceat(z_members * z_members, rand_start)
+    sum_xy = np.add.reduceat(x_members * y_members, rand_start)
+    sum_xz = np.add.reduceat(x_members * z_members, rand_start)
+    sum_yz = np.add.reduceat(y_members * z_members, rand_start)
 
-        x_cm = float(np.mean(x_members))
-        y_cm = float(np.mean(y_members))
-        z_cm = float(np.mean(z_members))
+    x_cm = sum_x / n_float
+    y_cm = sum_y / n_float
+    z_cm = sum_z / n_float
 
-        dx = x_members - x_cm
-        dy = y_members - y_cm
-        dz = z_members - z_cm
-        r_eff = float(np.sqrt(np.mean(dx * dx + dy * dy + dz * dz)))
+    center_r2 = x_cm * x_cm + y_cm * y_cm + z_cm * z_cm
+    mean_r2 = (sum_x2 + sum_y2 + sum_z2) / n_float
+    r_rms = np.sqrt(np.clip(mean_r2 - center_r2, 0.0, None))
 
-        if n_rand >= min_rand_for_shape:
-            semi_axes = compute_semi_axes(x_members=x_members,
-                                          y_members=y_members,
-                                          z_members=z_members,
-                                          x_cm=x_cm,
-                                          y_cm=y_cm,
-                                          z_cm=z_cm)
-        else:
-            semi_axes = np.array([np.nan, np.nan, np.nan], dtype=np.float64)
+    survey_volume, survey_omega = _estimate_survey_volume(rand_table, bounds)
+    n_rand_density = int(np.count_nonzero(_finite_xyz_mask(rand_table)))
+    rand_density = np.nan
+    r_vol = np.full(n_group, np.nan, dtype=np.float64)
+    if (np.isfinite(survey_volume) and survey_volume > 0.0 and
+            n_rand_density > 0):
+        rand_density = float(n_rand_density) / float(survey_volume)
+        v_void = n_float / rand_density
+        r_vol = np.power(3.0 * v_void / (4.0 * np.pi), 1.0 / 3.0)
 
-        r_cm = float(np.sqrt(x_cm * x_cm + y_cm * y_cm + z_cm * z_cm))
-        if r_cm > 0:
-            ra_cm = float(np.degrees(np.arctan2(y_cm, x_cm)) % 360.0)
-            dec_cm = float(np.degrees(np.arcsin(np.clip(z_cm / r_cm, -1.0, 1.0))))
-        else:
-            ra_cm = np.nan
-            dec_cm = np.nan
+    r_eff = np.where(np.isfinite(r_vol), r_vol, r_rms)
 
-        semi_axis_a = float(semi_axes[0])
-        semi_axis_b = float(semi_axes[1])
-        semi_axis_c = float(semi_axes[2])
-        edge_scale = semi_axis_a if np.isfinite(semi_axis_a) and semi_axis_a > 0.0 else r_eff
+    dx2 = np.clip(sum_x2 - n_float * x_cm * x_cm, 0.0, None)
+    dy2 = np.clip(sum_y2 - n_float * y_cm * y_cm, 0.0, None)
+    dz2 = np.clip(sum_z2 - n_float * z_cm * z_cm, 0.0, None)
+    dxy = sum_xy - n_float * x_cm * y_cm
+    dxz = sum_xz - n_float * x_cm * z_cm
+    dyz = sum_yz - n_float * y_cm * z_cm
 
-        chi_min_group, chi_max_group, d_radial_edge, touches_radial, center_near_radial = (
-            _flag_radial_edge(chi_members=chi_members,
-                              chi_center=r_cm,
-                              edge_scale=edge_scale,
-                              bounds=bounds,
-                              edge_radial_buffer=edge_radial_buffer))
-        (x_min_group, x_max_group, y_min_group, y_max_group,
-         z_min_group, z_max_group, d_cart_edge,
-         touches_cart, center_near_cart) = _flag_cartesian_edge(
-            x_members=x_members, y_members=y_members, z_members=z_members,
-            x_center=x_cm, y_center=y_cm, z_center=z_cm,
-            edge_scale=edge_scale, bounds=bounds,
-            edge_cartesian_buffer=cart_buffer)
-        touches_ra, touches_dec = _flag_angular_edge(rand_table=rand_table,
-                                                     member_idx=member_idx,
-                                                     bounds=bounds,
-                                                     edge_angular_buffer_deg=edge_angular_buffer_deg)
-        edge = bool(touches_radial or center_near_radial or
-                    touches_ra or touches_dec or
-                    touches_cart or center_near_cart)
+    semi_axes = np.full((n_group, 3), np.nan, dtype=np.float64)
+    valid_shape = n_rand >= int(min_rand_for_shape)
+    if np.any(valid_shape):
+        inertia = np.empty((int(np.count_nonzero(valid_shape)), 3, 3),
+                           dtype=np.float64)
+        inertia[:, 0, 0] = (dy2 + dz2)[valid_shape]
+        inertia[:, 1, 1] = (dx2 + dz2)[valid_shape]
+        inertia[:, 2, 2] = (dx2 + dy2)[valid_shape]
+        inertia[:, 0, 1] = inertia[:, 1, 0] = -dxy[valid_shape]
+        inertia[:, 0, 2] = inertia[:, 2, 0] = -dxz[valid_shape]
+        inertia[:, 1, 2] = inertia[:, 2, 1] = -dyz[valid_shape]
+        eigenvalues = np.linalg.eigvalsh(inertia)[:, ::-1]
+        eigenvalues = np.clip(eigenvalues, 0.0, None)
+        semi_axes[valid_shape] = np.sqrt(eigenvalues / n_float[valid_shape, None])
 
-        rows.append((gid, n_data, n_rand, ra_cm, dec_cm,
-                     0.0, x_cm, y_cm, z_cm, r_eff,
-                     semi_axis_a, semi_axis_b, semi_axis_c,
-                     chi_min_group, chi_max_group, r_cm,
-                     d_radial_edge, float(bounds['chi_min']), float(bounds['chi_max']),
-                     x_min_group, x_max_group, y_min_group, y_max_group,
-                     z_min_group, z_max_group, d_cart_edge,
-                     float(bounds['x_min']), float(bounds['x_max']),
-                     float(bounds['y_min']), float(bounds['y_max']),
-                     float(bounds['z_min']), float(bounds['z_max']),
-                     edge, touches_radial, center_near_radial,
-                     touches_ra, touches_dec,
-                     touches_cart, center_near_cart))
-        dist_mpc_list.append(r_cm / h)
+    semi_axis_a = semi_axes[:, 0]
+    semi_axis_b = semi_axes[:, 1]
+    semi_axis_c = semi_axes[:, 2]
 
-    if not rows:
-        return _empty_group_table()
+    axis_ellip = np.full(n_group, np.nan, dtype=np.float64)
+    valid_axis_ratio = (np.isfinite(semi_axis_a) & np.isfinite(semi_axis_c) &
+                        (semi_axis_a > 0.0))
+    axis_ellip[valid_axis_ratio] = 1.0 - semi_axis_c[valid_axis_ratio] / semi_axis_a[valid_axis_ratio]
+    bad_rms_vol = (np.isfinite(r_rms) & np.isfinite(r_vol) &
+                   (r_rms > 4.0 * r_vol))
+    bad_axis = np.isfinite(axis_ellip) & (axis_ellip > 0.9)
+    geom_bad = bad_rms_vol | bad_axis
 
-    group_table = Table(rows=rows, names=list(GROUP_COLUMNS), dtype=list(GROUP_DTYPES))
+    r_cm = np.sqrt(center_r2)
+    ra_cm = np.full(n_group, np.nan, dtype=np.float64)
+    dec_cm = np.full(n_group, np.nan, dtype=np.float64)
+    nonzero_center = r_cm > 0.0
+    ra_cm[nonzero_center] = (
+        np.degrees(np.arctan2(y_cm[nonzero_center],
+                              x_cm[nonzero_center])) % 360.0)
+    dec_cm[nonzero_center] = np.degrees(
+        np.arcsin(np.clip(z_cm[nonzero_center] / r_cm[nonzero_center],
+                          -1.0, 1.0)))
+
+    chi_members = np.sqrt(x_members * x_members +
+                          y_members * y_members +
+                          z_members * z_members)
+    chi_min_group = np.minimum.reduceat(chi_members, rand_start)
+    chi_max_group = np.maximum.reduceat(chi_members, rand_start)
+
+    radial_buffer = 0.0 if edge_radial_buffer is None else max(float(edge_radial_buffer), 0.0)
+    chi_min_sample = float(bounds['chi_min'])
+    chi_max_sample = float(bounds['chi_max'])
+    d_radial_edge = np.full(n_group, np.nan, dtype=np.float64)
+    touches_radial = np.zeros(n_group, dtype=bool)
+    if np.isfinite(chi_min_sample) and np.isfinite(chi_max_sample):
+        touches_radial = ((chi_min_group <= chi_min_sample + radial_buffer) |
+                          (chi_max_group >= chi_max_sample - radial_buffer))
+        d_radial_edge = np.minimum(r_cm - chi_min_sample, chi_max_sample - r_cm)
+
+    edge_scale = np.where(np.isfinite(semi_axis_a) & (semi_axis_a > 0.0),
+                          semi_axis_a, r_rms)
+    center_near_radial = (np.isfinite(d_radial_edge) &
+                          np.isfinite(edge_scale) &
+                          (d_radial_edge < edge_scale))
+
+    x_min_group = np.minimum.reduceat(x_members, rand_start)
+    x_max_group = np.maximum.reduceat(x_members, rand_start)
+    y_min_group = np.minimum.reduceat(y_members, rand_start)
+    y_max_group = np.maximum.reduceat(y_members, rand_start)
+    z_min_group = np.minimum.reduceat(z_members, rand_start)
+    z_max_group = np.maximum.reduceat(z_members, rand_start)
+
+    cart_buffer = max(float(cart_buffer), 0.0)
+    sample_limits = (bounds['x_min'], bounds['x_max'],
+                     bounds['y_min'], bounds['y_max'],
+                     bounds['z_min'], bounds['z_max'])
+    d_cart_edge = np.full(n_group, np.nan, dtype=np.float64)
+    touches_cart = np.zeros(n_group, dtype=bool)
+    center_near_cart = np.zeros(n_group, dtype=bool)
+    if np.all(np.isfinite(sample_limits)):
+        touches_cart = (
+            (x_min_group <= bounds['x_min'] + cart_buffer) |
+            (x_max_group >= bounds['x_max'] - cart_buffer) |
+            (y_min_group <= bounds['y_min'] + cart_buffer) |
+            (y_max_group >= bounds['y_max'] - cart_buffer) |
+            (z_min_group <= bounds['z_min'] + cart_buffer) |
+            (z_max_group >= bounds['z_max'] - cart_buffer))
+        d_cart_edge = np.minimum.reduce([
+            x_cm - bounds['x_min'],
+            bounds['x_max'] - x_cm,
+            y_cm - bounds['y_min'],
+            bounds['y_max'] - y_cm,
+            z_cm - bounds['z_min'],
+            bounds['z_max'] - z_cm])
+        center_near_cart = (np.isfinite(d_cart_edge) &
+                            np.isfinite(edge_scale) &
+                            (d_cart_edge < edge_scale))
+
+    touches_ra = np.zeros(n_group, dtype=bool)
+    touches_dec = np.zeros(n_group, dtype=bool)
+    if edge_angular_buffer_deg is not None:
+        angular_buffer = max(float(edge_angular_buffer_deg), 0.0)
+        if ('RA' in rand_table.colnames and
+                np.isfinite(bounds['ra_min']) and np.isfinite(bounds['ra_max'])):
+            ra_members = np.asarray(rand_table['RA'], dtype=np.float64)[rand_idx_sorted]
+            finite_ra = np.isfinite(ra_members)
+            ra_min_group = np.minimum.reduceat(np.where(finite_ra, ra_members, np.inf),
+                                               rand_start)
+            ra_max_group = np.maximum.reduceat(np.where(finite_ra, ra_members, -np.inf),
+                                               rand_start)
+            has_ra = np.isfinite(ra_min_group) & np.isfinite(ra_max_group)
+            touches_ra = (has_ra &
+                          ((ra_min_group <= bounds['ra_min'] + angular_buffer) |
+                           (ra_max_group >= bounds['ra_max'] - angular_buffer)))
+        if ('DEC' in rand_table.colnames and
+                np.isfinite(bounds['dec_min']) and np.isfinite(bounds['dec_max'])):
+            dec_members = np.asarray(rand_table['DEC'], dtype=np.float64)[rand_idx_sorted]
+            finite_dec = np.isfinite(dec_members)
+            dec_min_group = np.minimum.reduceat(np.where(finite_dec, dec_members, np.inf),
+                                                rand_start)
+            dec_max_group = np.maximum.reduceat(np.where(finite_dec, dec_members, -np.inf),
+                                                rand_start)
+            has_dec = np.isfinite(dec_min_group) & np.isfinite(dec_max_group)
+            touches_dec = (has_dec &
+                           ((dec_min_group <= bounds['dec_min'] + angular_buffer) |
+                            (dec_max_group >= bounds['dec_max'] - angular_buffer)))
+
+    healpix_edge = _build_healpix_edge_mask(
+        rand_table=rand_table,
+        nside=healpix_edge_nside,
+        min_randoms_per_pix=healpix_edge_min_randoms,
+        edge_buffer_deg=edge_angular_buffer_deg,
+        nest=healpix_edge_nest)
+    if healpix_edge is None:
+        raise RuntimeError('HEALPix edge masking is required but mask construction returned None.')
+    touches_healpix = np.zeros(n_group, dtype=bool)
+    center_near_healpix = np.zeros(n_group, dtype=bool)
+    hp = healpix_edge['hp']
+    nside = healpix_edge['nside']
+    nest = healpix_edge['nest']
+    edge_buffered = healpix_edge['edge_buffered']
+
+    member_pix, member_pix_valid = _healpix_pixels(
+        hp, nside,
+        np.asarray(rand_table['RA'], dtype=np.float64)[rand_idx_sorted],
+        np.asarray(rand_table['DEC'], dtype=np.float64)[rand_idx_sorted],
+        nest=nest)
+    member_on_edge = np.zeros(member_pix.shape, dtype=bool)
+    member_on_edge[member_pix_valid] = edge_buffered[member_pix[member_pix_valid]]
+    touches_healpix = np.maximum.reduceat(member_on_edge, rand_start)
+
+    center_pix, center_pix_valid = _healpix_pixels(hp, nside, ra_cm, dec_cm,
+                                                   nest=nest)
+    center_near_healpix[center_pix_valid] = edge_buffered[center_pix[center_pix_valid]]
+
+    edge = (touches_radial | center_near_radial |
+            touches_healpix | center_near_healpix |
+            touches_ra | touches_dec |
+            touches_cart | center_near_cart)
+
+    z_vals = comoving_distance_to_redshift(r_cm / h, cosmo=cosmo)
+
+    group_table = Table(data=[unique_rand_gid.astype(np.int32),
+                              n_data.astype(np.int32), n_rand.astype(np.int32),
+                              ra_cm.astype(np.float64), dec_cm.astype(np.float64), z_vals.astype(np.float64),
+                              x_cm.astype(np.float64), y_cm.astype(np.float64), z_cm.astype(np.float64),
+                              r_eff.astype(np.float64),
+                              r_rms.astype(np.float64),
+                              r_vol.astype(np.float64),
+                              semi_axis_a.astype(np.float64),
+                              semi_axis_b.astype(np.float64),
+                              semi_axis_c.astype(np.float64),
+                              chi_min_group.astype(np.float64),
+                              chi_max_group.astype(np.float64),
+                              r_cm.astype(np.float64),
+                              d_radial_edge.astype(np.float64),
+                              np.full(n_group, chi_min_sample, dtype=np.float64),
+                              np.full(n_group, chi_max_sample, dtype=np.float64),
+                              x_min_group.astype(np.float64),
+                              x_max_group.astype(np.float64),
+                              y_min_group.astype(np.float64),
+                              y_max_group.astype(np.float64),
+                              z_min_group.astype(np.float64),
+                              z_max_group.astype(np.float64),
+                              d_cart_edge.astype(np.float64),
+                              np.full(n_group, float(bounds['x_min']), dtype=np.float64),
+                              np.full(n_group, float(bounds['x_max']), dtype=np.float64),
+                              np.full(n_group, float(bounds['y_min']), dtype=np.float64),
+                              np.full(n_group, float(bounds['y_max']), dtype=np.float64),
+                              np.full(n_group, float(bounds['z_min']), dtype=np.float64),
+                              np.full(n_group, float(bounds['z_max']), dtype=np.float64),
+                              geom_bad.astype(np.bool_),
+                              edge.astype(np.bool_),
+                              touches_radial.astype(np.bool_),
+                              center_near_radial.astype(np.bool_),
+                              touches_ra.astype(np.bool_),
+                              touches_dec.astype(np.bool_),
+                              touches_healpix.astype(np.bool_),
+                              center_near_healpix.astype(np.bool_),
+                              touches_cart.astype(np.bool_),
+                              center_near_cart.astype(np.bool_)], names=list(GROUP_COLUMNS))
     group_table.meta['EDGE_RBUF'] = float(edge_radial_buffer) if edge_radial_buffer is not None else 0.0
     group_table.meta['EDGE_ABUF'] = (float(edge_angular_buffer_deg)
                                      if edge_angular_buffer_deg is not None else np.nan)
     group_table.meta['EDGE_CBUF'] = float(cart_buffer) if cart_buffer is not None else 0.0
     group_table.meta['EDGE_SRC'] = str(bounds['source'])
+    group_table.meta['HPX_EDGE'] = True
+    group_table.meta['HPX_NSIDE'] = int(healpix_edge['nside'])
+    group_table.meta['HPX_NEST'] = bool(healpix_edge['nest'])
+    group_table.meta['HPX_MINR'] = int(healpix_edge['min_randoms_per_pix'])
+    group_table.meta['HPX_EBUF'] = float(healpix_edge['edge_buffer_deg'])
+    group_table.meta['HPX_NOBS'] = int(healpix_edge['n_observed_pix'])
+    group_table.meta['HPX_NEDGE'] = int(healpix_edge['n_edge_pix'])
+    group_table.meta['HPX_NBUF'] = int(healpix_edge['n_buffered_edge_pix'])
     group_table.meta['CHI_MIN'] = float(bounds['chi_min'])
     group_table.meta['CHI_MAX'] = float(bounds['chi_max'])
     group_table.meta['X_MIN'] = float(bounds['x_min'])
@@ -430,9 +770,10 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
     group_table.meta['Y_MAX'] = float(bounds['y_max'])
     group_table.meta['Z_MIN'] = float(bounds['z_min'])
     group_table.meta['Z_MAX'] = float(bounds['z_max'])
-
-    z_vals = comoving_distance_to_redshift(np.asarray(dist_mpc_list, dtype=np.float64), cosmo=cosmo)
-    group_table['REDSHIFT'] = z_vals.astype(np.float64)
+    group_table.meta['SURVEY_VOL'] = float(survey_volume) if np.isfinite(survey_volume) else np.nan
+    group_table.meta['SURVEY_OMG'] = float(survey_omega) if np.isfinite(survey_omega) else np.nan
+    group_table.meta['RAND_DENS'] = float(rand_density) if np.isfinite(rand_density) else np.nan
+    group_table.meta['NRAND_DENS'] = int(n_rand_density)
 
     return group_table
 
@@ -469,7 +810,8 @@ def _stack_column(data_table, rand_table, col_name, dtype, fill_value):
     raise ValueError(f'Column "{col_name}" must exist in both tables or in neither table.')
 
 
-def build_point_membership_table(data_table, rand_table, group_col='GROUPID'):
+def build_point_membership_table(data_table, rand_table, group_col='GROUPID',
+                                 boundary_col=None, boundary_id=BOUNDARY_ID):
     '''
     Build a point membership table that combines information from the data and random tables,
     including group IDs, void classifications, and relevant columns for analysis.
@@ -478,6 +820,8 @@ def build_point_membership_table(data_table, rand_table, group_col='GROUPID'):
         - data_table: Astropy Table containing the data points with a GROUPID column.
         - rand_table: Astropy Table containing the random points with a GROUPID column.
         - group_col: Name of the column in both tables that contains the group IDs.
+        - boundary_col: Optional column containing explicit boundary flags.
+        - boundary_id: GROUPID value used for watershed boundary points.
     If class columns are missing, defaults are used in the output.
     Returns:
         - An Astropy Table containing the combined point membership information, including TARGETID, IS_DATA
@@ -491,6 +835,16 @@ def build_point_membership_table(data_table, rand_table, group_col='GROUPID'):
 
     groupid = np.concatenate([np.asarray(data_table[group_col], dtype=np.int32),
                               np.asarray(rand_table[group_col], dtype=np.int32)])
+    is_boundary = (groupid == int(boundary_id)).astype(np.int8)
+    if boundary_col is not None:
+        explicit_boundary = np.zeros(n_total, dtype=np.int8)
+        if boundary_col in data_table.colnames:
+            explicit_boundary[:n_data] = np.asarray(data_table[boundary_col],
+                                                    dtype=np.int8)
+        if boundary_col in rand_table.colnames:
+            explicit_boundary[n_data:] = np.asarray(rand_table[boundary_col],
+                                                    dtype=np.int8)
+        is_boundary = ((is_boundary != 0) | (explicit_boundary != 0)).astype(np.int8)
 
     class_label = np.full(n_total, 'unknown', dtype='U13')
     class_id = np.full(n_total, -1, dtype=np.int8)
@@ -514,6 +868,7 @@ def build_point_membership_table(data_table, rand_table, group_col='GROUPID'):
     out['TARGETID'] = targetid
     out['IS_DATA'] = is_data
     out['GROUPID'] = groupid
+    out['IS_BOUNDARY'] = is_boundary
     out['VOID_CLASS_ID'] = class_id
     out['VOID_CLASS'] = class_label
     out['R'] = r_vals
@@ -528,40 +883,62 @@ def build_point_membership_table(data_table, rand_table, group_col='GROUPID'):
     return out
 
 
+def ellipticity_from_axes(group_table):
+    '''
+    Compute void ellipticity from stored inertia-axis values.
+
+    The definition is 1 - (J1/J3)**0.25, with
+    J1/J3 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2. In this catalog the SEMI_AXIS_*
+    values are sqrt(principal inertia moments / N), ordered A >= B >= C.
+    Invalid or non-positive axes return NaN.
+    '''
+    ellip = np.full(len(group_table), np.nan, dtype=np.float32)
+    if len(group_table) == 0:
+        return ellip
+
+    needed = ('SEMI_AXIS_A', 'SEMI_AXIS_C')
+    if any(col not in group_table.colnames for col in needed):
+        return ellip
+
+    semi_a = np.asarray(group_table['SEMI_AXIS_A'], dtype=np.float64)
+    semi_c = np.asarray(group_table['SEMI_AXIS_C'], dtype=np.float64)
+    valid = (np.isfinite(semi_a) & np.isfinite(semi_c) &
+             (semi_a > 0.0) & (semi_c > 0.0))
+    if not np.any(valid):
+        return ellip
+
+    ratio = (semi_c[valid] * semi_c[valid]) / (semi_a[valid] * semi_a[valid])
+    ratio = np.clip(ratio, 0.0, 1.0)
+    ellip[valid] = (1.0 - np.power(ratio, 0.25)).astype(np.float32)
+    return ellip
+
+
 def add_ellipticity_column(group_table, output_col='ELLIP'):
     '''
     Add an ellipticity column to the group table based on the semi-axes lengths.
 
     Parameters:
-        - group_table: Astropy Table containing the group information, including SEMI_AXIS_A and
-                       SEMI_AXIS_C columns.
+        - group_table: Astropy Table containing the group information, including SEMI_AXIS_A
+                       and SEMI_AXIS_C columns.
         - output_col: Name of the column to store the computed ellipticity values. The ellipticity
-                      is defined as 1 - (C/A), where A is the longest semi-axis and C is the
-                      shortest semi-axis. If the necessary semi-axis columns are missing or
-                      contain non-positive values, the ellipticity will be set to NaN for those groups.
+                      is defined as 1 - (J1/J3)**0.25, where
+                      J1/J3 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2 for these stored inertia-axis values.
+                      If the necessary semi-axis columns are missing or contain non-positive values,
+                      the ellipticity will be set to NaN for those groups.
     Returns:
         - An Astropy Table with the added ellipticity column.
     '''
     out = group_table.copy()
 
-    if len(out) == 0:
-        out[output_col] = np.array([], dtype=np.float32)
-        return out
-
-    semi_a = np.asarray(out['SEMI_AXIS_A'], dtype=np.float64)
-    semi_c = np.asarray(out['SEMI_AXIS_C'], dtype=np.float64)
-
-    ellip = np.full(len(out), np.nan, dtype=np.float64)
-    valid = np.isfinite(semi_a) & np.isfinite(semi_c) & (semi_a > 0)
-    ellip[valid] = 1.0 - (semi_c[valid] / semi_a[valid])
-
-    out[output_col] = ellip.astype(np.float32)
+    out[output_col] = ellipticity_from_axes(out)
     return out
 
 
 def write_group_table_fits(group_table, output_path, tracer, cap,
                            h, omega_m, r_threshold, mode,
-                           point_table=None, overwrite=False):
+                           point_table=None, overwrite=False,
+                           seed_threshold=None, boundary_id=BOUNDARY_ID,
+                           watershed_stats=None):
     '''
     Write the group table to a FITS file with appropriate metadata in the header.
 
@@ -579,6 +956,9 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
                        statistics about the point classifications.
         - overwrite: If True, overwrite the output file if it already exists. If False and the file
                      exists, a FileExistsError will be raised.
+        - seed_threshold: Optional seed threshold used by the watershed.
+        - boundary_id: GROUPID value used for watershed boundary points.
+        - watershed_stats: Optional dict of watershed summary values for the header.
     Returns:
         - The file path of the written FITS file.
     '''
@@ -595,18 +975,29 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
     hdr['OMEGA_M'] = (float(omega_m), 'Matter density parameter')
     hdr['RTHRESH'] = (float(r_threshold), 'R threshold for watershed')
     hdr['WMODE'] = (mode, 'Watershed mode')
-    hdr['UNITSXYZ'] = ('Mpc/h', 'XYZ, R_EFF, semi-axis units')
+    hdr['UNITSXYZ'] = ('Mpc/h', 'XYZ, R_EFF, R_RMS, R_VOL, semi-axis units')
+    hdr['REFFDEF'] = ('R_VOL if finite else R_RMS', 'Primary radius definition')
+    hdr['RRMSDEF'] = ('sqrt(<|r-r_cm|^2>)', 'R_RMS definition')
+    hdr['RVOLDEF'] = ('(3*Nrand/(4*pi*nbar_rand))^(1/3)', 'R_VOL definition')
     hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
-    hdr['ELLIPDEF'] = ('1-C/A', 'Ellipticity definition')
+    hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
+    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored inertia-axis values')
+    hdr['GEOMDEF'] = ('R_RMS>4*R_VOL or 1-C/A>0.9', 'GEOM_BAD definition')
     hdr['PTUNITSX'] = ('Mpc/h', 'POINT_MEMBERSHIP XYZ units')
     hdr['PTUNITSR'] = ('dimensionless', 'POINT_MEMBERSHIP R units')
     hdr['PTUNITSZ'] = ('redshift', 'POINT_MEMBERSHIP Z units')
     hdr['GIDM1'] = (-1, 'GROUPID=-1 means unassigned point')
-    hdr['EDGEDEF'] = ('radial_or_angular_or_cartesian', 'Primary EDGE flag')
+    hdr['GIDM2'] = (int(boundary_id), 'GROUPID for watershed boundary point')
+    if seed_threshold is not None:
+        hdr['SEEDTHR'] = (float(seed_threshold), 'Watershed seed threshold')
+    hdr['EDGEDEF'] = ('radial_or_healpix_or_radec_or_cartesian', 'Primary EDGE flag')
     if 'EDGE' in out_table.colnames:
         edge_flags = np.asarray(out_table['EDGE'], dtype=bool)
         hdr['NEDGE'] = (int(np.count_nonzero(edge_flags)), 'Number of EDGE=True voids')
         hdr['NCLEAN'] = (int(np.count_nonzero(~edge_flags)), 'Number of EDGE=False voids')
+    if 'GEOM_BAD' in out_table.colnames:
+        geom_flags = np.asarray(out_table['GEOM_BAD'], dtype=bool)
+        hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')
     if 'EDGE_RBUF' in group_table.meta:
         hdr['ERADBUF'] = (float(group_table.meta['EDGE_RBUF']), 'Radial edge buffer in Mpc/h')
     if 'EDGE_ABUF' in group_table.meta and np.isfinite(group_table.meta['EDGE_ABUF']):
@@ -615,12 +1006,48 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
         hdr['ECARBUF'] = (float(group_table.meta['EDGE_CBUF']), 'Cartesian edge buffer in Mpc/h')
     if 'EDGE_SRC' in group_table.meta:
         hdr['EDGESRC'] = (str(group_table.meta['EDGE_SRC']), 'Sample used for survey edge bounds')
+    if 'HPX_EDGE' in group_table.meta:
+        hdr['HPXEDGE'] = (bool(group_table.meta['HPX_EDGE']), 'HEALPix angular edge enabled')
+    if 'HPX_NSIDE' in group_table.meta:
+        hdr['HPXNSIDE'] = (int(group_table.meta['HPX_NSIDE']), 'HEALPix edge NSIDE')
+    if 'HPX_NEST' in group_table.meta:
+        hdr['HPXNEST'] = (bool(group_table.meta['HPX_NEST']), 'HEALPix NESTED ordering')
+    if 'HPX_MINR' in group_table.meta:
+        hdr['HPXMINR'] = (int(group_table.meta['HPX_MINR']), 'Min randoms per HEALPix pixel')
+    if 'HPX_EBUF' in group_table.meta:
+        hdr['HPXEBUF'] = (float(group_table.meta['HPX_EBUF']), 'HEALPix edge buffer in deg')
+    if 'HPX_NOBS' in group_table.meta:
+        hdr['HPXNOBS'] = (int(group_table.meta['HPX_NOBS']), 'Observed HEALPix pixels')
+    if 'HPX_NEDGE' in group_table.meta:
+        hdr['HPXNEDG'] = (int(group_table.meta['HPX_NEDGE']), 'Angular edge HEALPix pixels')
+    if 'HPX_NBUF' in group_table.meta:
+        hdr['HPXNBUF'] = (int(group_table.meta['HPX_NBUF']), 'Buffered angular edge HEALPix pixels')
+    if 'SURVEY_VOL' in group_table.meta and np.isfinite(group_table.meta['SURVEY_VOL']):
+        hdr['SURVVOL'] = (float(group_table.meta['SURVEY_VOL']), 'Survey volume in (Mpc/h)^3')
+    if 'SURVEY_OMG' in group_table.meta and np.isfinite(group_table.meta['SURVEY_OMG']):
+        hdr['SURVOMG'] = (float(group_table.meta['SURVEY_OMG']), 'Survey solid angle in sr')
+    if 'RAND_DENS' in group_table.meta and np.isfinite(group_table.meta['RAND_DENS']):
+        hdr['RANDDENS'] = (float(group_table.meta['RAND_DENS']), 'Mean random density h^3/Mpc^3')
+    if 'NRAND_DENS' in group_table.meta:
+        hdr['NRANDDEN'] = (int(group_table.meta['NRAND_DENS']), 'Randoms used for mean density')
     if 'CHI_MIN' in group_table.meta and np.isfinite(group_table.meta['CHI_MIN']):
         hdr['CHIMIN'] = (float(group_table.meta['CHI_MIN']), 'Sample minimum chi in Mpc/h')
     if 'CHI_MAX' in group_table.meta and np.isfinite(group_table.meta['CHI_MAX']):
         hdr['CHIMAX'] = (float(group_table.meta['CHI_MAX']), 'Sample maximum chi in Mpc/h')
     if point_table is not None:
         hdr['NPOINTS'] = (len(point_table), 'Number of points in POINT_MEMBERSHIP table')
+        point_gids = np.asarray(point_table['GROUPID'], dtype=np.int32)
+        hdr['NPTASGN'] = (int(np.count_nonzero(point_gids >= 0)), 'Assigned points')
+        hdr['NPTUNASN'] = (int(np.count_nonzero(point_gids == -1)), 'Unassigned points')
+        hdr['NPTBND'] = (int(np.count_nonzero(point_gids == int(boundary_id))),
+                         'Watershed boundary points')
+    if watershed_stats is not None:
+        if 'n_boundary_nodes' in watershed_stats:
+            hdr['WBNODES'] = (int(watershed_stats['n_boundary_nodes']),
+                              'Watershed boundary nodes')
+        if 'n_unassigned' in watershed_stats:
+            hdr['WUNASGN'] = (int(watershed_stats['n_unassigned']),
+                              'Watershed unassigned nodes')
 
     table_hdu = fits.BinTableHDU(data=out_table.as_array(), name='VOIDS')
     hdus = [primary_hdu, table_hdu]

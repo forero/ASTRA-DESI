@@ -1,7 +1,14 @@
+from collections import deque
+
 import numpy as np
 
 
-def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense'):
+UNASSIGNED_ID = -1
+BOUNDARY_ID = -2
+
+
+def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
+                       seed_threshold=None, boundary_id=BOUNDARY_ID):
     '''
     Perform watershed grouping based on the provided neighbors and r_values.
 
@@ -9,11 +16,16 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense'):
         - neighbors: List of lists, where neighbors[i] contains the indices of neighboring
                      nodes for node i.
         - r_values: Array of r values for each node, used to determine the order of processing.
-        - r_threshold: Threshold for r values to select nodes for grouping.
+        - r_threshold: Growth threshold for r values to select nodes for grouping.
         - mode: 'underdense' to group nodes with r <= r_threshold, 'overdense' to group nodes
                  with r >= r_threshold.
+        - seed_threshold: Optional threshold for nodes that are allowed to create new groups.
+                          If None, r_threshold is used, matching the original single-threshold
+                          behavior.
+        - boundary_id: Negative group ID assigned to watershed boundary/saddle nodes.
     Returns:
-        - group_of: Array of group IDs for each node, where -1 indicates unassigned nodes.
+        - group_of: Array of group IDs for each node, where -1 indicates unassigned nodes
+                    and boundary_id indicates watershed boundaries.
     Raises:
         - ValueError: If mode is not 'underdense' or 'overdense', or if the length of r_values
                       does not match the number of nodes.
@@ -24,35 +36,96 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense'):
     if len(r_values) != n_total:
         raise ValueError(f'Length mismatch: len(r_values)={len(r_values)} vs n_nodes={n_total}')
 
+    if boundary_id >= 0:
+        raise ValueError(f'boundary_id must be negative, got {boundary_id}')
+    if boundary_id == UNASSIGNED_ID:
+        raise ValueError(f'boundary_id must be distinct from {UNASSIGNED_ID}')
+
+    grow_threshold = float(r_threshold)
+    if seed_threshold is None:
+        seed_threshold = grow_threshold
+    seed_threshold = float(seed_threshold)
+
     if mode == 'underdense':
-        selected = np.where(r_values <= r_threshold)[0]
+        if seed_threshold > grow_threshold:
+            raise ValueError('For underdense mode, seed_threshold must be <= r_threshold')
+        selected = np.where(r_values <= grow_threshold)[0]
+        can_seed = r_values <= seed_threshold
         order = selected[np.argsort(r_values[selected], kind='stable')]
     elif mode == 'overdense':
-        selected = np.where(r_values >= r_threshold)[0]
+        if seed_threshold < grow_threshold:
+            raise ValueError('For overdense mode, seed_threshold must be >= r_threshold')
+        selected = np.where(r_values >= grow_threshold)[0]
+        can_seed = r_values >= seed_threshold
         order = selected[np.argsort(r_values[selected], kind='stable')[::-1]]
     else:
         raise ValueError(f'mode must be "underdense" or "overdense", got "{mode}"')
 
-    group_of = np.full(n_total, -1, dtype=np.int32)
+    group_of = np.full(n_total, UNASSIGNED_ID, dtype=np.int32)
     if len(order) == 0:
         return group_of
+    selected_mask = np.zeros(n_total, dtype=bool)
+    selected_mask[selected] = True
 
     current_max = -1
 
     for node in order:
         node_idx = int(node)
-        min_gid = -1
+        neighbor_groups = set()
         for nbr in neighbors[node_idx]:
             gid = group_of[nbr]
-            if gid >= 0 and (min_gid < 0 or gid < min_gid):
-                min_gid = int(gid)
-                if min_gid == 0:
+            if gid >= 0:
+                neighbor_groups.add(int(gid))
+                if len(neighbor_groups) > 1:
                     break
-        if min_gid >= 0:
-            group_of[node_idx] = min_gid
-        else:
+
+        if len(neighbor_groups) == 0:
+            if not can_seed[node_idx]:
+                continue
             current_max += 1
             group_of[node_idx] = current_max
+        elif len(neighbor_groups) == 1:
+            group_of[node_idx] = next(iter(neighbor_groups))
+        else:
+            group_of[node_idx] = boundary_id
+
+    pending = np.flatnonzero(selected_mask & (group_of == UNASSIGNED_ID))
+    if len(pending) == 0:
+        return group_of
+
+    queue = deque(int(node) for node in pending)
+    in_queue = np.zeros(n_total, dtype=bool)
+    in_queue[pending] = True
+
+    while queue:
+        node_idx = queue.popleft()
+        in_queue[node_idx] = False
+
+        if group_of[node_idx] != UNASSIGNED_ID:
+            continue
+
+        neighbor_groups = set()
+        for nbr in neighbors[node_idx]:
+            gid = group_of[nbr]
+            if gid >= 0:
+                neighbor_groups.add(int(gid))
+                if len(neighbor_groups) > 1:
+                    break
+
+        if len(neighbor_groups) == 0:
+            continue
+        if len(neighbor_groups) == 1:
+            group_of[node_idx] = next(iter(neighbor_groups))
+        else:
+            group_of[node_idx] = boundary_id
+
+        for nbr in neighbors[node_idx]:
+            nbr_idx = int(nbr)
+            if (selected_mask[nbr_idx] and
+                    group_of[nbr_idx] == UNASSIGNED_ID and
+                    not in_queue[nbr_idx]):
+                queue.append(nbr_idx)
+                in_queue[nbr_idx] = True
 
     return group_of
 
@@ -62,11 +135,13 @@ def filter_groups_by_size(group_of, min_group_size=4):
     Filter groups based on their size and return the filtered group assignments and group sizes.
 
     Parameters:
-        - group_of: Array of group IDs for each node, where -1 indicates unassigned nodes.
+        - group_of: Array of group IDs for each node, where -1 indicates unassigned nodes
+                    and negative values below -1 are preserved as non-member labels.
         - min_group_size: Minimum size of groups to keep. Groups smaller than this will be
                           set to -1 (unassigned).
     Returns:
-        - filtered: Array of group IDs after filtering, where -1 indicates unassigned nodes.
+        - filtered: Array of group IDs after filtering, where -1 indicates unassigned nodes
+                    and watershed boundary labels remain negative.
         - group_sizes: Dict mapping group ID to its size for groups that meet the
                        size threshold.
     '''
@@ -103,28 +178,39 @@ def filter_groups_by_size(group_of, min_group_size=4):
 
 
 def run_watershed(neighbors, r_values, r_threshold=-0.3, min_group_size=4,
-                  mode='underdense'):
+                  mode='underdense', seed_threshold=None,
+                  boundary_id=BOUNDARY_ID):
     '''
     Run the watershed grouping algorithm and filter groups by size.
 
     Parameters:
         - neighbors: Array of neighbor indices for each node.
         - r_values: Array of r-values for each node.
-        - r_threshold: Threshold for determining group membership.
+        - r_threshold: Growth threshold for determining group membership.
         - min_group_size: Minimum size of groups to keep.
         - mode: Mode for grouping ('underdense' or 'overdense').
+        - seed_threshold: Optional threshold for nodes that can create new groups.
+        - boundary_id: Negative group ID used for watershed boundaries.
     Returns:
         - Dict containing the filtered group assignments and summary statistics.
     '''
     raw_groups = watershed_grouping(neighbors=neighbors, r_values=r_values,
-                                    r_threshold=r_threshold, mode=mode)
+                                    r_threshold=r_threshold, mode=mode,
+                                    seed_threshold=seed_threshold,
+                                    boundary_id=boundary_id)
     filtered_groups, group_sizes = filter_groups_by_size(raw_groups, min_group_size=min_group_size)
 
     n_assigned = int(np.count_nonzero(filtered_groups >= 0))
+    n_boundary = int(np.count_nonzero(filtered_groups == boundary_id))
+    n_unassigned = int(np.count_nonzero(filtered_groups == UNASSIGNED_ID))
     return {'group_of': filtered_groups,
             'group_sizes': group_sizes,
             'n_groups': len(group_sizes),
-            'n_assigned': n_assigned}
+            'n_assigned': n_assigned,
+            'n_boundary_nodes': n_boundary,
+            'n_unassigned': n_unassigned,
+            'boundary_id': int(boundary_id),
+            'seed_threshold': seed_threshold}
 
 
 def assign_group_ids_to_tables(data_table, rand_table, group_of, group_col='GROUPID'):

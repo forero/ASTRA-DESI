@@ -15,13 +15,16 @@ from group_finder.astra import (add_cartesian_columns,
                                 add_neighbor_columns_to_tables)
 from group_finder.make_cat import (AXIS_VECTOR_COLUMNS,
                                    build_point_membership_table,
-                                   consolidate_group_info)
+                                   consolidate_group_info,
+                                   ellipticity_from_axes,
+                                   ELLIPTICITY_DEFINITION,
+                                   J1J3_DEFINITION)
 from group_finder.read_data import (DEFAULT_COLUMNS,
                                     DEFAULT_RA_MAX,
                                     DEFAULT_RA_MIN,
                                     DEFAULT_TRACERS_DR2,
                                     load_all_tracer_samples)
-from group_finder.watershed import assign_group_ids_to_tables, run_watershed
+from group_finder.watershed import BOUNDARY_ID, assign_group_ids_to_tables, run_watershed
 
 
 DEFAULT_DATA_DIR = ('/global/cfs/cdirs/desi/survey/catalogs/DA2/LSS/loa-v1/LSScats/v1.1/nonKP/')
@@ -69,8 +72,11 @@ def parse_args():
     parser.add_argument('--ra-min', type=float, default=DEFAULT_RA_MIN)
     parser.add_argument('--ra-max', type=float, default=DEFAULT_RA_MAX)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
+    parser.add_argument('--seed-threshold', type=float, default=None)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
+    parser.add_argument('--healpix-edge-nside', type=int, default=256)
+    parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
     parser.add_argument('--include-membership', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
@@ -83,31 +89,6 @@ def output_path_for(output_root, cosmo_label, tracer, cap):
     return os.path.join(output_root, cosmo_label, f'voids_{tracer}_{cap}.fits')
 
 
-def ellipticity_from_axes(group_table):
-    ellip = np.full(len(group_table), np.nan, dtype=np.float32)
-    if len(group_table) == 0:
-        return ellip
-
-    needed = ('SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C')
-    if any(col not in group_table.colnames for col in needed):
-        return ellip
-
-    axes = np.vstack([np.asarray(group_table[col], dtype=np.float64)
-                      for col in needed]).T
-    valid = np.all(np.isfinite(axes), axis=1) & np.all(axes > 0.0, axis=1)
-    if not np.any(valid):
-        return ellip
-
-    axes = np.sort(axes[valid], axis=1)
-    a = axes[:, 0]
-    b = axes[:, 1]
-    c = axes[:, 2]
-    ratio = (a * a + b * b) / (b * b + c * c)
-    ratio = np.clip(ratio, 0.0, 1.0)
-    ellip[valid] = (1.0 - np.power(ratio, 0.25)).astype(np.float32)
-    return ellip
-
-
 def common_void_table(group_table):
     out = Table()
     out['VOID_ID'] = np.asarray(group_table['VOID_ID'], dtype=np.int32)
@@ -118,6 +99,12 @@ def common_void_table(group_table):
     out['ELLIP'] = ellipticity_from_axes(group_table)
 
     extra_cols = ('N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
+                  'R_RMS', 'R_VOL',
+                  'GEOM_BAD',
+                  'EDGE', 'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
+                  'TOUCHES_RA_EDGE', 'TOUCHES_DEC_EDGE',
+                  'TOUCHES_HEALPIX_EDGE', 'CENTER_NEAR_HEALPIX_EDGE',
+                  'TOUCHES_CART_EDGE', 'CENTER_NEAR_CART_EDGE',
                   'X', 'Y', 'Z',
                   'SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C',
                   *AXIS_VECTOR_COLUMNS)
@@ -143,19 +130,59 @@ def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
     hdr['RANDIDX'] = (int(args.random_index), 'DR2 random index')
     hdr['SEED'] = (int(args.seed), 'Random subsampling seed')
     hdr['RTHRESH'] = (float(args.r_threshold), 'Watershed R threshold')
+    if args.seed_threshold is not None:
+        hdr['SEEDTHR'] = (float(args.seed_threshold), 'Watershed seed threshold')
     hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
     hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
     hdr['WMODE'] = (args.mode, 'Watershed mode')
     hdr['NVOIDS'] = (len(voids), 'Number of voids')
-    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF, X/Y/Z, semi-axes')
+    if 'GEOM_BAD' in voids.colnames:
+        geom_flags = np.asarray(voids['GEOM_BAD'], dtype=bool)
+        hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')
+    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF/R_RMS/R_VOL, X/Y/Z, semi-axes')
+    hdr['REFFDEF'] = ('R_VOL if finite else R_RMS', 'Primary radius definition')
+    hdr['RRMSDEF'] = ('sqrt(<|r-r_cm|^2>)', 'R_RMS definition')
+    hdr['RVOLDEF'] = ('(3*Nrand/(4*pi*nbar_rand))^(1/3)', 'R_VOL definition')
     hdr['UNITSAX'] = ('unitless', 'Units for X1..Z3 axis-vector columns')
     hdr['AXVEC'] = ('Xj,Yj,Zj', 'Unit-vector components for axis j')
     hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
     hdr['ZUNIT'] = ('redshift', 'Units for REDSHIFT')
-    hdr['ELLIPDEF'] = ('1-(J1/J3)**0.25', 'Ellipticity definition')
-    hdr['J1J3'] = ('(a^2+b^2)/(b^2+c^2)', 'a<=b<=c axes')
+    hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
+    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored inertia-axis values')
+    hdr['GEOMDEF'] = ('R_RMS>4*R_VOL or 1-C/A>0.9', 'GEOM_BAD definition')
+    hdr['GIDM1'] = (-1, 'GROUPID=-1 means unassigned point')
+    hdr['GIDM2'] = (int(BOUNDARY_ID), 'GROUPID for watershed boundary point')
+    if 'SURVEY_VOL' in group_table.meta and np.isfinite(group_table.meta['SURVEY_VOL']):
+        hdr['SURVVOL'] = (float(group_table.meta['SURVEY_VOL']), 'Survey volume in (Mpc/h)^3')
+    if 'SURVEY_OMG' in group_table.meta and np.isfinite(group_table.meta['SURVEY_OMG']):
+        hdr['SURVOMG'] = (float(group_table.meta['SURVEY_OMG']), 'Survey solid angle in sr')
+    if 'RAND_DENS' in group_table.meta and np.isfinite(group_table.meta['RAND_DENS']):
+        hdr['RANDDENS'] = (float(group_table.meta['RAND_DENS']), 'Mean random density h^3/Mpc^3')
+    if 'NRAND_DENS' in group_table.meta:
+        hdr['NRANDDEN'] = (int(group_table.meta['NRAND_DENS']), 'Randoms used for mean density')
+    if 'HPX_EDGE' in group_table.meta:
+        hdr['HPXEDGE'] = (bool(group_table.meta['HPX_EDGE']), 'HEALPix angular edge enabled')
+    if 'HPX_NSIDE' in group_table.meta:
+        hdr['HPXNSIDE'] = (int(group_table.meta['HPX_NSIDE']), 'HEALPix edge NSIDE')
+    if 'HPX_NEST' in group_table.meta:
+        hdr['HPXNEST'] = (bool(group_table.meta['HPX_NEST']), 'HEALPix NESTED ordering')
+    if 'HPX_MINR' in group_table.meta:
+        hdr['HPXMINR'] = (int(group_table.meta['HPX_MINR']), 'Min randoms per HEALPix pixel')
+    if 'HPX_EBUF' in group_table.meta:
+        hdr['HPXEBUF'] = (float(group_table.meta['HPX_EBUF']), 'HEALPix edge buffer in deg')
+    if 'HPX_NOBS' in group_table.meta:
+        hdr['HPXNOBS'] = (int(group_table.meta['HPX_NOBS']), 'Observed HEALPix pixels')
+    if 'HPX_NEDGE' in group_table.meta:
+        hdr['HPXNEDG'] = (int(group_table.meta['HPX_NEDGE']), 'Angular edge HEALPix pixels')
+    if 'HPX_NBUF' in group_table.meta:
+        hdr['HPXNBUF'] = (int(group_table.meta['HPX_NBUF']), 'Buffered angular edge HEALPix pixels')
     if point_table is not None:
         hdr['NPOINTS'] = (len(point_table), 'Rows in POINT_MEMBERSHIP')
+        point_gids = np.asarray(point_table['GROUPID'], dtype=np.int32)
+        hdr['NPTASGN'] = (int(np.count_nonzero(point_gids >= 0)), 'Assigned points')
+        hdr['NPTUNASN'] = (int(np.count_nonzero(point_gids == -1)), 'Unassigned points')
+        hdr['NPTBND'] = (int(np.count_nonzero(point_gids == int(BOUNDARY_ID))),
+                         'Watershed boundary points')
 
     hdus = [primary, fits.BinTableHDU(data=voids.as_array(), name='VOIDS')]
     if point_table is not None:
@@ -215,14 +242,16 @@ def run_case(data_table, rand_table, tracer, cap, cosmo_label, omega_m,
                        r_values=stats['r_values'],
                        r_threshold=args.r_threshold,
                        min_group_size=args.min_group_size,
-                       mode=args.mode)
+                       mode=args.mode,
+                       seed_threshold=args.seed_threshold)
     assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
                                group_col='GROUPID')
-    log_message(log_fh, f'case={cosmo_label}/{tracer}/{cap} watershed '
-                        f'elapsed_s={time.time() - step:.3f} '
-                        f'groups={ws['n_groups']} assigned={ws['n_assigned']} '
-                        f'unassigned={len(ws['group_of']) - ws['n_assigned']}',
-                        verbose=verbose)
+    log_message(log_fh, f"case={cosmo_label}/{tracer}/{cap} watershed "
+                        f"elapsed_s={time.time() - step:.3f} "
+                        f"groups={ws['n_groups']} assigned={ws['n_assigned']} "
+                        f"boundary={ws['n_boundary_nodes']} "
+                        f"unassigned={ws['n_unassigned']}",
+                verbose=verbose)
 
     step = time.time()
     group_table = consolidate_group_info(data_table=data_tbl,
@@ -230,7 +259,9 @@ def run_case(data_table, rand_table, tracer, cap, cosmo_label, omega_m,
                                          cosmo=cosmo,
                                          h=args.h,
                                          group_col='GROUPID',
-                                         min_rand_for_shape=args.min_rand_for_shape)
+                                         min_rand_for_shape=args.min_rand_for_shape,
+                                         healpix_edge_nside=getattr(args, 'healpix_edge_nside', 256),
+                                         healpix_edge_min_randoms=getattr(args, 'healpix_edge_min_randoms', 3))
     log_message(log_fh, f'case={cosmo_label}/{tracer}/{cap} consolidate '
                         f'elapsed_s={time.time() - step:.3f} '
                         f'n_voids={len(group_table)}',

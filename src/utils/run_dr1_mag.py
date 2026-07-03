@@ -51,8 +51,11 @@ def parse_args():
     parser.add_argument('--h', type=float, default=0.6736)
     parser.add_argument('--omega-m', type=float, default=0.315)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
+    parser.add_argument('--seed-threshold', type=float, default=None)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
+    parser.add_argument('--healpix-edge-nside', type=int, default=256)
+    parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
 
     parser.add_argument('--overwrite', action='store_true', default=False)
@@ -376,12 +379,14 @@ def run_case(args, cap, data_table, rand_table, cosmo, random_index, seed,
                        r_values=stats['r_values'],
                        r_threshold=args.r_threshold,
                        min_group_size=args.min_group_size,
-                       mode=args.mode)
+                       mode=args.mode,
+                       seed_threshold=args.seed_threshold)
     assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
                                group_col='GROUPID')
     log_message(log_fh, f'Case={cap} Step=watershed done elapsed_s={time.time() - t_step:.3f} '
                         f'groups={ws["n_groups"]} assigned={ws["n_assigned"]} '
-                        f'unassigned={len(ws["group_of"]) - ws["n_assigned"]}',
+                        f'boundary={ws["n_boundary_nodes"]} '
+                        f'unassigned={ws["n_unassigned"]}',
                 verbose=verbose)
 
     t_step = time.time()
@@ -390,7 +395,9 @@ def run_case(args, cap, data_table, rand_table, cosmo, random_index, seed,
                                          cosmo=cosmo,
                                          h=args.h,
                                          group_col='GROUPID',
-                                         min_rand_for_shape=args.min_rand_for_shape)
+                                         min_rand_for_shape=args.min_rand_for_shape,
+                                         healpix_edge_nside=args.healpix_edge_nside,
+                                         healpix_edge_min_randoms=args.healpix_edge_min_randoms)
     log_message(log_fh, f'Case={cap} Step=consolidate_groups done elapsed_s={time.time() - t_step:.3f} '
                         f'n_voids={len(group_table)}',
                 verbose=verbose)
@@ -408,6 +415,9 @@ def run_case(args, cap, data_table, rand_table, cosmo, random_index, seed,
                            r_threshold=args.r_threshold,
                            mode=args.mode,
                            point_table=point_table,
+                           seed_threshold=args.seed_threshold,
+                           boundary_id=ws['boundary_id'],
+                           watershed_stats=ws,
                            overwrite=args.overwrite)
     patch_header(output_path, args, cap, random_index, seed, len(data_tbl), len(rand_tbl),
                  sample_counts, available_indices)

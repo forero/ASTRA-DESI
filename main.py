@@ -51,12 +51,18 @@ def parse_args():
     parser.add_argument('--omega-m', type=float, default=0.315)
 
     parser.add_argument('--r-threshold', type=float, default=-0.25)
+    parser.add_argument('--seed-threshold', type=float, default=None)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
     parser.add_argument('--edge-radial-buffer', type=float, default=20.0)
     parser.add_argument('--edge-angular-buffer', type=float, default=1.0)
     parser.add_argument('--edge-cartesian-buffer', type=float, default=None)
+    parser.add_argument('--healpix-edge-nside', type=int, default=256)
+    parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
 
+    parser.add_argument('--include-membership', dest='include_membership', action='store_true', default=True)
+    parser.add_argument('--no-membership', dest='include_membership',
+                        action='store_false')
     parser.add_argument('--overwrite', action='store_true', default=False)
     parser.add_argument('--quiet', action='store_true', default=False)
 
@@ -212,12 +218,13 @@ def run_pipeline(args):
                                    r_values=stats['r_values'],
                                    r_threshold=args.r_threshold,
                                    min_group_size=args.min_group_size,
-                                   mode=args.mode)
+                                   mode=args.mode,
+                                   seed_threshold=args.seed_threshold)
                 assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'], group_col='GROUPID')
-                n_unassigned = int(len(ws['group_of']) - ws['n_assigned'])
                 _log(log_fh, f'Case={key} Step=watershed done elapsed_s={time.time() - t_step:.3f} '
                              f'groups={ws["n_groups"]} assigned={ws["n_assigned"]} '
-                             f'unassigned={n_unassigned} total_nodes={len(ws["group_of"])}',
+                             f'boundary={ws["n_boundary_nodes"]} unassigned={ws["n_unassigned"]} '
+                             f'total_nodes={len(ws["group_of"])}',
                      verbose=verbose)
 
                 t_step = time.time()
@@ -228,7 +235,9 @@ def run_pipeline(args):
                                                      min_rand_for_shape=3,
                                                      edge_radial_buffer=args.edge_radial_buffer,
                                                      edge_angular_buffer_deg=args.edge_angular_buffer,
-                                                     edge_cartesian_buffer=args.edge_cartesian_buffer)
+                                                     edge_cartesian_buffer=args.edge_cartesian_buffer,
+                                                     healpix_edge_nside=args.healpix_edge_nside,
+                                                     healpix_edge_min_randoms=args.healpix_edge_min_randoms)
                 if 'EDGE' in group_table.colnames:
                     n_edge = int(sum(group_table['EDGE']))
                     edge_msg = f' edge={n_edge} clean={len(group_table) - n_edge}'
@@ -238,13 +247,17 @@ def run_pipeline(args):
                              f'n_voids={len(group_table)}{edge_msg}',
                      verbose=verbose)
 
-                t_step = time.time()
-                point_table = build_point_membership_table(data_table=data_tbl,
-                                                           rand_table=rand_tbl,
-                                                           group_col='GROUPID')
-                _log(log_fh, f'Case={key} Step=build_point_membership done elapsed_s={time.time() - t_step:.3f} '
-                             f'n_points={len(point_table)}',
-                     verbose=verbose)
+                point_table = None
+                if args.include_membership:
+                    t_step = time.time()
+                    point_table = build_point_membership_table(data_table=data_tbl,
+                                                               rand_table=rand_tbl,
+                                                               group_col='GROUPID')
+                    _log(log_fh, f'Case={key} Step=build_point_membership done elapsed_s={time.time() - t_step:.3f} '
+                                 f'n_points={len(point_table)}',
+                         verbose=verbose)
+                else:
+                    _log(log_fh, f'Case={key} Step=build_point_membership skipped', verbose=verbose)
 
                 t_step = time.time()
                 write_group_table_fits(group_table=group_table,
@@ -255,6 +268,9 @@ def run_pipeline(args):
                                        r_threshold=args.r_threshold,
                                        mode=args.mode,
                                        point_table=point_table,
+                                       seed_threshold=args.seed_threshold,
+                                       boundary_id=ws['boundary_id'],
+                                       watershed_stats=ws,
                                        overwrite=args.overwrite)
                 _log(log_fh, f'Case={key} Step=write_fits done elapsed_s={time.time() - t_step:.3f} '
                              f'output={output_path}',

@@ -42,8 +42,11 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=12345)
     parser.add_argument('--random-factor', type=float, default=1.0)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
+    parser.add_argument('--seed-threshold', type=float, default=None)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
+    parser.add_argument('--healpix-edge-nside', type=int, default=256)
+    parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
     parser.add_argument('--include-membership', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
@@ -77,7 +80,7 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir,
                             f'run_complete_targets_{args.tracer}_'
-                            f'{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}.log')
+                            f'{time.strftime("%Y%m%d_%H%M%S", time.gmtime())}.log')
 
     with open(log_path, 'a', encoding='utf-8') as log_fh:
         t0 = time.time()
