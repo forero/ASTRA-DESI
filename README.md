@@ -127,10 +127,13 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
 - `jobs/run_dr1.sbatch` is adapted to DR1; edit `ZLABELS` to match the desired
   zones. The script also enforces
   `PAIR_NJOBS_CAP`, capping multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
-- `jobs/run_dr3.sbatch` processes one DR3 tracer/zone in per-iteration shards.
-  Edit `TRACER_LABEL` and `ZONE_LABEL` inside the sbatch before submitting. Submit
-  once with the default `MODE=iter`, then set `MODE=prob` inside the sbatch and submit
-  again after the iteration job finishes to build the aggregate probability file.
+- `jobs/run_dr3.sbatch` processes one DR3 tracer/zone in per-iteration shards,
+  parallelising shards across the allocated node. Edit `TRACER_LABEL` and
+  `ZONE_LABEL` inside the sbatch before submitting. `PAIR_NJOBS_CAP` or
+  `DR3_ITER_NJOBS_CAP` controls the shard-worker cap, and `ITER_WORKERS`
+  overrides it for a single submission. Submit once with the default `MODE=iter`,
+  then set `MODE=prob` inside the sbatch and submit again after the iteration job
+  finishes to build the aggregate probability file.
 
   ```bash
   sbatch jobs/run_dr3.sbatch

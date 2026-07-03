@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=qso_sgc
+#SBATCH --job-name=lrg_sgc
 #SBATCH --account=desi
 #SBATCH -q regular
 #SBATCH -C cpu
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --time=01:00:00
+#SBATCH --cpus-per-task=128
+#SBATCH --time=03:00:00
 #SBATCH --mem=0
 #SBATCH --hint=nomultithread
 #SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr3_%j.out
@@ -22,7 +22,8 @@ export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
-export PAIR_NJOBS_CAP=1
+export PAIR_NJOBS_CAP=${PAIR_NJOBS_CAP:-32}
+export DR3_ITER_NJOBS_CAP=${DR3_ITER_NJOBS_CAP:-${PAIR_NJOBS_CAP}}
 
 R_LOWER=${R_LOWER:--0.25}
 R_MED=${R_MED:-0.25}
@@ -31,7 +32,7 @@ N_RANDOM=${N_RANDOM:-100}
 N_RANDOM_FILES=${N_RANDOM_FILES:-18}
 MODE=${MODE:-iter}
 
-TRACER_LABEL="QSO"
+TRACER_LABEL="LRG"
 ZONE_LABEL="SGC"
 
 PROJECT_ROOT=$PWD
@@ -82,6 +83,11 @@ if [[ -n ${ITERATIONS:-} ]]; then
   ITER_ARGS+=(--iterations "${ITER_TOKENS[@]}")
 fi
 
+WORKER_ARGS=()
+if [[ -n ${ITER_WORKERS:-} ]]; then
+  WORKER_ARGS+=(--iteration-workers "${ITER_WORKERS}")
+fi
+
 LOG_PREFIX="${LOGDIR}/${MODE}_${ZONE_LABEL}_${TRACER_LABEL}"
 REAL_CATALOG="${CLUSTER_DIR}/${TRACER_LABEL}_${ZONE_LABEL}_clustering.dat.fits"
 if [[ ! -s "${REAL_CATALOG}" ]]; then
@@ -89,6 +95,9 @@ if [[ ! -s "${REAL_CATALOG}" ]]; then
   echo "[sbatch] skipping tracer=${TRACER_LABEL} zone=${ZONE_LABEL}"
   exit 0
 fi
+
+echo "[sbatch] mode=${MODE} tracer=${TRACER_LABEL} zone=${ZONE_LABEL}"
+echo "[sbatch] cpus=${SLURM_CPUS_PER_TASK} pair_njobs_cap=${PAIR_NJOBS_CAP} dr3_iter_njobs_cap=${DR3_ITER_NJOBS_CAP}"
 
 case "${MODE}" in
   iter)
@@ -105,6 +114,7 @@ case "${MODE}" in
            --n-random-files "${N_RANDOM_FILES}" \
            --spill-dir "${PAIR_SPILL}" \
            --progress \
+           "${WORKER_ARGS[@]}" \
            "${FORCE_ARGS[@]}" \
            "${ITER_ARGS[@]}"
     ;;
