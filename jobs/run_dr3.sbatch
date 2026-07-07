@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=lrg_sgc
+#SBATCH --job-name=elg_ngc
 #SBATCH --account=desi
 #SBATCH -q regular
 #SBATCH -C cpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=03:00:00
+#SBATCH --time=04:00:00
 #SBATCH --mem=0
 #SBATCH --hint=nomultithread
 #SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr3_%j.out
@@ -32,8 +32,8 @@ N_RANDOM=${N_RANDOM:-100}
 N_RANDOM_FILES=${N_RANDOM_FILES:-18}
 MODE=${MODE:-iter}
 
-TRACER_LABEL="LRG"
-ZONE_LABEL="SGC"
+TRACER_LABEL="ELG"
+ZONE_LABEL="NGC"
 
 PROJECT_ROOT=$PWD
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
