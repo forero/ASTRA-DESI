@@ -1,4 +1,8 @@
-import argparse, json, os, time
+import argparse, json, os, sys, time
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from group_finder.astra import build_cosmology
 from group_finder.read_data import (DEFAULT_COLUMNS,
@@ -32,6 +36,7 @@ def parse_args():
     parser.add_argument('--ra-max', type=float, default=DEFAULT_RA_MAX)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
     parser.add_argument('--seed-threshold', type=float, default=None)
+    parser.add_argument('--merge-threshold', type=float, default=None)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)

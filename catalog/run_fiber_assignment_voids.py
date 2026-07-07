@@ -1,4 +1,8 @@
-import argparse, json, os, time
+import argparse, json, os, sys, time
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
@@ -8,7 +12,10 @@ os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
-import fitsio
+try:
+    import fitsio
+except ImportError:
+    fitsio = None
 
 from group_finder.astra import (add_cartesian_columns,
                                 add_neighbor_columns_to_tables,
@@ -87,6 +94,7 @@ def parse_args():
     parser.add_argument('--random-factor', type=float, default=1.0)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
     parser.add_argument('--seed-threshold', type=float, default=None)
+    parser.add_argument('--merge-threshold', type=float, default=None)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)
@@ -191,7 +199,19 @@ def write_mock_void_fits(group_table, output, tracer, mock_kind, region,
                          data_path, randoms_path, omega_m, args,
                          point_table=None):
     os.makedirs(os.path.dirname(output) or '.', exist_ok=True)
+    if 'FOOTPRINT_EDGE' in group_table.colnames:
+        footprint_edge_flags = np.asarray(group_table['FOOTPRINT_EDGE'], dtype=bool)
+        n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
+        n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
+    elif 'EDGE' in group_table.colnames:
+        footprint_edge_flags = np.asarray(group_table['EDGE'], dtype=bool)
+        n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
+        n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
+    else:
+        n_footprint_edge = 0
+        n_footprint_clean = len(group_table)
     voids = common_void_table(group_table)
+    n_edge = int(np.count_nonzero(np.asarray(voids['EDGE'], dtype=bool)))
 
     primary = fits.PrimaryHDU()
     hdr = primary.header
@@ -206,24 +226,31 @@ def write_mock_void_fits(group_table, output, tracer, mock_kind, region,
     hdr['RTHRESH'] = (float(args.r_threshold), 'Watershed R threshold')
     if args.seed_threshold is not None:
         hdr['SEEDTHR'] = (float(args.seed_threshold), 'Watershed seed threshold')
+    if getattr(args, 'merge_threshold', None) is not None:
+        hdr['MERGETHR'] = (float(args.merge_threshold), 'Watershed saddle merge threshold')
     hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
     hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
     hdr['WMODE'] = (args.mode, 'Watershed mode')
-    hdr['NVOIDS'] = (len(voids), 'Number of voids')
+    hdr['NVOIDS'] = (len(voids), 'Number of GROUPID>=0 voids written')
     if 'GEOM_BAD' in voids.colnames:
         geom_flags = np.asarray(voids['GEOM_BAD'], dtype=bool)
         hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')
-    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF/R_RMS/R_VOL, X/Y/Z, semi-axes')
-    hdr['REFFDEF'] = ('R_VOL if finite else R_RMS', 'Primary radius definition')
-    hdr['RRMSDEF'] = ('sqrt(<|r-r_cm|^2>)', 'R_RMS definition')
-    hdr['RVOLDEF'] = ('(3*Nrand/(4*pi*nbar_rand))^(1/3)', 'R_VOL definition')
+    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF, X/Y/Z, semi-axes')
+    hdr['REFFDEF'] = ('sqrt(5*<|r-r_cm|^2>/3)', 'R_EFF definition')
+    hdr['LAMDEF'] = ('eig(<dx_i dx_j>)', 'LAMBDA_1..3 definition')
+    hdr['AXDEF'] = ('SEMI_AXIS_j=sqrt(5*LAMBDA_j)', 'Semi-axis definition')
     hdr['UNITSAX'] = ('unitless', 'Units for X1..Z3 axis-vector columns')
     hdr['AXVEC'] = ('Xj,Yj,Zj', 'Unit-vector components for axis j')
     hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
     hdr['ZUNIT'] = ('redshift', 'Units for REDSHIFT')
     hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
-    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored inertia-axis values')
-    hdr['GEOMDEF'] = ('R_RMS>4*R_VOL or 1-C/A>0.9', 'GEOM_BAD definition')
+    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored second-moment axis values')
+    hdr['GEOMDEF'] = ('1-C/A>0.9', 'GEOM_BAD definition')
+    hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
+    hdr['FPEDDEF'] = ('survey footprint/mask boundary', 'FOOTPRINT_EDGE definition')
+    hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
+    hdr['NFPEDGE'] = (n_footprint_edge, 'FOOTPRINT_EDGE=True voids written')
+    hdr['NFPCLN'] = (n_footprint_clean, 'FOOTPRINT_EDGE=False voids written')
     hdr['GIDM1'] = (-1, 'GROUPID=-1 means unassigned point')
     hdr['GIDM2'] = (int(BOUNDARY_ID), 'GROUPID for watershed boundary point')
     if 'SURVEY_VOL' in group_table.meta and np.isfinite(group_table.meta['SURVEY_VOL']):
@@ -310,7 +337,8 @@ def run_region(data_table, random_table, tracer, mock_kind, region,
                        r_threshold=args.r_threshold,
                        min_group_size=args.min_group_size,
                        mode=args.mode,
-                       seed_threshold=args.seed_threshold)
+                       seed_threshold=args.seed_threshold,
+                       merge_threshold=getattr(args, 'merge_threshold', None))
     assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
                                group_col='GROUPID')
     log_message(log_fh, f"case={tracer}/{mock_kind}/{region} watershed "

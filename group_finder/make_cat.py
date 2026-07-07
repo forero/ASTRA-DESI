@@ -3,7 +3,6 @@ import numpy as np
 from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
-import healpy as hp
 
 try:
     from .watershed import BOUNDARY_ID, compute_semi_axes
@@ -13,7 +12,8 @@ except ImportError:
 
 GROUP_COLUMNS = ('VOID_ID', 'N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
                  'RA', 'DEC', 'REDSHIFT', 'X', 'Y', 'Z',
-                 'R_EFF', 'R_RMS', 'R_VOL',
+                 'R_EFF',
+                 'LAMBDA_1', 'LAMBDA_2', 'LAMBDA_3',
                  'SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C',
                  'CHI_MIN_GROUP', 'CHI_MAX_GROUP', 'CHI_CENTER',
                  'D_RADIAL_EDGE', 'CHI_MIN_SAMPLE', 'CHI_MAX_SAMPLE',
@@ -22,7 +22,8 @@ GROUP_COLUMNS = ('VOID_ID', 'N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
                  'X_MIN_SAMPLE', 'X_MAX_SAMPLE', 'Y_MIN_SAMPLE', 'Y_MAX_SAMPLE',
                  'Z_MIN_SAMPLE', 'Z_MAX_SAMPLE',
                  'GEOM_BAD',
-                 'EDGE', 'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
+                 'EDGE', 'FOOTPRINT_EDGE',
+                 'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
                  'TOUCHES_RA_EDGE', 'TOUCHES_DEC_EDGE',
                  'TOUCHES_HEALPIX_EDGE', 'CENTER_NEAR_HEALPIX_EDGE',
                  'TOUCHES_CART_EDGE', 'CENTER_NEAR_CART_EDGE')
@@ -30,6 +31,7 @@ GROUP_COLUMNS = ('VOID_ID', 'N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
 GROUP_DTYPES = (np.int32, np.int32, np.int32,
                 np.float64, np.float64, np.float64,
                 np.float64, np.float64, np.float64,
+                np.float64,
                 np.float64, np.float64, np.float64,
                 np.float64, np.float64,
                 np.float64,
@@ -40,13 +42,14 @@ GROUP_DTYPES = (np.int32, np.int32, np.int32,
                 np.float64, np.float64, np.float64, np.float64,
                 np.float64, np.float64,
                 np.bool_,
+                np.bool_,
                 np.bool_, np.bool_, np.bool_,
                 np.bool_, np.bool_,
                 np.bool_, np.bool_,
                 np.bool_, np.bool_)
 
-ELLIPTICITY_DEFINITION = '1-(J1/J3)**0.25'
-J1J3_DEFINITION = 'SEMI_AXIS_C^2/SEMI_AXIS_A^2'
+ELLIPTICITY_DEFINITION = '1-(LAMBDA_3/LAMBDA_1)**0.25'
+J1J3_DEFINITION = 'LAMBDA_3/LAMBDA_1 (=C^2/A^2)'
 AXIS_VECTOR_COLUMNS = ('X1', 'X2', 'X3',
                        'Y1', 'Y2', 'Y3',
                        'Z1', 'Z2', 'Z3')
@@ -379,6 +382,13 @@ def _build_healpix_edge_mask(rand_table, nside=256, min_randoms_per_pix=3,
     '''
     Build a buffered angular-edge HEALPix mask from random catalogue positions.
     '''
+    try:
+        import healpy as hp
+    except ImportError as exc:
+        raise ImportError('HEALPix footprint-edge masking requires healpy. '
+                          'Load an environment with healpy installed before '
+                          'running catalogue generation.') from exc
+
     if nside is None or int(nside) <= 0:
         raise ValueError('HEALPix edge masking is required; healpix_edge_nside must be a positive integer.')
     if 'RA' not in rand_table.colnames or 'DEC' not in rand_table.colnames:
@@ -463,11 +473,15 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
         - healpix_edge_nest: Use NESTED HEALPix ordering if True.
     Returns:
         - An Astropy Table containing consolidated group information, including VOID_ID, N_DATA_IN_GROUP,
-          N_RAND_IN_GROUP, RA, DEC, REDSHIFT, X, Y, Z, R_EFF, R_RMS, R_VOL,
-          SEMI_AXIS_A, SEMI_AXIS_B, SEMI_AXIS_C, EDGE, and GEOM_BAD for each
-          group. R_RMS is the previous RMS radius. R_VOL is the
-          equivalent-volume radius from N_rand/nbar_rand, and R_EFF is R_VOL
-          when finite.
+          N_RAND_IN_GROUP, RA, DEC, REDSHIFT, X, Y, Z, R_EFF,
+          LAMBDA_1, LAMBDA_2, LAMBDA_3, SEMI_AXIS_A, SEMI_AXIS_B,
+          SEMI_AXIS_C, EDGE, FOOTPRINT_EDGE, and GEOM_BAD for each group.
+          EDGE is the standard watershed edge flag and is False for consolidated
+          GROUPID >= 0 void rows; FOOTPRINT_EDGE marks objects touching the
+          survey footprint/mask boundary. The shape
+          eigenvalues are the eigenvalues of the central second-moment tensor
+          <(x-x_cm)_i (x-x_cm)_j>. R_EFF = sqrt(5 * <|r-r_cm|^2> / 3),
+          and semi-axis_j = sqrt(5 * LAMBDA_j).
     '''
     data_gids = np.asarray(data_table[group_col], dtype=np.int32)
     rand_gids = np.asarray(rand_table[group_col], dtype=np.int32)
@@ -530,20 +544,16 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
     z_cm = sum_z / n_float
 
     center_r2 = x_cm * x_cm + y_cm * y_cm + z_cm * z_cm
-    mean_r2 = (sum_x2 + sum_y2 + sum_z2) / n_float
-    r_rms = np.sqrt(np.clip(mean_r2 - center_r2, 0.0, None))
+    mean_centered_r2 = np.clip((sum_x2 + sum_y2 + sum_z2) / n_float - center_r2,
+                               0.0, None)
+    r_eff = np.sqrt(5.0 * mean_centered_r2 / 3.0)
 
     survey_volume, survey_omega = _estimate_survey_volume(rand_table, bounds)
     n_rand_density = int(np.count_nonzero(_finite_xyz_mask(rand_table)))
     rand_density = np.nan
-    r_vol = np.full(n_group, np.nan, dtype=np.float64)
     if (np.isfinite(survey_volume) and survey_volume > 0.0 and
             n_rand_density > 0):
         rand_density = float(n_rand_density) / float(survey_volume)
-        v_void = n_float / rand_density
-        r_vol = np.power(3.0 * v_void / (4.0 * np.pi), 1.0 / 3.0)
-
-    r_eff = np.where(np.isfinite(r_vol), r_vol, r_rms)
 
     dx2 = np.clip(sum_x2 - n_float * x_cm * x_cm, 0.0, None)
     dy2 = np.clip(sum_y2 - n_float * y_cm * y_cm, 0.0, None)
@@ -552,21 +562,27 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
     dxz = sum_xz - n_float * x_cm * z_cm
     dyz = sum_yz - n_float * y_cm * z_cm
 
+    lambda_axes = np.full((n_group, 3), np.nan, dtype=np.float64)
     semi_axes = np.full((n_group, 3), np.nan, dtype=np.float64)
     valid_shape = n_rand >= int(min_rand_for_shape)
     if np.any(valid_shape):
-        inertia = np.empty((int(np.count_nonzero(valid_shape)), 3, 3),
-                           dtype=np.float64)
-        inertia[:, 0, 0] = (dy2 + dz2)[valid_shape]
-        inertia[:, 1, 1] = (dx2 + dz2)[valid_shape]
-        inertia[:, 2, 2] = (dx2 + dy2)[valid_shape]
-        inertia[:, 0, 1] = inertia[:, 1, 0] = -dxy[valid_shape]
-        inertia[:, 0, 2] = inertia[:, 2, 0] = -dxz[valid_shape]
-        inertia[:, 1, 2] = inertia[:, 2, 1] = -dyz[valid_shape]
-        eigenvalues = np.linalg.eigvalsh(inertia)[:, ::-1]
+        shape = np.empty((int(np.count_nonzero(valid_shape)), 3, 3),
+                         dtype=np.float64)
+        inv_n = 1.0 / n_float[valid_shape]
+        shape[:, 0, 0] = dx2[valid_shape] * inv_n
+        shape[:, 1, 1] = dy2[valid_shape] * inv_n
+        shape[:, 2, 2] = dz2[valid_shape] * inv_n
+        shape[:, 0, 1] = shape[:, 1, 0] = dxy[valid_shape] * inv_n
+        shape[:, 0, 2] = shape[:, 2, 0] = dxz[valid_shape] * inv_n
+        shape[:, 1, 2] = shape[:, 2, 1] = dyz[valid_shape] * inv_n
+        eigenvalues = np.linalg.eigvalsh(shape)[:, ::-1]
         eigenvalues = np.clip(eigenvalues, 0.0, None)
-        semi_axes[valid_shape] = np.sqrt(eigenvalues / n_float[valid_shape, None])
+        lambda_axes[valid_shape] = eigenvalues
+        semi_axes[valid_shape] = np.sqrt(5.0 * eigenvalues)
 
+    lambda_1 = lambda_axes[:, 0]
+    lambda_2 = lambda_axes[:, 1]
+    lambda_3 = lambda_axes[:, 2]
     semi_axis_a = semi_axes[:, 0]
     semi_axis_b = semi_axes[:, 1]
     semi_axis_c = semi_axes[:, 2]
@@ -575,10 +591,8 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
     valid_axis_ratio = (np.isfinite(semi_axis_a) & np.isfinite(semi_axis_c) &
                         (semi_axis_a > 0.0))
     axis_ellip[valid_axis_ratio] = 1.0 - semi_axis_c[valid_axis_ratio] / semi_axis_a[valid_axis_ratio]
-    bad_rms_vol = (np.isfinite(r_rms) & np.isfinite(r_vol) &
-                   (r_rms > 4.0 * r_vol))
     bad_axis = np.isfinite(axis_ellip) & (axis_ellip > 0.9)
-    geom_bad = bad_rms_vol | bad_axis
+    geom_bad = bad_axis
 
     r_cm = np.sqrt(center_r2)
     ra_cm = np.full(n_group, np.nan, dtype=np.float64)
@@ -608,7 +622,7 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
         d_radial_edge = np.minimum(r_cm - chi_min_sample, chi_max_sample - r_cm)
 
     edge_scale = np.where(np.isfinite(semi_axis_a) & (semi_axis_a > 0.0),
-                          semi_axis_a, r_rms)
+                          semi_axis_a, r_eff)
     center_near_radial = (np.isfinite(d_radial_edge) &
                           np.isfinite(edge_scale) &
                           (d_radial_edge < edge_scale))
@@ -703,10 +717,10 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                                                    nest=nest)
     center_near_healpix[center_pix_valid] = edge_buffered[center_pix[center_pix_valid]]
 
-    edge = (touches_radial | center_near_radial |
-            touches_healpix | center_near_healpix |
-            touches_ra | touches_dec |
-            touches_cart | center_near_cart)
+    footprint_edge = (touches_radial | center_near_radial |
+                      touches_healpix | center_near_healpix |
+                      touches_ra | touches_dec |
+                      touches_cart | center_near_cart)
 
     z_vals = comoving_distance_to_redshift(r_cm / h, cosmo=cosmo)
 
@@ -715,8 +729,9 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                               ra_cm.astype(np.float64), dec_cm.astype(np.float64), z_vals.astype(np.float64),
                               x_cm.astype(np.float64), y_cm.astype(np.float64), z_cm.astype(np.float64),
                               r_eff.astype(np.float64),
-                              r_rms.astype(np.float64),
-                              r_vol.astype(np.float64),
+                              lambda_1.astype(np.float64),
+                              lambda_2.astype(np.float64),
+                              lambda_3.astype(np.float64),
                               semi_axis_a.astype(np.float64),
                               semi_axis_b.astype(np.float64),
                               semi_axis_c.astype(np.float64),
@@ -740,7 +755,8 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                               np.full(n_group, float(bounds['z_min']), dtype=np.float64),
                               np.full(n_group, float(bounds['z_max']), dtype=np.float64),
                               geom_bad.astype(np.bool_),
-                              edge.astype(np.bool_),
+                              np.zeros(n_group, dtype=np.bool_),
+                              footprint_edge.astype(np.bool_),
                               touches_radial.astype(np.bool_),
                               center_near_radial.astype(np.bool_),
                               touches_ra.astype(np.bool_),
@@ -813,8 +829,9 @@ def _stack_column(data_table, rand_table, col_name, dtype, fill_value):
 def build_point_membership_table(data_table, rand_table, group_col='GROUPID',
                                  boundary_col=None, boundary_id=BOUNDARY_ID):
     '''
-    Build a point membership table that combines information from the data and random tables,
-    including group IDs, void classifications, and relevant columns for analysis.
+    Build a point membership table that combines information from the data and
+    random tables, including group IDs, watershed boundary flags, void
+    classifications, and relevant columns for analysis.
 
     Parameters:
         - data_table: Astropy Table containing the data points with a GROUPID column.
@@ -824,7 +841,8 @@ def build_point_membership_table(data_table, rand_table, group_col='GROUPID',
         - boundary_id: GROUPID value used for watershed boundary points.
     If class columns are missing, defaults are used in the output.
     Returns:
-        - An Astropy Table containing the combined point membership information, including TARGETID, IS_DATA
+        - An Astropy Table containing the combined point membership information.
+          EDGE=True marks points with GROUPID equal to boundary_id.
     '''
     n_data = len(data_table)
     n_rand = len(rand_table)
@@ -868,6 +886,7 @@ def build_point_membership_table(data_table, rand_table, group_col='GROUPID',
     out['TARGETID'] = targetid
     out['IS_DATA'] = is_data
     out['GROUPID'] = groupid
+    out['EDGE'] = is_boundary.astype(np.bool_)
     out['IS_BOUNDARY'] = is_boundary
     out['VOID_CLASS_ID'] = class_id
     out['VOID_CLASS'] = class_label
@@ -885,11 +904,11 @@ def build_point_membership_table(data_table, rand_table, group_col='GROUPID',
 
 def ellipticity_from_axes(group_table):
     '''
-    Compute void ellipticity from stored inertia-axis values.
+    Compute void ellipticity from stored second-moment axis values.
 
-    The definition is 1 - (J1/J3)**0.25, with
-    J1/J3 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2. In this catalog the SEMI_AXIS_*
-    values are sqrt(principal inertia moments / N), ordered A >= B >= C.
+    The definition is 1 - (LAMBDA_3/LAMBDA_1)**0.25. Equivalently,
+    LAMBDA_3/LAMBDA_1 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2. In this catalog
+    SEMI_AXIS_j = sqrt(5 * LAMBDA_j), ordered A >= B >= C.
     Invalid or non-positive axes return NaN.
     '''
     ellip = np.full(len(group_table), np.nan, dtype=np.float32)
@@ -921,8 +940,8 @@ def add_ellipticity_column(group_table, output_col='ELLIP'):
         - group_table: Astropy Table containing the group information, including SEMI_AXIS_A
                        and SEMI_AXIS_C columns.
         - output_col: Name of the column to store the computed ellipticity values. The ellipticity
-                      is defined as 1 - (J1/J3)**0.25, where
-                      J1/J3 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2 for these stored inertia-axis values.
+                      is defined as 1 - (LAMBDA_3/LAMBDA_1)**0.25, where
+                      LAMBDA_3/LAMBDA_1 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2.
                       If the necessary semi-axis columns are missing or contain non-positive values,
                       the ellipticity will be set to NaN for those groups.
     Returns:
@@ -938,7 +957,7 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
                            h, omega_m, r_threshold, mode,
                            point_table=None, overwrite=False,
                            seed_threshold=None, boundary_id=BOUNDARY_ID,
-                           watershed_stats=None):
+                           watershed_stats=None, merge_threshold=None):
     '''
     Write the group table to a FITS file with appropriate metadata in the header.
 
@@ -959,30 +978,47 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
         - seed_threshold: Optional seed threshold used by the watershed.
         - boundary_id: GROUPID value used for watershed boundary points.
         - watershed_stats: Optional dict of watershed summary values for the header.
+        - merge_threshold: Optional saddle-density threshold used by the
+                           watershed to merge neighboring basins.
     Returns:
         - The file path of the written FITS file.
     '''
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
     out_table = add_ellipticity_column(group_table, output_col='ELLIP')
+    if 'FOOTPRINT_EDGE' not in out_table.colnames:
+        if 'EDGE' in out_table.colnames:
+            out_table['FOOTPRINT_EDGE'] = np.asarray(out_table['EDGE'], dtype=np.bool_)
+        else:
+            out_table['FOOTPRINT_EDGE'] = np.zeros(len(out_table), dtype=np.bool_)
+    if 'EDGE' not in out_table.colnames:
+        out_table['EDGE'] = np.zeros(len(out_table), dtype=np.bool_)
+    else:
+        out_table['EDGE'] = np.zeros(len(out_table), dtype=np.bool_)
+
+    edge_flags = np.asarray(out_table['EDGE'], dtype=bool)
+    footprint_edge_flags = np.asarray(out_table['FOOTPRINT_EDGE'], dtype=bool)
+    n_edge = int(np.count_nonzero(edge_flags))
+    n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
+    n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
 
     primary_hdu = fits.PrimaryHDU()
     hdr = primary_hdu.header
     hdr['TRACER'] = (tracer, 'Tracer type')
     hdr['CAP'] = (cap, 'Sky cap')
-    hdr['NVOIDS'] = (len(out_table), 'Number of voids')
+    hdr['NVOIDS'] = (len(out_table), 'Number of GROUPID>=0 voids written')
     hdr['H'] = (float(h), 'h = H0 / 100')
     hdr['OMEGA_M'] = (float(omega_m), 'Matter density parameter')
     hdr['RTHRESH'] = (float(r_threshold), 'R threshold for watershed')
     hdr['WMODE'] = (mode, 'Watershed mode')
-    hdr['UNITSXYZ'] = ('Mpc/h', 'XYZ, R_EFF, R_RMS, R_VOL, semi-axis units')
-    hdr['REFFDEF'] = ('R_VOL if finite else R_RMS', 'Primary radius definition')
-    hdr['RRMSDEF'] = ('sqrt(<|r-r_cm|^2>)', 'R_RMS definition')
-    hdr['RVOLDEF'] = ('(3*Nrand/(4*pi*nbar_rand))^(1/3)', 'R_VOL definition')
+    hdr['UNITSXYZ'] = ('Mpc/h', 'XYZ, R_EFF, semi-axis units')
+    hdr['REFFDEF'] = ('sqrt(5*<|r-r_cm|^2>/3)', 'R_EFF definition')
+    hdr['LAMDEF'] = ('eig(<dx_i dx_j>)', 'LAMBDA_1..3 definition')
+    hdr['AXDEF'] = ('SEMI_AXIS_j=sqrt(5*LAMBDA_j)', 'Semi-axis definition')
     hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
     hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
-    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored inertia-axis values')
-    hdr['GEOMDEF'] = ('R_RMS>4*R_VOL or 1-C/A>0.9', 'GEOM_BAD definition')
+    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored second-moment axis values')
+    hdr['GEOMDEF'] = ('1-C/A>0.9', 'GEOM_BAD definition')
     hdr['PTUNITSX'] = ('Mpc/h', 'POINT_MEMBERSHIP XYZ units')
     hdr['PTUNITSR'] = ('dimensionless', 'POINT_MEMBERSHIP R units')
     hdr['PTUNITSZ'] = ('redshift', 'POINT_MEMBERSHIP Z units')
@@ -990,11 +1026,13 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
     hdr['GIDM2'] = (int(boundary_id), 'GROUPID for watershed boundary point')
     if seed_threshold is not None:
         hdr['SEEDTHR'] = (float(seed_threshold), 'Watershed seed threshold')
-    hdr['EDGEDEF'] = ('radial_or_healpix_or_radec_or_cartesian', 'Primary EDGE flag')
-    if 'EDGE' in out_table.colnames:
-        edge_flags = np.asarray(out_table['EDGE'], dtype=bool)
-        hdr['NEDGE'] = (int(np.count_nonzero(edge_flags)), 'Number of EDGE=True voids')
-        hdr['NCLEAN'] = (int(np.count_nonzero(~edge_flags)), 'Number of EDGE=False voids')
+    if merge_threshold is not None:
+        hdr['MERGETHR'] = (float(merge_threshold), 'Watershed saddle merge threshold')
+    hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
+    hdr['FPEDDEF'] = ('survey footprint/mask boundary', 'FOOTPRINT_EDGE definition')
+    hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
+    hdr['NFPEDGE'] = (n_footprint_edge, 'FOOTPRINT_EDGE=True voids written')
+    hdr['NFPCLN'] = (n_footprint_clean, 'FOOTPRINT_EDGE=False voids written')
     if 'GEOM_BAD' in out_table.colnames:
         geom_flags = np.asarray(out_table['GEOM_BAD'], dtype=bool)
         hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')
@@ -1054,10 +1092,6 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
     if point_table is not None:
         point_hdu = fits.BinTableHDU(data=point_table.as_array(), name='POINT_MEMBERSHIP')
         hdus.append(point_hdu)
-    if 'EDGE' in out_table.colnames:
-        clean_table = out_table[~np.asarray(out_table['EDGE'], dtype=bool)]
-        clean_hdu = fits.BinTableHDU(data=clean_table.as_array(), name='VOIDS_CLEAN')
-        hdus.append(clean_hdu)
     hdul = fits.HDUList(hdus)
     hdul.writeto(output_path, overwrite=overwrite)
     return output_path

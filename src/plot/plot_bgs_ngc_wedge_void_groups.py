@@ -22,7 +22,7 @@ DEFAULT_RAW = '/pscratch/sd/v/vtorresg/cosmic-web/dr2/raw/zone_NGC_BGS.fits.gz'
 DEFAULT_PROB = ('/pscratch/sd/v/vtorresg/cosmic-web/dr2/probabilities/bgs/ngc/'
                 'zone_NGC_BGS_probability_iterdata.fits.gz')
 DEFAULT_CACHE = 'cache/zone_NGC_BGS_target_class_cache.fits.gz'
-DEFAULT_VOIDS = '/pscratch/sd/v/vtorresg/astra-voids/v1.0/voids_BGS_ANY_NGC.fits'
+DEFAULT_VOIDS = '/pscratch/sd/v/vtorresg/void_catalog_test/bgs_ngc_seed_m0p85_rthr_m0p25_mthr_m0p80/dr2/voids_BGS_ANY_NGC.fits'
 DEFAULT_OUTPUT = 'plots/bgs_ngc_wedge_void_groups.png'
 
 CLASS_NAMES = np.array(['Void', 'Sheet', 'Filament', 'Knot'], dtype='U8')

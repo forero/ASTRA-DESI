@@ -1,4 +1,8 @@
-import argparse, json, os, time
+import argparse, json, os, sys, time
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
@@ -49,6 +53,8 @@ def log_message(log_fh, message, verbose=True):
 
 def normalize_tracer(value):
     aliases = {t.upper(): t for t in DEFAULT_TRACERS_DR2}
+    aliases['BGS'] = 'BGS_ANY'
+    aliases['BGS_BRIGHT'] = 'BGS_ANY'
     aliases['ELGNOTQSO'] = 'ELGnotqso'
     aliases['ELG_NOTQSO'] = 'ELGnotqso'
     aliases['ELG'] = 'ELGnotqso'
@@ -73,6 +79,7 @@ def parse_args():
     parser.add_argument('--ra-max', type=float, default=DEFAULT_RA_MAX)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
     parser.add_argument('--seed-threshold', type=float, default=None)
+    parser.add_argument('--merge-threshold', type=float, default=None)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)
@@ -89,19 +96,32 @@ def output_path_for(output_root, cosmo_label, tracer, cap):
     return os.path.join(output_root, cosmo_label, f'voids_{tracer}_{cap}.fits')
 
 
-def common_void_table(group_table):
+def common_void_table(group_table, filter_edge=False, filter_footprint_edge=None):
+    if filter_footprint_edge is None:
+        filter_footprint_edge = bool(filter_edge)
+
+    source = group_table
+    if filter_footprint_edge:
+        if 'FOOTPRINT_EDGE' in group_table.colnames:
+            footprint_edge = np.asarray(group_table['FOOTPRINT_EDGE'], dtype=bool)
+            source = group_table[~footprint_edge]
+        elif 'EDGE' in group_table.colnames:
+            footprint_edge = np.asarray(group_table['EDGE'], dtype=bool)
+            source = group_table[~footprint_edge]
+
     out = Table()
-    out['VOID_ID'] = np.asarray(group_table['VOID_ID'], dtype=np.int32)
-    out['RA'] = np.asarray(group_table['RA'], dtype=np.float64)
-    out['DEC'] = np.asarray(group_table['DEC'], dtype=np.float64)
-    out['REDSHIFT'] = np.asarray(group_table['REDSHIFT'], dtype=np.float64)
-    out['R_EFF'] = np.asarray(group_table['R_EFF'], dtype=np.float64)
-    out['ELLIP'] = ellipticity_from_axes(group_table)
+    out['VOID_ID'] = np.asarray(source['VOID_ID'], dtype=np.int32)
+    out['RA'] = np.asarray(source['RA'], dtype=np.float64)
+    out['DEC'] = np.asarray(source['DEC'], dtype=np.float64)
+    out['REDSHIFT'] = np.asarray(source['REDSHIFT'], dtype=np.float64)
+    out['R_EFF'] = np.asarray(source['R_EFF'], dtype=np.float64)
+    out['ELLIP'] = ellipticity_from_axes(source)
 
     extra_cols = ('N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
-                  'R_RMS', 'R_VOL',
+                  'LAMBDA_1', 'LAMBDA_2', 'LAMBDA_3',
                   'GEOM_BAD',
-                  'EDGE', 'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
+                  'EDGE', 'FOOTPRINT_EDGE',
+                  'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
                   'TOUCHES_RA_EDGE', 'TOUCHES_DEC_EDGE',
                   'TOUCHES_HEALPIX_EDGE', 'CENTER_NEAR_HEALPIX_EDGE',
                   'TOUCHES_CART_EDGE', 'CENTER_NEAR_CART_EDGE',
@@ -109,15 +129,36 @@ def common_void_table(group_table):
                   'SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C',
                   *AXIS_VECTOR_COLUMNS)
     for col in extra_cols:
-        if col in group_table.colnames:
-            out[col] = np.asarray(group_table[col])
+        if col in source.colnames:
+            out[col] = np.asarray(source[col])
+    if 'FOOTPRINT_EDGE' not in out.colnames:
+        if 'EDGE' in source.colnames:
+            out['FOOTPRINT_EDGE'] = np.asarray(source['EDGE'], dtype=np.bool_)
+        else:
+            out['FOOTPRINT_EDGE'] = np.zeros(len(out), dtype=np.bool_)
+    if 'EDGE' in out.colnames:
+        out['EDGE'] = np.zeros(len(out), dtype=np.bool_)
+    else:
+        out['EDGE'] = np.zeros(len(out), dtype=np.bool_)
     return out
 
 
 def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
                            omega_m, args, point_table=None):
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    if 'FOOTPRINT_EDGE' in group_table.colnames:
+        footprint_edge_flags = np.asarray(group_table['FOOTPRINT_EDGE'], dtype=bool)
+        n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
+        n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
+    elif 'EDGE' in group_table.colnames:
+        footprint_edge_flags = np.asarray(group_table['EDGE'], dtype=bool)
+        n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
+        n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
+    else:
+        n_footprint_edge = 0
+        n_footprint_clean = len(group_table)
     voids = common_void_table(group_table)
+    n_edge = int(np.count_nonzero(np.asarray(voids['EDGE'], dtype=bool)))
 
     primary = fits.PrimaryHDU()
     hdr = primary.header
@@ -132,24 +173,31 @@ def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
     hdr['RTHRESH'] = (float(args.r_threshold), 'Watershed R threshold')
     if args.seed_threshold is not None:
         hdr['SEEDTHR'] = (float(args.seed_threshold), 'Watershed seed threshold')
+    if getattr(args, 'merge_threshold', None) is not None:
+        hdr['MERGETHR'] = (float(args.merge_threshold), 'Watershed saddle merge threshold')
     hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
     hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
     hdr['WMODE'] = (args.mode, 'Watershed mode')
-    hdr['NVOIDS'] = (len(voids), 'Number of voids')
+    hdr['NVOIDS'] = (len(voids), 'Number of GROUPID>=0 voids written')
     if 'GEOM_BAD' in voids.colnames:
         geom_flags = np.asarray(voids['GEOM_BAD'], dtype=bool)
         hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')
-    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF/R_RMS/R_VOL, X/Y/Z, semi-axes')
-    hdr['REFFDEF'] = ('R_VOL if finite else R_RMS', 'Primary radius definition')
-    hdr['RRMSDEF'] = ('sqrt(<|r-r_cm|^2>)', 'R_RMS definition')
-    hdr['RVOLDEF'] = ('(3*Nrand/(4*pi*nbar_rand))^(1/3)', 'R_VOL definition')
+    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF, X/Y/Z, semi-axes')
+    hdr['REFFDEF'] = ('sqrt(5*<|r-r_cm|^2>/3)', 'R_EFF definition')
+    hdr['LAMDEF'] = ('eig(<dx_i dx_j>)', 'LAMBDA_1..3 definition')
+    hdr['AXDEF'] = ('SEMI_AXIS_j=sqrt(5*LAMBDA_j)', 'Semi-axis definition')
     hdr['UNITSAX'] = ('unitless', 'Units for X1..Z3 axis-vector columns')
     hdr['AXVEC'] = ('Xj,Yj,Zj', 'Unit-vector components for axis j')
     hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
     hdr['ZUNIT'] = ('redshift', 'Units for REDSHIFT')
     hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
-    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored inertia-axis values')
-    hdr['GEOMDEF'] = ('R_RMS>4*R_VOL or 1-C/A>0.9', 'GEOM_BAD definition')
+    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored second-moment axis values')
+    hdr['GEOMDEF'] = ('1-C/A>0.9', 'GEOM_BAD definition')
+    hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
+    hdr['FPEDDEF'] = ('survey footprint/mask boundary', 'FOOTPRINT_EDGE definition')
+    hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
+    hdr['NFPEDGE'] = (n_footprint_edge, 'FOOTPRINT_EDGE=True voids written')
+    hdr['NFPCLN'] = (n_footprint_clean, 'FOOTPRINT_EDGE=False voids written')
     hdr['GIDM1'] = (-1, 'GROUPID=-1 means unassigned point')
     hdr['GIDM2'] = (int(BOUNDARY_ID), 'GROUPID for watershed boundary point')
     if 'SURVEY_VOL' in group_table.meta and np.isfinite(group_table.meta['SURVEY_VOL']):
@@ -243,7 +291,8 @@ def run_case(data_table, rand_table, tracer, cap, cosmo_label, omega_m,
                        r_threshold=args.r_threshold,
                        min_group_size=args.min_group_size,
                        mode=args.mode,
-                       seed_threshold=args.seed_threshold)
+                       seed_threshold=args.seed_threshold,
+                       merge_threshold=getattr(args, 'merge_threshold', None))
     assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
                                group_col='GROUPID')
     log_message(log_fh, f"case={cosmo_label}/{tracer}/{cap} watershed "
