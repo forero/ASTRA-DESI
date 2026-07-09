@@ -22,7 +22,8 @@ from group_finder.make_cat import (AXIS_VECTOR_COLUMNS,
                                    consolidate_group_info,
                                    ellipticity_from_axes,
                                    ELLIPTICITY_DEFINITION,
-                                   J1J3_DEFINITION)
+                                   J1J3_DEFINITION,
+                                   REFF_DEFINITION)
 from group_finder.read_data import (DEFAULT_COLUMNS,
                                     DEFAULT_RA_MAX,
                                     DEFAULT_RA_MIN,
@@ -78,8 +79,8 @@ def parse_args():
     parser.add_argument('--ra-min', type=float, default=DEFAULT_RA_MIN)
     parser.add_argument('--ra-max', type=float, default=DEFAULT_RA_MAX)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
-    parser.add_argument('--seed-threshold', type=float, default=None)
-    parser.add_argument('--merge-threshold', type=float, default=None)
+    parser.add_argument('--seed-threshold', type=float, default=-0.85)
+    parser.add_argument('--merge-threshold', type=float, default=-0.80)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)
@@ -96,7 +97,12 @@ def output_path_for(output_root, cosmo_label, tracer, cap):
     return os.path.join(output_root, cosmo_label, f'voids_{tracer}_{cap}.fits')
 
 
-def common_void_table(group_table, filter_edge=False, filter_footprint_edge=None):
+def common_void_table(group_table, filter_edge=True, filter_footprint_edge=None):
+    '''
+    Return the common VOIDS table. By default, footprint-edge voids are
+    excluded so downstream radius/shape statistics use only footprint-clean
+    objects.
+    '''
     if filter_footprint_edge is None:
         filter_footprint_edge = bool(filter_edge)
 
@@ -159,6 +165,7 @@ def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
         n_footprint_clean = len(group_table)
     voids = common_void_table(group_table)
     n_edge = int(np.count_nonzero(np.asarray(voids['EDGE'], dtype=bool)))
+    n_footprint_written = int(np.count_nonzero(np.asarray(voids['FOOTPRINT_EDGE'], dtype=bool)))
 
     primary = fits.PrimaryHDU()
     hdr = primary.header
@@ -178,12 +185,13 @@ def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
     hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
     hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
     hdr['WMODE'] = (args.mode, 'Watershed mode')
-    hdr['NVOIDS'] = (len(voids), 'Number of GROUPID>=0 voids written')
+    hdr['NVOIDS'] = (len(voids), 'Clean voids written')
+    hdr['NVOIDRAW'] = (len(group_table), 'Voids before footprint cut')
     if 'GEOM_BAD' in voids.colnames:
         geom_flags = np.asarray(voids['GEOM_BAD'], dtype=bool)
         hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')
     hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF, X/Y/Z, semi-axes')
-    hdr['REFFDEF'] = ('sqrt(5*<|r-r_cm|^2>/3)', 'R_EFF definition')
+    hdr['REFFDEF'] = (REFF_DEFINITION, 'R_EFF')
     hdr['LAMDEF'] = ('eig(<dx_i dx_j>)', 'LAMBDA_1..3 definition')
     hdr['AXDEF'] = ('SEMI_AXIS_j=sqrt(5*LAMBDA_j)', 'Semi-axis definition')
     hdr['UNITSAX'] = ('unitless', 'Units for X1..Z3 axis-vector columns')
@@ -191,13 +199,15 @@ def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
     hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
     hdr['ZUNIT'] = ('redshift', 'Units for REDSHIFT')
     hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
-    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored second-moment axis values')
+    hdr['J1J3'] = (J1J3_DEFINITION, 'Moment ratio')
     hdr['GEOMDEF'] = ('1-C/A>0.9', 'GEOM_BAD definition')
     hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
     hdr['FPEDDEF'] = ('survey footprint/mask boundary', 'FOOTPRINT_EDGE definition')
+    hdr['FPCUT'] = (True, 'Drop FOOTPRINT_EDGE rows')
     hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
-    hdr['NFPEDGE'] = (n_footprint_edge, 'FOOTPRINT_EDGE=True voids written')
-    hdr['NFPCLN'] = (n_footprint_clean, 'FOOTPRINT_EDGE=False voids written')
+    hdr['NFPEDGE'] = (n_footprint_edge, 'Footprint-edge rows dropped')
+    hdr['NFPCLN'] = (n_footprint_clean, 'Clean voids written')
+    hdr['NFPWRT'] = (n_footprint_written, 'Footprint-edge rows written')
     hdr['GIDM1'] = (-1, 'GROUPID=-1 means unassigned point')
     hdr['GIDM2'] = (int(BOUNDARY_ID), 'GROUPID for watershed boundary point')
     if 'SURVEY_VOL' in group_table.meta and np.isfinite(group_table.meta['SURVEY_VOL']):

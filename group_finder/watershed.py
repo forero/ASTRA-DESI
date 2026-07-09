@@ -230,9 +230,9 @@ def filter_groups_by_size(group_of, min_group_size=4):
     return filtered, group_sizes
 
 
-def run_watershed(neighbors, r_values, r_threshold=-0.3, min_group_size=4,
-                  mode='underdense', seed_threshold=None,
-                  boundary_id=BOUNDARY_ID, merge_threshold=None):
+def run_watershed(neighbors, r_values, r_threshold=-0.25, min_group_size=4,
+                  mode='underdense', seed_threshold=-0.85,
+                  boundary_id=BOUNDARY_ID, merge_threshold=-0.80):
     '''
     Run the watershed grouping algorithm and filter groups by size.
 

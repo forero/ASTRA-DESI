@@ -48,8 +48,9 @@ GROUP_DTYPES = (np.int32, np.int32, np.int32,
                 np.bool_, np.bool_,
                 np.bool_, np.bool_)
 
-ELLIPTICITY_DEFINITION = '1-(LAMBDA_3/LAMBDA_1)**0.25'
-J1J3_DEFINITION = 'LAMBDA_3/LAMBDA_1 (=C^2/A^2)'
+ELLIPTICITY_DEFINITION = '1-((C^2+B^2)/(B^2+A^2))**0.25'
+J1J3_DEFINITION = 'J_1/J_3=(C^2+B^2)/(B^2+A^2)'
+REFF_DEFINITION = 'sqrt(5)*(LAMBDA_1*LAMBDA_2*LAMBDA_3)**(1/6)'
 AXIS_VECTOR_COLUMNS = ('X1', 'X2', 'X3',
                        'Y1', 'Y2', 'Y3',
                        'Z1', 'Z2', 'Z3')
@@ -480,8 +481,9 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
           GROUPID >= 0 void rows; FOOTPRINT_EDGE marks objects touching the
           survey footprint/mask boundary. The shape
           eigenvalues are the eigenvalues of the central second-moment tensor
-          <(x-x_cm)_i (x-x_cm)_j>. R_EFF = sqrt(5 * <|r-r_cm|^2> / 3),
-          and semi-axis_j = sqrt(5 * LAMBDA_j).
+          <(x-x_cm)_i (x-x_cm)_j>. semi-axis_j = sqrt(5 * LAMBDA_j),
+          and R_EFF is the radius of the sphere with the same volume as the
+          ellipsoid: R_EFF = sqrt(5) * (LAMBDA_1 * LAMBDA_2 * LAMBDA_3)**(1/6).
     '''
     data_gids = np.asarray(data_table[group_col], dtype=np.int32)
     rand_gids = np.asarray(rand_table[group_col], dtype=np.int32)
@@ -546,7 +548,7 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
     center_r2 = x_cm * x_cm + y_cm * y_cm + z_cm * z_cm
     mean_centered_r2 = np.clip((sum_x2 + sum_y2 + sum_z2) / n_float - center_r2,
                                0.0, None)
-    r_eff = np.sqrt(5.0 * mean_centered_r2 / 3.0)
+    r_moment_eff = np.sqrt(5.0 * mean_centered_r2 / 3.0)
 
     survey_volume, survey_omega = _estimate_survey_volume(rand_table, bounds)
     n_rand_density = int(np.count_nonzero(_finite_xyz_mask(rand_table)))
@@ -587,6 +589,16 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
     semi_axis_b = semi_axes[:, 1]
     semi_axis_c = semi_axes[:, 2]
 
+    r_eff = np.full(n_group, np.nan, dtype=np.float64)
+    valid_reff = (np.isfinite(semi_axis_a) & np.isfinite(semi_axis_b) &
+                  np.isfinite(semi_axis_c) &
+                  (semi_axis_a >= 0.0) & (semi_axis_b >= 0.0) &
+                  (semi_axis_c >= 0.0))
+    r_eff[valid_reff] = np.cbrt(
+        semi_axis_a[valid_reff] *
+        semi_axis_b[valid_reff] *
+        semi_axis_c[valid_reff])
+
     axis_ellip = np.full(n_group, np.nan, dtype=np.float64)
     valid_axis_ratio = (np.isfinite(semi_axis_a) & np.isfinite(semi_axis_c) &
                         (semi_axis_a > 0.0))
@@ -622,7 +634,7 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
         d_radial_edge = np.minimum(r_cm - chi_min_sample, chi_max_sample - r_cm)
 
     edge_scale = np.where(np.isfinite(semi_axis_a) & (semi_axis_a > 0.0),
-                          semi_axis_a, r_eff)
+                          semi_axis_a, r_moment_eff)
     center_near_radial = (np.isfinite(d_radial_edge) &
                           np.isfinite(edge_scale) &
                           (d_radial_edge < edge_scale))
@@ -906,27 +918,31 @@ def ellipticity_from_axes(group_table):
     '''
     Compute void ellipticity from stored second-moment axis values.
 
-    The definition is 1 - (LAMBDA_3/LAMBDA_1)**0.25. Equivalently,
-    LAMBDA_3/LAMBDA_1 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2. In this catalog
-    SEMI_AXIS_j = sqrt(5 * LAMBDA_j), ordered A >= B >= C.
+    The definition is 1 - (J_1 / J_3)**0.25. For principal
+    axis lengths a <= b <= c, J_1 / J_3 = (a^2 + b^2) /
+    (b^2 + c^2). In this catalog SEMI_AXIS_A >= SEMI_AXIS_B >=
+    SEMI_AXIS_C, so a=C, b=B, and c=A.
     Invalid or non-positive axes return NaN.
     '''
     ellip = np.full(len(group_table), np.nan, dtype=np.float32)
     if len(group_table) == 0:
         return ellip
 
-    needed = ('SEMI_AXIS_A', 'SEMI_AXIS_C')
+    needed = ('SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C')
     if any(col not in group_table.colnames for col in needed):
         return ellip
 
     semi_a = np.asarray(group_table['SEMI_AXIS_A'], dtype=np.float64)
+    semi_b = np.asarray(group_table['SEMI_AXIS_B'], dtype=np.float64)
     semi_c = np.asarray(group_table['SEMI_AXIS_C'], dtype=np.float64)
-    valid = (np.isfinite(semi_a) & np.isfinite(semi_c) &
-             (semi_a > 0.0) & (semi_c > 0.0))
+    valid = (np.isfinite(semi_a) & np.isfinite(semi_b) & np.isfinite(semi_c) &
+             (semi_a > 0.0) & (semi_b > 0.0) & (semi_c > 0.0))
     if not np.any(valid):
         return ellip
 
-    ratio = (semi_c[valid] * semi_c[valid]) / (semi_a[valid] * semi_a[valid])
+    numerator = semi_c[valid] * semi_c[valid] + semi_b[valid] * semi_b[valid]
+    denominator = semi_b[valid] * semi_b[valid] + semi_a[valid] * semi_a[valid]
+    ratio = numerator / denominator
     ratio = np.clip(ratio, 0.0, 1.0)
     ellip[valid] = (1.0 - np.power(ratio, 0.25)).astype(np.float32)
     return ellip
@@ -937,11 +953,12 @@ def add_ellipticity_column(group_table, output_col='ELLIP'):
     Add an ellipticity column to the group table based on the semi-axes lengths.
 
     Parameters:
-        - group_table: Astropy Table containing the group information, including SEMI_AXIS_A
-                       and SEMI_AXIS_C columns.
+        - group_table: Astropy Table containing the group information, including SEMI_AXIS_A,
+                       SEMI_AXIS_B, and SEMI_AXIS_C columns.
         - output_col: Name of the column to store the computed ellipticity values. The ellipticity
-                      is defined as 1 - (LAMBDA_3/LAMBDA_1)**0.25, where
-                      LAMBDA_3/LAMBDA_1 = SEMI_AXIS_C^2 / SEMI_AXIS_A^2.
+                      is defined as 1 - (J_1/J_3)**0.25, where
+                      J_1/J_3 = (SEMI_AXIS_C^2 + SEMI_AXIS_B^2) /
+                      (SEMI_AXIS_B^2 + SEMI_AXIS_A^2).
                       If the necessary semi-axis columns are missing or contain non-positive values,
                       the ellipticity will be set to NaN for those groups.
     Returns:
@@ -962,7 +979,8 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
     Write the group table to a FITS file with appropriate metadata in the header.
 
     Parameters:
-        - group_table: Astropy Table containing the consolidated group information to be written to the FITS file.
+        - group_table: Astropy Table containing the consolidated group information. Rows with
+                       FOOTPRINT_EDGE=True are excluded from the VOIDS HDU by default.
         - output_path: File path for the output FITS file.
         - tracer: Name of the tracer (e.g., 'BGS_ANY', 'LRG', 'ELGnotqso', 'QSO') to include in the metadata.
         - cap: Name of the sky cap (e.g., 'NGC', 'SGC') to include in the metadata.
@@ -985,7 +1003,7 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
     '''
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
-    out_table = add_ellipticity_column(group_table, output_col='ELLIP')
+    out_table = group_table.copy()
     if 'FOOTPRINT_EDGE' not in out_table.colnames:
         if 'EDGE' in out_table.colnames:
             out_table['FOOTPRINT_EDGE'] = np.asarray(out_table['EDGE'], dtype=np.bool_)
@@ -996,28 +1014,33 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
     else:
         out_table['EDGE'] = np.zeros(len(out_table), dtype=np.bool_)
 
-    edge_flags = np.asarray(out_table['EDGE'], dtype=bool)
+    n_void_raw = len(out_table)
     footprint_edge_flags = np.asarray(out_table['FOOTPRINT_EDGE'], dtype=bool)
-    n_edge = int(np.count_nonzero(edge_flags))
     n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
     n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
+    out_table = out_table[~footprint_edge_flags]
+    out_table = add_ellipticity_column(out_table, output_col='ELLIP')
+    edge_flags = np.asarray(out_table['EDGE'], dtype=bool)
+    n_edge = int(np.count_nonzero(edge_flags))
+    footprint_edge_flags_written = np.asarray(out_table['FOOTPRINT_EDGE'], dtype=bool)
 
     primary_hdu = fits.PrimaryHDU()
     hdr = primary_hdu.header
     hdr['TRACER'] = (tracer, 'Tracer type')
     hdr['CAP'] = (cap, 'Sky cap')
-    hdr['NVOIDS'] = (len(out_table), 'Number of GROUPID>=0 voids written')
+    hdr['NVOIDS'] = (len(out_table), 'Clean voids written')
+    hdr['NVOIDRAW'] = (n_void_raw, 'Voids before footprint cut')
     hdr['H'] = (float(h), 'h = H0 / 100')
     hdr['OMEGA_M'] = (float(omega_m), 'Matter density parameter')
     hdr['RTHRESH'] = (float(r_threshold), 'R threshold for watershed')
     hdr['WMODE'] = (mode, 'Watershed mode')
     hdr['UNITSXYZ'] = ('Mpc/h', 'XYZ, R_EFF, semi-axis units')
-    hdr['REFFDEF'] = ('sqrt(5*<|r-r_cm|^2>/3)', 'R_EFF definition')
+    hdr['REFFDEF'] = (REFF_DEFINITION, 'R_EFF')
     hdr['LAMDEF'] = ('eig(<dx_i dx_j>)', 'LAMBDA_1..3 definition')
     hdr['AXDEF'] = ('SEMI_AXIS_j=sqrt(5*LAMBDA_j)', 'Semi-axis definition')
     hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
     hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
-    hdr['J1J3'] = (J1J3_DEFINITION, 'Stored second-moment axis values')
+    hdr['J1J3'] = (J1J3_DEFINITION, 'Moment ratio')
     hdr['GEOMDEF'] = ('1-C/A>0.9', 'GEOM_BAD definition')
     hdr['PTUNITSX'] = ('Mpc/h', 'POINT_MEMBERSHIP XYZ units')
     hdr['PTUNITSR'] = ('dimensionless', 'POINT_MEMBERSHIP R units')
@@ -1030,9 +1053,12 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
         hdr['MERGETHR'] = (float(merge_threshold), 'Watershed saddle merge threshold')
     hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
     hdr['FPEDDEF'] = ('survey footprint/mask boundary', 'FOOTPRINT_EDGE definition')
+    hdr['FPCUT'] = (True, 'Drop FOOTPRINT_EDGE rows')
     hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
-    hdr['NFPEDGE'] = (n_footprint_edge, 'FOOTPRINT_EDGE=True voids written')
-    hdr['NFPCLN'] = (n_footprint_clean, 'FOOTPRINT_EDGE=False voids written')
+    hdr['NFPEDGE'] = (n_footprint_edge, 'Footprint-edge rows dropped')
+    hdr['NFPCLN'] = (n_footprint_clean, 'Clean voids written')
+    hdr['NFPWRT'] = (int(np.count_nonzero(footprint_edge_flags_written)),
+                     'Footprint-edge rows written')
     if 'GEOM_BAD' in out_table.colnames:
         geom_flags = np.asarray(out_table['GEOM_BAD'], dtype=bool)
         hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')

@@ -51,7 +51,8 @@ def parse_args():
     parser.add_argument('--h', type=float, default=0.6736)
     parser.add_argument('--omega-m', type=float, default=0.315)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
-    parser.add_argument('--seed-threshold', type=float, default=None)
+    parser.add_argument('--seed-threshold', type=float, default=-0.85)
+    parser.add_argument('--merge-threshold', type=float, default=-0.80)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)
@@ -380,7 +381,8 @@ def run_case(args, cap, data_table, rand_table, cosmo, random_index, seed,
                        r_threshold=args.r_threshold,
                        min_group_size=args.min_group_size,
                        mode=args.mode,
-                       seed_threshold=args.seed_threshold)
+                       seed_threshold=args.seed_threshold,
+                       merge_threshold=args.merge_threshold)
     assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
                                group_col='GROUPID')
     log_message(log_fh, f'Case={cap} Step=watershed done elapsed_s={time.time() - t_step:.3f} '

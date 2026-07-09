@@ -51,8 +51,8 @@ def parse_args():
     parser.add_argument('--omega-m', type=float, default=0.315)
 
     parser.add_argument('--r-threshold', type=float, default=-0.25)
-    parser.add_argument('--seed-threshold', type=float, default=None)
-    parser.add_argument('--merge-threshold', type=float, default=None)
+    parser.add_argument('--seed-threshold', type=float, default=-0.85)
+    parser.add_argument('--merge-threshold', type=float, default=-0.80)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
     parser.add_argument('--edge-radial-buffer', type=float, default=20.0)
