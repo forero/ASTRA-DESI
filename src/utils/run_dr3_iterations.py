@@ -74,16 +74,7 @@ def _resolve_iteration_workers(iterations, requested=None):
 
 
 def _normalise_tracer(label):
-    text = str(label).strip()
-    if text in dr3.TRACERS:
-        return text
-    upper = text.upper()
-    if upper in dr3.TRACERS:
-        return upper
-    key = text.lower()
-    if key in dr3.TRACER_ALIAS:
-        return dr3.TRACER_ALIAS[key]
-    raise ValueError(f'Unknown DR3 tracer {label!r}; available: {", ".join(dr3.TRACERS)}')
+    return dr3.normalize_tracer(label)
 
 
 def _save_classification_direct(class_store, output_path, meta):

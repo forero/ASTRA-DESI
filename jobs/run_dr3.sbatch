@@ -5,7 +5,7 @@
 #SBATCH -C cpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=04:00:00
+#SBATCH --time=00:30:00
 #SBATCH --mem=0
 #SBATCH --hint=nomultithread
 #SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr3_%j.out
@@ -52,13 +52,16 @@ PROB_SPILL="${SCRATCH_ROOT}/prob_spill"
 
 mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${LOGDIR}" "${PAIR_SPILL}" "${PROB_SPILL}"
 
-case "${TRACER_LABEL}" in
-  qso|QSO) TRACER_LABEL="QSO" ;;
-  elg|ELG|ELG_LOPNOTQSO|elg_lopnotqso|ELG_LOPnotqso) TRACER_LABEL="ELG_LOPnotqso" ;;
-  lrg|LRG) TRACER_LABEL="LRG" ;;
-  bgs|BGS|bgs_bright|BGS_BRIGHT) TRACER_LABEL="BGS_BRIGHT" ;;
+TRACER_KEY=${TRACER_LABEL,,}
+TRACER_KEY=${TRACER_KEY// /_}
+case "${TRACER_KEY}" in
+  qso) TRACER_LABEL="QSO" ;;
+  elg|elg_lopnotqso) TRACER_LABEL="ELG_LOPnotqso" ;;
+  lrg) TRACER_LABEL="LRG" ;;
+  bgs|bgs_bright) TRACER_LABEL="BGS_BRIGHT" ;;
+  bgs-21.35|bgs_21.35|bgs_m21.35|bgs_-21.35|bgs_bright-21.35|bgs_bright_21.35|bgs_bright_m21.35|bgs_bright_-21.35) TRACER_LABEL="BGS_BRIGHT-21.35" ;;
   *)
-    echo "error: TRACER must be one of QSO, ELG_LOPnotqso, LRG, BGS_BRIGHT (got '${TRACER_LABEL}')" >&2
+    echo "error: TRACER must be one of QSO, ELG_LOPnotqso, LRG, BGS_BRIGHT, BGS_BRIGHT-21.35 (got '${TRACER_LABEL}')" >&2
     exit 1
     ;;
 esac
@@ -101,6 +104,11 @@ echo "[sbatch] cpus=${SLURM_CPUS_PER_TASK} pair_njobs_cap=${PAIR_NJOBS_CAP} dr3_
 
 case "${MODE}" in
   iter)
+    if [[ ! -r "${ITER_SCRIPT}" ]]; then
+      echo "[sbatch] missing iteration runner: ${ITER_SCRIPT}" >&2
+      ls -ld "${PROJECT_ROOT}" "${PROJECT_ROOT}/src" "${PROJECT_ROOT}/src/utils" >&2 || true
+      exit 2
+    fi
     srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
          /usr/bin/time -f $'%E elapsed\n%U user CPU\n%S sys CPU\n%P CPU%%\n%M KB max RSS\n' \
          -o "${LOG_PREFIX}.time" \
@@ -119,6 +127,11 @@ case "${MODE}" in
            "${ITER_ARGS[@]}"
     ;;
   prob)
+    if [[ ! -r "${PROB_SCRIPT}" ]]; then
+      echo "[sbatch] missing probability runner: ${PROB_SCRIPT}" >&2
+      ls -ld "${PROJECT_ROOT}" "${PROJECT_ROOT}/src" "${PROJECT_ROOT}/src/utils" >&2 || true
+      exit 2
+    fi
     srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
          /usr/bin/time -f $'%E elapsed\n%U user CPU\n%S sys CPU\n%P CPU%%\n%M KB max RSS\n' \
          -o "${LOG_PREFIX}.time" \

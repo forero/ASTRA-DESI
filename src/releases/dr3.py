@@ -14,7 +14,7 @@ from .dr2 import (DR2_RA_MAX, DR2_RA_MIN, DR2_ZONE_VALUES,
                   build_raw_dr2_zone)
 
 
-TRACERS = ['QSO', 'ELG_LOPnotqso', 'LRG', 'BGS_BRIGHT']
+TRACERS = ['QSO', 'ELG_LOPnotqso', 'LRG', 'BGS_BRIGHT', 'BGS_BRIGHT-21.35']
 N_RANDOM_FILES = 18
 REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
 RANDOM_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
@@ -25,13 +25,46 @@ TRACER_ALIAS = {'qso': 'QSO',
                 'elg_lopnotqso': 'ELG_LOPnotqso',
                 'lrg': 'LRG',
                 'bgs': 'BGS_BRIGHT',
-                'bgs_bright': 'BGS_BRIGHT'}
+                'bgs_bright': 'BGS_BRIGHT',
+                'bgs -21.35': 'BGS_BRIGHT-21.35',
+                'bgs-21.35': 'BGS_BRIGHT-21.35',
+                'bgs_-21.35': 'BGS_BRIGHT-21.35',
+                'bgs_21.35': 'BGS_BRIGHT-21.35',
+                'bgs_m21.35': 'BGS_BRIGHT-21.35',
+                'bgs_bright -21.35': 'BGS_BRIGHT-21.35',
+                'bgs_bright-21.35': 'BGS_BRIGHT-21.35',
+                'bgs_bright_-21.35': 'BGS_BRIGHT-21.35',
+                'bgs_bright_21.35': 'BGS_BRIGHT-21.35',
+                'bgs_bright_m21.35': 'BGS_BRIGHT-21.35'}
 DEFAULT_ZONES = ['NGC', 'SGC']
 TRACER_IDS = {name: idx for idx, name in enumerate(TRACERS)}
 TRACER_FULL_LABELS = {}
 for tracer_name, tracer_idx in TRACER_IDS.items():
     TRACER_FULL_LABELS[(tracer_idx, True)] = f'{tracer_name}'.encode('ascii')
     TRACER_FULL_LABELS[(tracer_idx, False)] = f'{tracer_name}'.encode('ascii')
+
+
+def normalize_tracer(label):
+    """
+    Return the canonical DR3 tracer label for user-facing aliases.
+    """
+    text = str(label).strip()
+    if text in TRACERS:
+        return text
+    upper = text.upper()
+    if upper in TRACERS:
+        return upper
+
+    key = text.lower().replace(' ', '_')
+    if key in TRACER_ALIAS:
+        return TRACER_ALIAS[key]
+
+    compact = key.replace('_', '')
+    if compact in {'bgs-21.35', 'bgsbright-21.35', 'bgsm21.35',
+                   'bgsbrightm21.35'}:
+        return 'BGS_BRIGHT-21.35'
+
+    raise ValueError(f'Unknown DR3 tracer {label!r}; available: {", ".join(TRACERS)}')
 
 
 def preload_dr3_tables(base_dir, tracers, n_random_files=N_RANDOM_FILES, zones_to_keep=None):

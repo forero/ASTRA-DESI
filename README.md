@@ -128,15 +128,20 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
   zones. The script also enforces
   `PAIR_NJOBS_CAP`, capping multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
 - `jobs/run_dr3.sbatch` processes one DR3 tracer/zone in per-iteration shards,
-  parallelising shards across the allocated node. Edit `TRACER_LABEL` and
-  `ZONE_LABEL` inside the sbatch before submitting. `PAIR_NJOBS_CAP` or
-  `DR3_ITER_NJOBS_CAP` controls the shard-worker cap, and `ITER_WORKERS`
-  overrides it for a single submission. Submit once with the default `MODE=iter`,
-  then set `MODE=prob` inside the sbatch and submit again after the iteration job
-  finishes to build the aggregate probability file.
+  parallelising shards across the allocated node. Set `TRACER` and `ZONE` at
+  submission time; accepted tracer aliases include `LRG`, `ELG`, `QSO`, `BGS`,
+  and `BGS_BRIGHT-21.35`. `PAIR_NJOBS_CAP` or `DR3_ITER_NJOBS_CAP` controls the
+  shard-worker cap, and `ITER_WORKERS` overrides it for a single submission.
+  Submit once with the default `MODE=iter`, then submit again with `MODE=prob`
+  after the iteration job finishes to build the aggregate probability file.
 
   ```bash
-  sbatch jobs/run_dr3.sbatch
+  sbatch -J lrg_ngc --export=ALL,TRACER=LRG,ZONE=NGC jobs/run_dr3.sbatch
+  sbatch -J lrg_sgc --export=ALL,TRACER=LRG,ZONE=SGC jobs/run_dr3.sbatch
+  sbatch -J elg_ngc --export=ALL,TRACER=ELG,ZONE=NGC jobs/run_dr3.sbatch
+  sbatch -J bgs_m2135_ngc --export=ALL,TRACER=BGS_BRIGHT-21.35,ZONE=NGC jobs/run_dr3.sbatch
+
+  sbatch -J lrg_ngc_prob --export=ALL,MODE=prob,TRACER=LRG,ZONE=NGC jobs/run_dr3.sbatch
   ```
 
 
