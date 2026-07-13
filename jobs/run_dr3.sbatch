@@ -5,7 +5,7 @@
 #SBATCH -C cpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=00:30:00
+#SBATCH --time=03:00:00
 #SBATCH --mem=0
 #SBATCH --hint=nomultithread
 #SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr3_%j.out
@@ -41,7 +41,9 @@ export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 ITER_SCRIPT="${PROJECT_ROOT}/src/utils/run_dr3_iterations.py"
 PROB_SCRIPT="${PROJECT_ROOT}/src/utils/build_dr3_probabilities.py"
 
-CLUSTER_DIR="/global/cfs/cdirs/desi/survey/catalogs/DA3/LSS/matterhorn-v2/LSScats/test/nonKP/"
+DEFAULT_CLUSTER_DIR="${CLUSTER_DIR:-/global/cfs/cdirs/desi/survey/catalogs/DA3/LSS/matterhorn-v2/LSScats/test/nonKP/}"
+BGS_BRIGHT_M2135_CLUSTER_DIR="${BGS_BRIGHT_M2135_CLUSTER_DIR:-/global/cfs/cdirs/desi/survey/catalogs/DA3/analysis/matterhorn-v2/LSScats/test/nonKP/}"
+CLUSTER_DIR="${DEFAULT_CLUSTER_DIR}"
 SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr3"
 
 RAW_OUT="${SCRATCH_ROOT}/raw"
@@ -65,6 +67,10 @@ case "${TRACER_KEY}" in
     exit 1
     ;;
 esac
+
+if [[ "${TRACER_LABEL}" == "BGS_BRIGHT-21.35" ]]; then
+  CLUSTER_DIR="${BGS_BRIGHT_M2135_CLUSTER_DIR}"
+fi
 
 ZONE_LABEL=${ZONE_LABEL^^}
 case "${ZONE_LABEL}" in
@@ -100,6 +106,7 @@ if [[ ! -s "${REAL_CATALOG}" ]]; then
 fi
 
 echo "[sbatch] mode=${MODE} tracer=${TRACER_LABEL} zone=${ZONE_LABEL}"
+echo "[sbatch] cluster_dir=${CLUSTER_DIR}"
 echo "[sbatch] cpus=${SLURM_CPUS_PER_TASK} pair_njobs_cap=${PAIR_NJOBS_CAP} dr3_iter_njobs_cap=${DR3_ITER_NJOBS_CAP}"
 
 case "${MODE}" in
