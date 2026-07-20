@@ -41,8 +41,8 @@ DEFAULT_WINDOW_SIZE = (2160, 2160)
 SUPPORTED_MODES = ('points', 'volume', 'graph')
 TRACER_NAME = 'BGS'
 WEBTYPE_LABELS = ('void', 'sheet', 'filament', 'knot')
-WEBTYPE_COLORS = {'void': 'deepskyblue',
-                  'sheet': 'darkorange',
+WEBTYPE_COLORS = {'void': 'cyan',
+                  'sheet': 'orange',
                   'filament': 'green',
                   'knot': 'magenta'}
 TRACER_CHOICES = ('BGS', 'LRG', 'ELG', 'QSO')
@@ -184,8 +184,9 @@ def _resolve_probability_path(base_dir, zone, tracer):
             return tracer_matches[0]
         return matches[0]
 
+    checked = ', '.join(attempted)
     raise FileNotFoundError('No probability file found for '
-                            f'zone={zone_tag}, tracer={tracer_tag}. Checked: {', '.join(attempted)}')
+                            f'zone={zone_tag}, tracer={tracer_tag}. Checked: {checked}')
 
 
 def _build_cache_path(cache_dir, zone, tracer, webtype, with_groups, with_webtypes, source_paths):
@@ -750,8 +751,9 @@ def _record_movie(plotter, output, frames, framerate, azimuth, elevation, qualit
         if not HAS_FFMPEG:
             missing.append('imageio-ffmpeg')
         if missing:
+            missing_text = ', '.join(missing)
             raise RuntimeError('Missing dependencies to write movie files. '
-                                f'{', '.join(missing)} ')
+                                f'{missing_text} ')
 
     quality = int(np.clip(int(quality), 0, 10))
     try:
@@ -1156,7 +1158,7 @@ def main() -> None:
             info['graph']['length_limit_used'] = float(graph_limit_used)
     info['timings_seconds'] = {key: float(val) for key, val in timings.items()}
     info['timings_seconds']['total'] = float(time.perf_counter() - t_total)
-    print(f'[timing] total: {info['timings_seconds']['total']:.2f} s')
+    print(f"[timing] total: {info['timings_seconds']['total']:.2f} s")
     print(json.dumps(info, indent=2))
 
 

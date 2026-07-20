@@ -14,10 +14,10 @@ _COLOR_THEMES: Dict[str, Dict[str, object]] = {
               'center_color': '#2b7bb9',
               'figure_facecolor': '#ffffff',
               'axes_facecolor': '#ffffff',
-              'class_colors': {'void': 'red',
+              'class_colors': {'void': 'cyan',
                                'sheet': 'orange',
-                               'filament':'green',
-                               'knot': 'blue'},
+                               'filament': 'limegreen',
+                               'knot': 'magenta'},
               'class_fallback': '#808080',},
 
     'dark': {'text': '#f2f2f2',
@@ -30,10 +30,10 @@ _COLOR_THEMES: Dict[str, Dict[str, object]] = {
              'center_color': '#6ea8ff',
              'figure_facecolor': 'black',
              'axes_facecolor': 'black',
-             'class_colors': {'void': 'crimson',
-                              'sheet': 'midnightblue',
-                              'filament': 'royalblue',
-                              'knot': 'orange'},
+             'class_colors': {'void': 'cyan',
+                              'sheet': 'orange',
+                              'filament': 'limegreen',
+                              'knot': 'magenta'},
              'class_fallback': '#b0b0b0',},}
 
 
