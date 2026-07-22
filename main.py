@@ -52,7 +52,6 @@ def parse_args():
 
     parser.add_argument('--r-threshold', type=float, default=-0.25)
     parser.add_argument('--seed-threshold', type=float, default=-0.85)
-    parser.add_argument('--merge-threshold', type=float, default=-0.80)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
     parser.add_argument('--edge-radial-buffer', type=float, default=20.0)
@@ -60,6 +59,10 @@ def parse_args():
     parser.add_argument('--edge-cartesian-buffer', type=float, default=None)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)
     parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
+    parser.add_argument('--healpix-edge-min-data-ngc', type=int, default=3)
+    parser.add_argument('--healpix-edge-min-data-sgc', type=int, default=4)
+    parser.add_argument('--disable-healpix-edge-data-cut', action='store_true',
+                        default=False)
 
     parser.add_argument('--include-membership', dest='include_membership', action='store_true', default=True)
     parser.add_argument('--no-membership', dest='include_membership',
@@ -136,6 +139,20 @@ def _configure_release_args(args):
         args.mask_dir = None
 
 
+def _healpix_edge_min_data_for_case(args, tracer, cap):
+    if args.disable_healpix_edge_data_cut:
+        return None
+    if args.release != 'dr2' or str(tracer).upper() != 'LRG':
+        return None
+
+    cap_upper = str(cap).upper()
+    if cap_upper == 'NGC':
+        return args.healpix_edge_min_data_ngc
+    if cap_upper == 'SGC':
+        return args.healpix_edge_min_data_sgc
+    return None
+
+
 def run_pipeline(args):
     verbose = not args.quiet
 
@@ -202,6 +219,7 @@ def run_pipeline(args):
 
                 data_tbl = all_data[key]
                 rand_tbl = all_data[rand_key]
+                healpix_edge_min_data = _healpix_edge_min_data_for_case(args, tracer, cap)
 
                 t_step = time.time()
                 stats = compute_neighbor_statistics(data_tbl, rand_tbl)
@@ -220,8 +238,7 @@ def run_pipeline(args):
                                    r_threshold=args.r_threshold,
                                    min_group_size=args.min_group_size,
                                    mode=args.mode,
-                                   seed_threshold=args.seed_threshold,
-                                   merge_threshold=args.merge_threshold)
+                                   seed_threshold=args.seed_threshold)
                 assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'], group_col='GROUPID')
                 _log(log_fh, f'Case={key} Step=watershed done elapsed_s={time.time() - t_step:.3f} '
                              f'groups={ws["n_groups"]} assigned={ws["n_assigned"]} '
@@ -239,7 +256,8 @@ def run_pipeline(args):
                                                      edge_angular_buffer_deg=args.edge_angular_buffer,
                                                      edge_cartesian_buffer=args.edge_cartesian_buffer,
                                                      healpix_edge_nside=args.healpix_edge_nside,
-                                                     healpix_edge_min_randoms=args.healpix_edge_min_randoms)
+                                                     healpix_edge_min_randoms=args.healpix_edge_min_randoms,
+                                                     healpix_edge_min_data_per_pix=healpix_edge_min_data)
                 if 'FOOTPRINT_EDGE' in group_table.colnames:
                     n_edge = int(sum(group_table['FOOTPRINT_EDGE']))
                     edge_msg = f' footprint_edge={n_edge} footprint_clean={len(group_table) - n_edge}'
@@ -271,7 +289,6 @@ def run_pipeline(args):
                                        mode=args.mode,
                                        point_table=point_table,
                                        seed_threshold=args.seed_threshold,
-                                       merge_threshold=args.merge_threshold,
                                        boundary_id=ws['boundary_id'],
                                        watershed_stats=ws,
                                        overwrite=args.overwrite)

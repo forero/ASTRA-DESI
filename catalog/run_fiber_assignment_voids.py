@@ -96,11 +96,14 @@ def parse_args():
     parser.add_argument('--random-factor', type=float, default=1.0)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
     parser.add_argument('--seed-threshold', type=float, default=-0.85)
-    parser.add_argument('--merge-threshold', type=float, default=-0.80)
     parser.add_argument('--min-group-size', type=int, default=4)
     parser.add_argument('--min-rand-for-shape', type=int, default=3)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)
     parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
+    parser.add_argument('--healpix-edge-min-data-ngc', type=int, default=3)
+    parser.add_argument('--healpix-edge-min-data-sgc', type=int, default=4)
+    parser.add_argument('--disable-healpix-edge-data-cut', action='store_true',
+                        default=False)
     parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
     parser.add_argument('--include-membership', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
@@ -121,6 +124,20 @@ def output_path(output_dir, tracer, mock_kind, region):
     if region == 'ALL':
         return os.path.join(output_dir, f'voids_{tracer}_{mock_kind}.fits')
     return os.path.join(output_dir, f'voids_{tracer}_{mock_kind}_{region}.fits')
+
+
+def healpix_edge_min_data_for_region(args, tracer, region):
+    if getattr(args, 'disable_healpix_edge_data_cut', False):
+        return None
+    if str(tracer).upper() != 'LRG':
+        return None
+
+    region_upper = str(region).upper()
+    if region_upper == 'NGC':
+        return getattr(args, 'healpix_edge_min_data_ngc', 3)
+    if region_upper == 'SGC':
+        return getattr(args, 'healpix_edge_min_data_sgc', 4)
+    return None
 
 
 def columns_to_read(path, extra=()):
@@ -229,8 +246,6 @@ def write_mock_void_fits(group_table, output, tracer, mock_kind, region,
     hdr['RTHRESH'] = (float(args.r_threshold), 'Watershed R threshold')
     if args.seed_threshold is not None:
         hdr['SEEDTHR'] = (float(args.seed_threshold), 'Watershed seed threshold')
-    if getattr(args, 'merge_threshold', None) is not None:
-        hdr['MERGETHR'] = (float(args.merge_threshold), 'Watershed saddle merge threshold')
     hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
     hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
     hdr['WMODE'] = (args.mode, 'Watershed mode')
@@ -251,7 +266,7 @@ def write_mock_void_fits(group_table, output, tracer, mock_kind, region,
     hdr['J1J3'] = (J1J3_DEFINITION, 'Moment ratio')
     hdr['GEOMDEF'] = ('1-C/A>0.9', 'GEOM_BAD definition')
     hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
-    hdr['FPEDDEF'] = ('survey footprint/mask boundary', 'FOOTPRINT_EDGE definition')
+    hdr['FPEDDEF'] = ('HEALPix low-data mask', 'FOOTPRINT_EDGE definition')
     hdr['FPCUT'] = (True, 'Drop FOOTPRINT_EDGE rows')
     hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
     hdr['NFPEDGE'] = (n_footprint_edge, 'Footprint-edge rows dropped')
@@ -283,6 +298,10 @@ def write_mock_void_fits(group_table, output, tracer, mock_kind, region,
         hdr['HPXNEDG'] = (int(group_table.meta['HPX_NEDGE']), 'Angular edge HEALPix pixels')
     if 'HPX_NBUF' in group_table.meta:
         hdr['HPXNBUF'] = (int(group_table.meta['HPX_NBUF']), 'Buffered angular edge HEALPix pixels')
+    if 'HPX_MINDATA' in group_table.meta:
+        hdr['HPXMIND'] = (int(group_table.meta['HPX_MINDATA']), 'N_data/Npix threshold')
+    if 'HPX_NLOWDATA' in group_table.meta:
+        hdr['HPXNLOW'] = (int(group_table.meta['HPX_NLOWDATA']), 'Pixels failing N_data/Npix cut')
     hdr['IN_DATA'] = (os.path.basename(data_path), 'Input mock file')
     hdr['IN_RAND'] = (os.path.basename(randoms_path), 'Input random file')
     if args.z_min is not None:
@@ -343,8 +362,7 @@ def run_region(data_table, random_table, tracer, mock_kind, region,
                        r_threshold=args.r_threshold,
                        min_group_size=args.min_group_size,
                        mode=args.mode,
-                       seed_threshold=args.seed_threshold,
-                       merge_threshold=getattr(args, 'merge_threshold', None))
+                       seed_threshold=args.seed_threshold)
     assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
                                group_col='GROUPID')
     log_message(log_fh, f"case={tracer}/{mock_kind}/{region} watershed "
@@ -362,7 +380,9 @@ def run_region(data_table, random_table, tracer, mock_kind, region,
                                          group_col='GROUPID',
                                          min_rand_for_shape=args.min_rand_for_shape,
                                          healpix_edge_nside=getattr(args, 'healpix_edge_nside', 256),
-                                         healpix_edge_min_randoms=getattr(args, 'healpix_edge_min_randoms', 3))
+                                         healpix_edge_min_randoms=getattr(args, 'healpix_edge_min_randoms', 3),
+                                         healpix_edge_min_data_per_pix=healpix_edge_min_data_for_region(
+                                             args, tracer, region))
     log_message(log_fh, f'case={tracer}/{mock_kind}/{region} consolidate '
                         f'elapsed_s={time.time() - step:.3f} '
                         f'n_voids={len(group_table)}',

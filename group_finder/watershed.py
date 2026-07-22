@@ -8,8 +8,7 @@ BOUNDARY_ID = -2
 
 
 def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
-                       seed_threshold=None, boundary_id=BOUNDARY_ID,
-                       merge_threshold=None):
+                       seed_threshold=None, boundary_id=BOUNDARY_ID):
     '''
     Perform watershed grouping based on the provided neighbors and r_values.
 
@@ -23,16 +22,11 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
         - seed_threshold: Optional threshold for nodes that are allowed to create new groups.
                           If None, r_threshold is used, matching the original single-threshold
                           behavior.
-        - boundary_id: Negative group ID assigned to watershed boundary/saddle nodes.
-        - merge_threshold: Optional saddle-density threshold. If a selected node touches
-                           multiple groups, those groups are merged instead of marking
-                           the node as a boundary when the node satisfies this threshold
-                           (R <= merge_threshold for underdense mode, R >= merge_threshold
-                           for overdense mode). If None, multi-group saddle nodes keep the
-                           historical boundary behavior.
+        - boundary_id: Reserved negative group ID retained for output compatibility.
+                       Multi-group nodes are always merged, so this value is not
+                       assigned by the grouping algorithm.
     Returns:
-        - group_of: Array of group IDs for each node, where -1 indicates unassigned nodes
-                    and boundary_id indicates watershed boundaries.
+        - group_of: Array of group IDs for each node, where -1 indicates unassigned nodes.
     Raises:
         - ValueError: If mode is not 'underdense' or 'overdense', or if the length of r_values
                       does not match the number of nodes.
@@ -52,9 +46,6 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
     if seed_threshold is None:
         seed_threshold = grow_threshold
     seed_threshold = float(seed_threshold)
-    if merge_threshold is not None:
-        merge_threshold = float(merge_threshold)
-
     if mode == 'underdense':
         if seed_threshold > grow_threshold:
             raise ValueError('For underdense mode, seed_threshold must be <= r_threshold')
@@ -76,7 +67,6 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
     selected_mask = np.zeros(n_total, dtype=bool)
     selected_mask[selected] = True
 
-    current_max = -1
     group_parent = []
 
     def new_group_id():
@@ -99,13 +89,6 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
             group_parent[gid] = root
         return root
 
-    def should_merge_saddle(node_idx):
-        if merge_threshold is None:
-            return False
-        if mode == 'underdense':
-            return r_values[node_idx] <= merge_threshold
-        return r_values[node_idx] >= merge_threshold
-
     def finalize_group_ids():
         assigned = group_of >= 0
         if np.any(assigned):
@@ -117,26 +100,19 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
     for node in order:
         node_idx = int(node)
         neighbor_groups = set()
-        merge_this_node = should_merge_saddle(node_idx)
         for nbr in neighbors[node_idx]:
             gid = group_of[nbr]
             if gid >= 0:
                 neighbor_groups.add(find_group(gid))
-                if len(neighbor_groups) > 1 and not merge_this_node:
-                    break
 
         if len(neighbor_groups) == 0:
             if not can_seed[node_idx]:
                 continue
-            current_max = new_group_id()
-            group_of[node_idx] = current_max
+            group_of[node_idx] = new_group_id()
         elif len(neighbor_groups) == 1:
             group_of[node_idx] = next(iter(neighbor_groups))
         else:
-            if merge_this_node:
-                group_of[node_idx] = merge_groups(neighbor_groups)
-            else:
-                group_of[node_idx] = boundary_id
+            group_of[node_idx] = merge_groups(neighbor_groups)
 
     pending = np.flatnonzero(selected_mask & (group_of == UNASSIGNED_ID))
     if len(pending) == 0:
@@ -154,23 +130,17 @@ def watershed_grouping(neighbors, r_values, r_threshold, mode='underdense',
             continue
 
         neighbor_groups = set()
-        merge_this_node = should_merge_saddle(node_idx)
         for nbr in neighbors[node_idx]:
             gid = group_of[nbr]
             if gid >= 0:
                 neighbor_groups.add(find_group(gid))
-                if len(neighbor_groups) > 1 and not merge_this_node:
-                    break
 
         if len(neighbor_groups) == 0:
             continue
         if len(neighbor_groups) == 1:
             group_of[node_idx] = next(iter(neighbor_groups))
         else:
-            if merge_this_node:
-                group_of[node_idx] = merge_groups(neighbor_groups)
-            else:
-                group_of[node_idx] = boundary_id
+            group_of[node_idx] = merge_groups(neighbor_groups)
 
         for nbr in neighbors[node_idx]:
             nbr_idx = int(nbr)
@@ -232,7 +202,7 @@ def filter_groups_by_size(group_of, min_group_size=4):
 
 def run_watershed(neighbors, r_values, r_threshold=-0.25, min_group_size=4,
                   mode='underdense', seed_threshold=-0.85,
-                  boundary_id=BOUNDARY_ID, merge_threshold=-0.80):
+                  boundary_id=BOUNDARY_ID):
     '''
     Run the watershed grouping algorithm and filter groups by size.
 
@@ -243,18 +213,17 @@ def run_watershed(neighbors, r_values, r_threshold=-0.25, min_group_size=4,
         - min_group_size: Minimum size of groups to keep.
         - mode: Mode for grouping ('underdense' or 'overdense').
         - seed_threshold: Optional threshold for nodes that can create new groups.
-        - boundary_id: Negative group ID used for watershed boundaries.
-        - merge_threshold: Optional saddle-density threshold used to merge
-                           neighboring basins instead of marking saddle nodes as
-                           boundaries.
+        - boundary_id: Reserved negative group ID retained in output statistics for
+                       compatibility. The grouping algorithm does not assign it.
+        Multi-group rule: whenever a selected node touches more than one group,
+        all neighboring groups are merged and the node joins the merged group.
     Returns:
         - Dict containing the filtered group assignments and summary statistics.
     '''
     raw_groups = watershed_grouping(neighbors=neighbors, r_values=r_values,
                                     r_threshold=r_threshold, mode=mode,
                                     seed_threshold=seed_threshold,
-                                    boundary_id=boundary_id,
-                                    merge_threshold=merge_threshold)
+                                    boundary_id=boundary_id)
     filtered_groups, group_sizes = filter_groups_by_size(raw_groups, min_group_size=min_group_size)
 
     n_assigned = int(np.count_nonzero(filtered_groups >= 0))
@@ -267,8 +236,7 @@ def run_watershed(neighbors, r_values, r_threshold=-0.25, min_group_size=4,
             'n_boundary_nodes': n_boundary,
             'n_unassigned': n_unassigned,
             'boundary_id': int(boundary_id),
-            'seed_threshold': seed_threshold,
-            'merge_threshold': merge_threshold}
+            'seed_threshold': seed_threshold}
 
 
 def assign_group_ids_to_tables(data_table, rand_table, group_of, group_col='GROUPID'):

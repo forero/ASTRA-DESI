@@ -25,7 +25,7 @@ GROUP_COLUMNS = ('VOID_ID', 'N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
                  'EDGE', 'FOOTPRINT_EDGE',
                  'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
                  'TOUCHES_RA_EDGE', 'TOUCHES_DEC_EDGE',
-                 'TOUCHES_HEALPIX_EDGE', 'CENTER_NEAR_HEALPIX_EDGE',
+                 'TOUCHES_HEALPIX_EDGE',
                  'TOUCHES_CART_EDGE', 'CENTER_NEAR_CART_EDGE')
 
 GROUP_DTYPES = (np.int32, np.int32, np.int32,
@@ -45,8 +45,7 @@ GROUP_DTYPES = (np.int32, np.int32, np.int32,
                 np.bool_,
                 np.bool_, np.bool_, np.bool_,
                 np.bool_, np.bool_,
-                np.bool_, np.bool_,
-                np.bool_, np.bool_)
+                np.bool_, np.bool_, np.bool_)
 
 ELLIPTICITY_DEFINITION = '1-((C^2+B^2)/(B^2+A^2))**0.25'
 J1J3_DEFINITION = 'J_1/J_3=(C^2+B^2)/(B^2+A^2)'
@@ -378,66 +377,38 @@ def _healpix_pixels(hp, nside, ra_deg, dec_deg, nest=False):
     return pix, valid
 
 
-def _build_healpix_edge_mask(rand_table, nside=256, min_randoms_per_pix=3,
-                             edge_buffer_deg=1.0, nest=False):
+def _build_healpix_data_cut_mask(data_table, hp, nside,
+                                 min_data_per_pix=None, observed_mask=None,
+                                 nest=False):
     '''
-    Build a buffered angular-edge HEALPix mask from random catalogue positions.
+    Build a HEALPix mask for pixels that fail N_data/Npix > threshold.
     '''
-    try:
-        import healpy as hp
-    except ImportError as exc:
-        raise ImportError('HEALPix footprint-edge masking requires healpy. '
-                          'Load an environment with healpy installed before '
-                          'running catalogue generation.') from exc
+    if min_data_per_pix is None:
+        return None
 
-    if nside is None or int(nside) <= 0:
-        raise ValueError('HEALPix edge masking is required; healpix_edge_nside must be a positive integer.')
-    if 'RA' not in rand_table.colnames or 'DEC' not in rand_table.colnames:
-        raise KeyError('HEALPix edge masking requires RA and DEC columns in the random catalogue.')
+    min_data_per_pix = int(min_data_per_pix)
+    if min_data_per_pix <= 0:
+        return None
+
+    if 'RA' not in data_table.colnames or 'DEC' not in data_table.colnames:
+        raise KeyError('HEALPix data-density edge cut requires RA and DEC columns in the data catalogue.')
 
     nside = int(nside)
-    min_randoms_per_pix = max(int(min_randoms_per_pix), 1)
     npix = hp.nside2npix(nside)
-    pix, valid = _healpix_pixels(hp, nside, rand_table['RA'], rand_table['DEC'],
+    pix, valid = _healpix_pixels(hp, nside, data_table['RA'], data_table['DEC'],
                                  nest=nest)
     if not np.any(valid):
-        raise RuntimeError('HEALPix edge masking failed: no finite random RA/DEC values.')
+        raise RuntimeError('HEALPix data-density edge cut failed: no finite data RA/DEC values.')
 
     counts = np.bincount(pix[valid], minlength=npix)
-    mask = counts >= min_randoms_per_pix
-    observed = np.flatnonzero(mask)
-    if observed.size == 0:
-        raise RuntimeError('HEALPix edge masking failed: no observed pixels passed '
-                           f'min_randoms_per_pix={min_randoms_per_pix}. Lower '
-                           '--healpix-edge-min-randoms or use a lower --healpix-edge-nside.')
+    low_data_pix = counts <= min_data_per_pix
+    if observed_mask is not None:
+        low_data_pix &= np.asarray(observed_mask, dtype=bool)
 
-    neighbors = hp.get_all_neighbours(nside, observed, nest=nest)
-    valid_neighbors = neighbors >= 0
-    safe_neighbors = np.where(valid_neighbors, neighbors, observed[None, :])
-    edge_flags = np.any(valid_neighbors & ~mask[safe_neighbors], axis=0)
-    edge_pix = np.zeros(npix, dtype=bool)
-    edge_pix[observed] = edge_flags
-
-    edge_buffered = edge_pix.copy()
-    buffer_deg = 0.0 if edge_buffer_deg is None else max(float(edge_buffer_deg), 0.0)
-    if buffer_deg > 0.0 and np.any(edge_pix):
-        radius = np.radians(buffer_deg)
-        for pix_id in np.flatnonzero(edge_pix):
-            vec = hp.pix2vec(nside, int(pix_id), nest=nest)
-            nearby = hp.query_disc(nside, vec, radius, nest=nest)
-            edge_buffered[nearby] = True
-
-    return {'hp': hp,
-            'nside': nside,
-            'nest': bool(nest),
-            'min_randoms_per_pix': min_randoms_per_pix,
-            'edge_buffer_deg': buffer_deg,
-            'mask': mask,
-            'edge_pix': edge_pix,
-            'edge_buffered': edge_buffered,
-            'n_observed_pix': int(np.count_nonzero(mask)),
-            'n_edge_pix': int(np.count_nonzero(edge_pix)),
-            'n_buffered_edge_pix': int(np.count_nonzero(edge_buffered))}
+    return {'min_data_per_pix': min_data_per_pix,
+            'counts': counts,
+            'low_data_pix': low_data_pix,
+            'n_low_data_pix': int(np.count_nonzero(low_data_pix))}
 
 
 def consolidate_group_info(data_table, rand_table, cosmo, h,
@@ -447,6 +418,7 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                            edge_cartesian_buffer=None,
                            healpix_edge_nside=256,
                            healpix_edge_min_randoms=3,
+                           healpix_edge_min_data_per_pix=None,
                            healpix_edge_nest=False):
     '''
     Consolidate group information from data and random tables to create a group table with properties.
@@ -467,10 +439,15 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                                    flags are disabled.
         - edge_cartesian_buffer: Cartesian X/Y/Z buffer in Mpc/h for edge
                                  flags. If None, uses edge_radial_buffer.
-        - healpix_edge_nside: Required HEALPix NSIDE for angular footprint
-                              edge flags. Must be positive.
-        - healpix_edge_min_randoms: Minimum randoms per pixel for the angular
-                                    footprint mask.
+        - healpix_edge_nside: Required HEALPix NSIDE for angular low-data
+                              flags. Must be positive.
+        - healpix_edge_min_randoms: Deprecated compatibility option; the
+                                    FOOTPRINT_EDGE flag now uses only the
+                                    N_data/Npix threshold.
+        - healpix_edge_min_data_per_pix: Optional minimum data objects per
+                                         HEALPix pixel. Groups touching
+                                         pixels that fail N_data/Npix > threshold
+                                         are marked FOOTPRINT_EDGE.
         - healpix_edge_nest: Use NESTED HEALPix ordering if True.
     Returns:
         - An Astropy Table containing consolidated group information, including VOID_ID, N_DATA_IN_GROUP,
@@ -479,7 +456,7 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
           SEMI_AXIS_C, EDGE, FOOTPRINT_EDGE, and GEOM_BAD for each group.
           EDGE is the standard watershed edge flag and is False for consolidated
           GROUPID >= 0 void rows; FOOTPRINT_EDGE marks objects touching the
-          survey footprint/mask boundary. The shape
+          HEALPix low-data angular mask. The shape
           eigenvalues are the eigenvalues of the central second-moment tensor
           <(x-x_cm)_i (x-x_cm)_j>. semi-axis_j = sqrt(5 * LAMBDA_j),
           and R_EFF is the radius of the sphere with the same volume as the
@@ -701,38 +678,42 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                            ((dec_min_group <= bounds['dec_min'] + angular_buffer) |
                             (dec_max_group >= bounds['dec_max'] - angular_buffer)))
 
-    healpix_edge = _build_healpix_edge_mask(
-        rand_table=rand_table,
-        nside=healpix_edge_nside,
-        min_randoms_per_pix=healpix_edge_min_randoms,
-        edge_buffer_deg=edge_angular_buffer_deg,
-        nest=healpix_edge_nest)
-    if healpix_edge is None:
-        raise RuntimeError('HEALPix edge masking is required but mask construction returned None.')
     touches_healpix = np.zeros(n_group, dtype=bool)
-    center_near_healpix = np.zeros(n_group, dtype=bool)
-    hp = healpix_edge['hp']
-    nside = healpix_edge['nside']
-    nest = healpix_edge['nest']
-    edge_buffered = healpix_edge['edge_buffered']
+    nside = int(healpix_edge_nside)
+    nest = bool(healpix_edge_nest)
+    data_cut = None
+    if healpix_edge_min_data_per_pix is not None and int(healpix_edge_min_data_per_pix) > 0:
+        try:
+            import healpy as hp
+        except ImportError as exc:
+            raise ImportError('HEALPix low-data masking requires healpy. '
+                              'Load an environment with healpy installed before '
+                              'running catalogue generation.') from exc
 
-    member_pix, member_pix_valid = _healpix_pixels(
-        hp, nside,
-        np.asarray(rand_table['RA'], dtype=np.float64)[rand_idx_sorted],
-        np.asarray(rand_table['DEC'], dtype=np.float64)[rand_idx_sorted],
-        nest=nest)
-    member_on_edge = np.zeros(member_pix.shape, dtype=bool)
-    member_on_edge[member_pix_valid] = edge_buffered[member_pix[member_pix_valid]]
-    touches_healpix = np.maximum.reduceat(member_on_edge, rand_start)
+        if nside <= 0:
+            raise ValueError('HEALPix low-data masking requires healpix_edge_nside to be a positive integer.')
+        if 'RA' not in rand_table.colnames or 'DEC' not in rand_table.colnames:
+            raise KeyError('HEALPix low-data masking requires RA and DEC columns in the random catalogue.')
 
-    center_pix, center_pix_valid = _healpix_pixels(hp, nside, ra_cm, dec_cm,
-                                                   nest=nest)
-    center_near_healpix[center_pix_valid] = edge_buffered[center_pix[center_pix_valid]]
+        data_cut = _build_healpix_data_cut_mask(
+            data_table=data_table,
+            hp=hp,
+            nside=nside,
+            min_data_per_pix=healpix_edge_min_data_per_pix,
+            observed_mask=None,
+            nest=nest)
 
-    footprint_edge = (touches_radial | center_near_radial |
-                      touches_healpix | center_near_healpix |
-                      touches_ra | touches_dec |
-                      touches_cart | center_near_cart)
+        member_pix, member_pix_valid = _healpix_pixels(
+            hp, nside,
+            np.asarray(rand_table['RA'], dtype=np.float64)[rand_idx_sorted],
+            np.asarray(rand_table['DEC'], dtype=np.float64)[rand_idx_sorted],
+            nest=nest)
+        member_on_edge = np.zeros(member_pix.shape, dtype=bool)
+        low_data_pix = data_cut['low_data_pix']
+        member_on_edge[member_pix_valid] = low_data_pix[member_pix[member_pix_valid]]
+        touches_healpix = np.maximum.reduceat(member_on_edge, rand_start)
+
+    footprint_edge = touches_healpix
 
     z_vals = comoving_distance_to_redshift(r_cm / h, cosmo=cosmo)
 
@@ -774,7 +755,6 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                               touches_ra.astype(np.bool_),
                               touches_dec.astype(np.bool_),
                               touches_healpix.astype(np.bool_),
-                              center_near_healpix.astype(np.bool_),
                               touches_cart.astype(np.bool_),
                               center_near_cart.astype(np.bool_)], names=list(GROUP_COLUMNS))
     group_table.meta['EDGE_RBUF'] = float(edge_radial_buffer) if edge_radial_buffer is not None else 0.0
@@ -782,14 +762,12 @@ def consolidate_group_info(data_table, rand_table, cosmo, h,
                                      if edge_angular_buffer_deg is not None else np.nan)
     group_table.meta['EDGE_CBUF'] = float(cart_buffer) if cart_buffer is not None else 0.0
     group_table.meta['EDGE_SRC'] = str(bounds['source'])
-    group_table.meta['HPX_EDGE'] = True
-    group_table.meta['HPX_NSIDE'] = int(healpix_edge['nside'])
-    group_table.meta['HPX_NEST'] = bool(healpix_edge['nest'])
-    group_table.meta['HPX_MINR'] = int(healpix_edge['min_randoms_per_pix'])
-    group_table.meta['HPX_EBUF'] = float(healpix_edge['edge_buffer_deg'])
-    group_table.meta['HPX_NOBS'] = int(healpix_edge['n_observed_pix'])
-    group_table.meta['HPX_NEDGE'] = int(healpix_edge['n_edge_pix'])
-    group_table.meta['HPX_NBUF'] = int(healpix_edge['n_buffered_edge_pix'])
+    group_table.meta['HPX_EDGE'] = bool(data_cut is not None)
+    group_table.meta['HPX_NSIDE'] = int(nside)
+    group_table.meta['HPX_NEST'] = bool(nest)
+    if data_cut is not None:
+        group_table.meta['HPX_MINDATA'] = int(data_cut['min_data_per_pix'])
+        group_table.meta['HPX_NLOWDATA'] = int(data_cut['n_low_data_pix'])
     group_table.meta['CHI_MIN'] = float(bounds['chi_min'])
     group_table.meta['CHI_MAX'] = float(bounds['chi_max'])
     group_table.meta['X_MIN'] = float(bounds['x_min'])
@@ -974,7 +952,7 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
                            h, omega_m, r_threshold, mode,
                            point_table=None, overwrite=False,
                            seed_threshold=None, boundary_id=BOUNDARY_ID,
-                           watershed_stats=None, merge_threshold=None):
+                           watershed_stats=None):
     '''
     Write the group table to a FITS file with appropriate metadata in the header.
 
@@ -996,8 +974,6 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
         - seed_threshold: Optional seed threshold used by the watershed.
         - boundary_id: GROUPID value used for watershed boundary points.
         - watershed_stats: Optional dict of watershed summary values for the header.
-        - merge_threshold: Optional saddle-density threshold used by the
-                           watershed to merge neighboring basins.
     Returns:
         - The file path of the written FITS file.
     '''
@@ -1049,10 +1025,8 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
     hdr['GIDM2'] = (int(boundary_id), 'GROUPID for watershed boundary point')
     if seed_threshold is not None:
         hdr['SEEDTHR'] = (float(seed_threshold), 'Watershed seed threshold')
-    if merge_threshold is not None:
-        hdr['MERGETHR'] = (float(merge_threshold), 'Watershed saddle merge threshold')
     hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
-    hdr['FPEDDEF'] = ('survey footprint/mask boundary', 'FOOTPRINT_EDGE definition')
+    hdr['FPEDDEF'] = ('HEALPix low-data mask', 'FOOTPRINT_EDGE definition')
     hdr['FPCUT'] = (True, 'Drop FOOTPRINT_EDGE rows')
     hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
     hdr['NFPEDGE'] = (n_footprint_edge, 'Footprint-edge rows dropped')
@@ -1086,6 +1060,10 @@ def write_group_table_fits(group_table, output_path, tracer, cap,
         hdr['HPXNEDG'] = (int(group_table.meta['HPX_NEDGE']), 'Angular edge HEALPix pixels')
     if 'HPX_NBUF' in group_table.meta:
         hdr['HPXNBUF'] = (int(group_table.meta['HPX_NBUF']), 'Buffered angular edge HEALPix pixels')
+    if 'HPX_MINDATA' in group_table.meta:
+        hdr['HPXMIND'] = (int(group_table.meta['HPX_MINDATA']), 'N_data/Npix threshold')
+    if 'HPX_NLOWDATA' in group_table.meta:
+        hdr['HPXNLOW'] = (int(group_table.meta['HPX_NLOWDATA']), 'Pixels failing N_data/Npix cut')
     if 'SURVEY_VOL' in group_table.meta and np.isfinite(group_table.meta['SURVEY_VOL']):
         hdr['SURVVOL'] = (float(group_table.meta['SURVEY_VOL']), 'Survey volume in (Mpc/h)^3')
     if 'SURVEY_OMG' in group_table.meta and np.isfinite(group_table.meta['SURVEY_OMG']):
