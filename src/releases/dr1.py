@@ -7,12 +7,17 @@ from astropy.coordinates import SkyCoord
 from astropy.cosmology import Planck18
 from astropy.table import Column, Table, vstack
 
+from desiproc.implement_astra import register_tracer_mapping
 from desiproc.paths import safe_tag, zone_tag
+
+from .dr2 import build_raw_dr2_zone
 
 from .base import ReleaseConfig
 
 
 TRACERS = ['BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
+LOCAL_TRACERS = ['BGS_ANY', 'BGS_BRIGHT', 'BGS_BRIGHT-21.5',
+                 'ELG_LOPnotqso', 'LRG', 'QSO']
 REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
 RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
 N_RANDOM_FILES = 18
@@ -21,7 +26,17 @@ RANDOM_COLUMNS = REAL_COLUMNS
 DEFAULT_ZONES = ['NGC', 'SGC']
 ZONE_ALIASES = {'NGC': 'NGC', 'SGC': 'SGC'}
 ZONE_VALUES = {'NGC': 1001, 'SGC': 1002}
-TRACER_ALIAS = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso', 'lrg': 'LRG', 'qso': 'QSO'}
+TRACER_ALIAS = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso',
+                'lrg': 'LRG', 'qso': 'QSO'}
+LOCAL_TRACER_ALIAS = {'bgs': 'BGS_BRIGHT',
+                      'bgs_any': 'BGS_ANY',
+                      'bgs_bright': 'BGS_BRIGHT',
+                      'bgs_bright-21.5': 'BGS_BRIGHT-21.5',
+                      'bgs_bright_21.5': 'BGS_BRIGHT-21.5',
+                      'elg': 'ELG_LOPnotqso',
+                      'elg_lopnotqso': 'ELG_LOPnotqso',
+                      'lrg': 'LRG',
+                      'qso': 'QSO'}
 TRACER_MASK_PROGRAM = {'BGS_BRIGHT': 'bright',
                        'ELG_LOPnotqso': 'dark',
                        'LRG': 'dark',
@@ -538,6 +553,9 @@ def create_config(args):
             raise RuntimeError('--config for DR1 must be a JSON object')
         user_cfg = loaded
 
+    local_zone_files = bool(getattr(args, 'local_zone_files', False)
+                            or user_cfg.get('local_zone_files', False))
+
     if args.zones is not None:
         zones = [_normalize_zone_label(z) for z in args.zones]
     elif isinstance(user_cfg.get('zones'), list):
@@ -553,6 +571,39 @@ def create_config(args):
         seen.add(zone)
         dedup.append(zone)
     zones = dedup
+
+    if local_zone_files:
+        tracer_ids = {name: idx for idx, name in enumerate(LOCAL_TRACERS)}
+        tracer_full_labels = {}
+        for tracer_name, tracer_idx in tracer_ids.items():
+            tracer_full_labels[(tracer_idx, True)] = tracer_name.encode('ascii')
+            tracer_full_labels[(tracer_idx, False)] = tracer_name.encode('ascii')
+        register_tracer_mapping(tracer_ids, tracer_full_labels)
+
+        def _build_local(zone, real_tables, random_tables, sel_tracers,
+                         parsed_args, release_tag):
+            label = _normalize_zone_label(zone)
+            zone_value = ZONE_VALUES.get(label, 1999)
+            return build_raw_dr2_zone(
+                label, sel_tracers, real_tables, random_tables,
+                parsed_args.raw_out, parsed_args.n_random, zone_value,
+                out_tag=parsed_args.out_tag, release_tag=release_tag,
+                tracer_ids=tracer_ids, tracer_full_labels=tracer_full_labels,
+                log_label='dr1-local')
+
+        preload_kwargs = {
+            'real_template': '{tracer}_{zone}_clustering.dat.fits',
+            'random_template': '{tracer}_{zone}_{idx}_clustering.ran.fits',
+            'log_label': 'dr1-local',
+            'zones_to_keep': zones,
+        }
+        return ReleaseConfig(
+            name='DR1', release_tag='DR1', tracers=LOCAL_TRACERS,
+            tracer_alias=LOCAL_TRACER_ALIAS, real_suffix=None, random_suffix=None,
+            n_random_files=N_RANDOM_FILES, real_columns=REAL_COLUMNS,
+            random_columns=RANDOM_COLUMNS, use_dr2_preload=True,
+            preload_kwargs=preload_kwargs, zones=zones,
+            build_raw=_build_local, combine_outputs=False)
 
     mask_dir = _resolve_mask_dir(args, user_cfg)
     all_masks, mask_paths, mask_nside = _load_dr1_masks(mask_dir)

@@ -531,6 +531,9 @@ def main():
         p.add_argument('--class-out', required=True, help='Classification output folder')
         p.add_argument('--groups-out', required=True, help='Groups output folder')
         p.add_argument('--n-random', type=int, default=100, help='Number of randoms per real object')
+        p.add_argument('--n-random-files', type=int, default=None,
+                       help='Number of input random catalogue files per tracer/zone '
+                            '(release default when omitted)')
 
         p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament', help='Webtype to group')
         p.add_argument('--source', choices=['data','rand','both'], default='data', help='Use data, randoms, or both for FoF')
@@ -578,6 +581,9 @@ def main():
                        help='For DR1/DR2/DR3: zone labels to run (e.g., NGC SGC). For EDR, ignored if --zone is given.')
         p.add_argument('--config', type=str, default=None,
                        help='Optional DR1 JSON config (e.g., {"mask_dir": "...", "zones": ["NGC","SGC"]}).')
+        p.add_argument('--local-zone-files', action='store_true',
+                       help='For DR1 local catalogues already split into NGC/SGC; read '
+                            '{tracer}_{zone}_clustering.dat.fits directly and skip NERSC masks/emline data.')
 
         args = p.parse_args()
 
@@ -602,6 +608,10 @@ def main():
             raise RuntimeError(f"Unsupported release '{args.release}'")
 
         release_config = config_factory(args)
+        n_random_files = (release_config.n_random_files
+                          if args.n_random_files is None else int(args.n_random_files))
+        if n_random_files <= 0:
+            raise ValueError('--n-random-files must be greater than zero')
         available_tracers = list(release_config.tracers)
         tracer_alias = dict(release_config.tracer_alias)
 
@@ -684,7 +694,7 @@ def main():
                                                             SEL_TRACERS,
                                                             release_config.real_columns,
                                                             release_config.random_columns,
-                                                            release_config.n_random_files,
+                                                            n_random_files,
                                                             **release_config.preload_kwargs)
         elif not release_config.use_dr2_preload:
             real_tables, random_tables = preload_all_tables(args.base_dir,
@@ -693,7 +703,7 @@ def main():
                                                             release_config.random_suffix,
                                                             release_config.real_columns,
                                                             release_config.random_columns,
-                                                            release_config.n_random_files)
+                                                            n_random_files)
 
         for z in zones:
             stage_start = time.time()
