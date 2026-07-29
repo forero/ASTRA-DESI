@@ -11,6 +11,7 @@ per-zone classifications of the cosmic web into **voids, sheets, filaments, and 
 - Linux environment (NERSC or equivalent HPC node recommended)
 - Python 3.9+ (tested with 3.12)
 - Packages: `numpy`, `scipy`, `pandas`, `astropy`, `matplotlib`
+- Raw void-catalogue finder: `fitsio`, `healpy`
 - Optional: `requests` for Zenodo uploads (pulled in by `zenodo_push.py`)
 
 
@@ -29,6 +30,9 @@ per-zone classifications of the cosmic web into **voids, sheets, filaments, and 
   - `plot_extra.py`: histograms, CDFs, and supplementary wedges
 - **`src/main.py`** – Command-line driver that orchestrates preprocessing, pair generation,
   classification, probabilities, and group finding (EDR/DR1/DR2)
+- **`group_finder/`** – Modular ASTRA void finder that starts directly from
+  `temp/raw/zone_NGC.fits.gz` and `temp/raw/zone_SGC.fits.gz`, writes
+  analysis-ready all/clean FITS catalogues, and compares all tracers and caps
 - **`jobs/`** – Ready-to-run scripts for either interactive shells (`run_edr.sh`) or
   SLURM batch jobs (`run_edr.sbatch`, `run_dr1.sbatch`)
 - **`zenodo/`** – Tools to stage pipeline outputs and push them to Zenodo (`zenodo_push.py`,
@@ -51,6 +55,28 @@ Each zone produces a consistent set of artefacts stored under the release root
 
 
 ## Running the pipeline
+
+### Raw NGC/SGC void catalogues
+
+The production void finder runs BGS, LRG, ELG, and QSO in both survey caps by
+default:
+
+```bash
+python -u -m group_finder
+```
+
+To run only LRG while still comparing both caps:
+
+```bash
+python -u -m group_finder \
+  --tracers LRG \
+  --zones NGC SGC \
+  --iteration 0 \
+  --output-root temp/group_finder/lrg
+```
+
+See [`group_finder/README.md`](group_finder/README.md) for the output layout
+and catalogue policy.
 
 ### 1. Direct CLI (`src/main.py`)
 

@@ -80,8 +80,9 @@ def parse_args():
     parser.add_argument('--ra-max', type=float, default=DEFAULT_RA_MAX)
     parser.add_argument('--r-threshold', type=float, default=-0.25)
     parser.add_argument('--seed-threshold', type=float, default=-0.85)
+    parser.add_argument('--merge-threshold', type=float, default=-0.85)
     parser.add_argument('--min-group-size', type=int, default=4)
-    parser.add_argument('--min-rand-for-shape', type=int, default=3)
+    parser.add_argument('--min-rand-for-shape', type=int, default=4)
     parser.add_argument('--healpix-edge-nside', type=int, default=256)
     parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
     parser.add_argument('--healpix-edge-min-data-ngc', type=int, default=3)
@@ -197,6 +198,8 @@ def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
     hdr['RTHRESH'] = (float(args.r_threshold), 'Watershed R threshold')
     if args.seed_threshold is not None:
         hdr['SEEDTHR'] = (float(args.seed_threshold), 'Watershed seed threshold')
+    if args.merge_threshold is not None:
+        hdr['MERGETHR'] = (float(args.merge_threshold), 'Watershed saddle merge threshold')
     hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
     hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
     hdr['WMODE'] = (args.mode, 'Watershed mode')
@@ -320,7 +323,8 @@ def run_case(data_table, rand_table, tracer, cap, cosmo_label, omega_m,
                        r_threshold=args.r_threshold,
                        min_group_size=args.min_group_size,
                        mode=args.mode,
-                       seed_threshold=args.seed_threshold)
+                       seed_threshold=args.seed_threshold,
+                       merge_threshold=args.merge_threshold)
     assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
                                group_col='GROUPID')
     log_message(log_fh, f"case={cosmo_label}/{tracer}/{cap} watershed "

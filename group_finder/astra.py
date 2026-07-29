@@ -1,225 +1,319 @@
-import astropy.units as u
+"""
+1. combine object and random Cartesian positions;
+2. construct their three-dimensional Delaunay graph;
+3. count data and random neighbours and compute ``r``;
+4. optionally average already aligned per-point ``r`` realizations;
+5. retain points with ``r <= r_threshold``;
+6. process them in ascending ``r`` order;
+7. assign each point to the lowest-indexed existing group that it touches, or
+   seed a group when no assigned neighbour exists; and
+8. discard groups smaller than ``min_members``.
+"""
+
+from dataclasses import dataclass
+from itertools import combinations
+from numbers import Integral, Real
+
 import numpy as np
-from astropy.cosmology import FlatLambdaCDM
-from scipy.spatial import Delaunay
-
-DEFAULT_H = 0.6736
-DEFAULT_OMEGA_M = 0.315
+from scipy.spatial import Delaunay, QhullError
 
 
-EDGE_PAIRS_3D = np.array([[0, 1], [0, 2],
-                          [0, 3], [1, 2],
-                          [1, 3], [2, 3]], dtype=np.int64)
+DEFAULT_R_THRESHOLD = -0.25
+DEFAULT_MIN_MEMBERS = 4
+UNASSIGNED = -1
 
 
-def build_cosmology(h=DEFAULT_H, omega_m=DEFAULT_OMEGA_M):
-    '''
-    Build a FlatLambdaCDM cosmology instance based on the provided Hubble parameter and matter density.
-
-    Parameters:
-        - h: Hubble parameter (dimensionless, e.g., 0.6736).
-        - omega_m: Matter density parameter (e.g., 0.315).
-    Returns:
-        - An instance of astropy.cosmology.FlatLambdaCDM configured with the specified parameters.
-    '''
-    return FlatLambdaCDM(H0=h * 100.0, Om0=omega_m)
+@dataclass(frozen=True)
+class DelaunayGraph:
+    positions: np.ndarray
+    is_data: np.ndarray
+    edges: np.ndarray
+    neighbors: tuple[tuple[int, ...], ...]
+    n_data: int
+    n_random: int
 
 
-def radec_z_to_cartesian(ra_deg, dec_deg, redshift, cosmo, h):
-    '''
-    Convert RA, DEC, and redshift to Cartesian coordinates (X, Y, Z) in comoving Mpc/h.
-
-    Parameters:
-        - ra_deg: Right Ascension in degrees.
-        - dec_deg: Declination in degrees.
-        - redshift: Redshift of the object.
-        - cosmo: An instance of astropy.cosmology to compute comoving distances.
-        - h: Hubble parameter (dimensionless) to convert distances to Mpc/h.
-    Returns:
-        - x, y, z_cart: Arrays of Cartesian coordinates in comoving Mpc/h. The z coordinate
-                        is named z_cart to avoid confusion with redshift.
-    '''
-    ra = np.radians(np.asarray(ra_deg, dtype=np.float64))
-    dec = np.radians(np.asarray(dec_deg, dtype=np.float64))
-    z = np.asarray(redshift, dtype=np.float64)
-
-    r_mpc_h = cosmo.comoving_distance(z).to(u.Mpc).value * h
-
-    x = r_mpc_h * np.cos(dec) * np.cos(ra)
-    y = r_mpc_h * np.cos(dec) * np.sin(ra)
-    z_cart = r_mpc_h * np.sin(dec)
-    return x, y, z_cart
+@dataclass(frozen=True)
+class DensityContrast:
+    n_data_neighbors: np.ndarray
+    n_random_neighbors: np.ndarray
+    r_values: np.ndarray
 
 
-def add_cartesian_columns(table, cosmo, h):
-    '''
-    Add Cartesian coordinate columns (X_CART, Y_CART, Z_CART) to the input table based on its
-    RA, DEC, and Z columns.
-
-    Parameters:
-        - table: An Astropy Table containing 'RA', 'DEC', and 'Z' columns.
-        - cosmo: An instance of astropy.cosmology to compute comoving distances.
-        - h: Hubble parameter (dimensionless) to convert distances to Mpc/h.
-    '''
-    x, y, z = radec_z_to_cartesian(table['RA'],
-                                   table['DEC'],
-                                   table['Z'],
-                                   cosmo=cosmo, h=h)
-    table['X_CART'] = x
-    table['Y_CART'] = y
-    table['Z_CART'] = z
+@dataclass(frozen=True)
+class VoidGrouping:
+    group_ids: np.ndarray
+    group_sizes: dict[int, int]
+    threshold_selected: np.ndarray
+    retained: np.ndarray
+    processing_order: np.ndarray
+    r_values: np.ndarray
 
 
-def add_cartesian_to_all(all_data, cosmo, h):
-    '''
-    Add Cartesian coordinate columns to all tables in the all_data dict.
-
-    Parameters:
-        - all_data: Dict containing the loaded data tables for each tracer and cap.
-        - cosmo: An instance of astropy.cosmology to compute comoving distances.
-        - h: Hubble parameter (dimensionless) to convert distances to Mpc/h.
-    '''
-    for key, table in all_data.items():
-        add_cartesian_columns(table, cosmo=cosmo, h=h)
+@dataclass(frozen=True)
+class GroupFinderResult:
+    graph: DelaunayGraph
+    contrast: DensityContrast
+    grouping: VoidGrouping
 
 
-def _build_unique_edges_from_simplices(simplices):
-    '''
-    Build a unique set of edges from the given simplices of a Delaunay triangulation.
-
-    Parameters:
-        - simplices: An array of shape (n_simplices, 4) containing the indices of
-                     the vertices of each simplex (tetrahedron) in 3D.
-    Returns:
-        - An array of shape (n_edges, 2) containing the unique edges as pairs of
-          vertex indices, sorted in ascending order within each edge and with no
-          duplicate edges.
-    '''
-    n_simplices = simplices.shape[0]
-    n_pairs = EDGE_PAIRS_3D.shape[0]
-    edges = np.empty((n_simplices * n_pairs, 2), dtype=np.int64)
-    for i, pair in enumerate(EDGE_PAIRS_3D):
-        start = i * n_simplices
-        stop = start + n_simplices
-        edges[start:stop] = simplices[:, pair]
-    edges = np.sort(edges, axis=1)
-    edges = np.unique(edges, axis=0)
-    return edges
+def _positions_array(values, name):
+    positions = np.asarray(values, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError(f'{name} must have shape (n_points, 3).')
+    if len(positions) == 0:
+        raise ValueError(f'{name} must contain at least one point.')
+    if not np.all(np.isfinite(positions)):
+        raise ValueError(f'{name} contains non-finite coordinates.')
+    return positions
 
 
-def compute_neighbor_statistics(data_table, rand_table):
-    '''
-    Compute neighbor statistics for the combined data and random tables using Delaunay triangulation.
-
-    Parameters:
-        - data_table: Astropy Table containing the data points with Cartesian coordinates.
-        - rand_table: Astropy Table containing the random points with Cartesian coordinates.
-    Returns:
-        - A dict containing the computed neighbor statistics, including:
-          'coords': Combined Cartesian coordinates of data and random points.
-          'is_data': Boolean array indicating which points are data vs random.
-          'targetid': Combined TARGETID array for data and random points.
-          'edges': Array of unique edges from the Delaunay triangulation.
-          'neighbors': List of neighbor indices for each point.
-          'n_data_neighbors': Array of counts of data neighbors for each point.
-          'n_rand_neighbors': Array of counts of random neighbors for each point.
-          'r_values': Array of R values computed as (N_DATA - N_RAND) / (N_DATA + N_RAND) for each point.
-    Raises:
-        - ValueError: If there are fewer than 4 total points (data + random), which is the min
-                      required for 3D Delaunay triangulation, or if any points have
-    '''
-    n_data = len(data_table)
-    n_rand = len(rand_table)
-    n_total = n_data + n_rand
-
-    if n_total < 4:
-        raise ValueError(f'Need at least 4 total points for 3D Delaunay, got {n_total}')
-
-    coords = np.empty((n_total, 3), dtype=np.float64)
-    coords[:n_data, 0] = np.asarray(data_table['X_CART'], dtype=np.float64)
-    coords[:n_data, 1] = np.asarray(data_table['Y_CART'], dtype=np.float64)
-    coords[:n_data, 2] = np.asarray(data_table['Z_CART'], dtype=np.float64)
-    coords[n_data:, 0] = np.asarray(rand_table['X_CART'], dtype=np.float64)
-    coords[n_data:, 1] = np.asarray(rand_table['Y_CART'], dtype=np.float64)
-    coords[n_data:, 2] = np.asarray(rand_table['Z_CART'], dtype=np.float64)
-
-    is_data = np.zeros(n_total, dtype=bool)
-    is_data[:n_data] = True
-
-    tri = Delaunay(coords)
-    edges = _build_unique_edges_from_simplices(tri.simplices.astype(np.int64, copy=False))
-
-    n_data_neighbors = np.zeros(n_total, dtype=np.int32)
-    n_rand_neighbors = np.zeros(n_total, dtype=np.int32)
-
-    u_idx = edges[:, 0]
-    v_idx = edges[:, 1]
-
-    u_is_data = is_data[u_idx].astype(np.int32)
-    v_is_data = is_data[v_idx].astype(np.int32)
-
-    np.add.at(n_data_neighbors, u_idx, v_is_data)
-    np.add.at(n_rand_neighbors, u_idx, 1 - v_is_data)
-
-    np.add.at(n_data_neighbors, v_idx, u_is_data)
-    np.add.at(n_rand_neighbors, v_idx, 1 - u_is_data)
-
-    denom = n_data_neighbors + n_rand_neighbors
-    if np.any(denom == 0):
-        zero_nodes = np.where(denom == 0)[0]
-        raise ValueError('Some nodes have no neighbors after triangulation. '
-                         f'First problematic indices: {zero_nodes[:10].tolist()}')
-
-    r_values = (n_data_neighbors - n_rand_neighbors) / denom
-
-    neighbors = [[] for _ in range(n_total)]
-    for i in range(edges.shape[0]):
-        a = int(edges[i, 0])
-        b = int(edges[i, 1])
-        neighbors[a].append(b)
-        neighbors[b].append(a)
-
-    targetid = np.concatenate([np.asarray(data_table['TARGETID']),
-                               np.asarray(rand_table['TARGETID'])])
-
-    return {'coords': coords, 'is_data': is_data, 'targetid': targetid,
-            'edges': edges, 'neighbors': neighbors,
-            'n_data_neighbors': n_data_neighbors,
-            'n_rand_neighbors': n_rand_neighbors,
-            'r_values': r_values.astype(np.float32),
-            'n_data': n_data, 'n_rand': n_rand}
+def _positive_integer(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f'{name} must be a positive integer.')
+    value = int(value)
+    if value < 1:
+        raise ValueError(f'{name} must be a positive integer.')
+    return value
 
 
-def add_neighbor_columns_to_tables(data_table, rand_table, stats):
-    '''
-    Add neighbor statistics columns (N_DATA, N_RAND, R) to the data and random tables
-    based on the computed stats.
+def _finite_unit_interval_number(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f'{name} must be a real number within [-1, 1].')
+    value = float(value)
+    if not np.isfinite(value) or not -1.0 <= value <= 1.0:
+        raise ValueError(f'{name} must lie within [-1, 1].')
+    return value
 
-    Parameters:
-        - data_table: Astropy Table containing the data points.
-        - rand_table: Astropy Table containing the random points.
-        - stats: Dict containing the neighbor statistics computed by compute_neighbor_statistics,
-                 including: 'n_data', 'n_rand', 'n_data_neighbors', 'n_rand_neighbors', and 'r_values'.
-    Raises:
-        - ValueError: If the length of stats['r_values'] does not match the total number of data
-                      and random points, which indicates a mismatch in the computed statistics
-                      and the input tables.
-    '''
-    n_data = stats['n_data']
-    n_rand = stats['n_rand']
-    n_total = n_data + n_rand
 
-    if len(stats['r_values']) != n_total:
-        raise ValueError('stats["r_values"] length does not match n_data+n_rand')
+def neighbors_from_edges(n_points, edges):
 
-    n_data_neighbors = stats['n_data_neighbors']
-    n_rand_neighbors = stats['n_rand_neighbors']
-    r_values = stats['r_values']
+    n_points = _positive_integer(n_points, 'n_points')
 
-    data_table['N_DATA'] = n_data_neighbors[:n_data]
-    data_table['N_RAND'] = n_rand_neighbors[:n_data]
-    data_table['R'] = r_values[:n_data]
+    edge_array = np.asarray(edges)
+    if edge_array.size == 0:
+        return tuple(() for _ in range(n_points))
+    if edge_array.ndim != 2 or edge_array.shape[1] != 2:
+        raise ValueError('edges must have shape (n_edges, 2).')
+    if not np.issubdtype(edge_array.dtype, np.integer):
+        raise TypeError('edges must contain integer vertex indices.')
 
-    rand_table['N_DATA'] = n_data_neighbors[n_data:]
-    rand_table['N_RAND'] = n_rand_neighbors[n_data:]
-    rand_table['R'] = r_values[n_data:]
+    edge_array = edge_array.astype(np.int64, copy=False)
+    if np.min(edge_array) < 0 or np.max(edge_array) >= n_points:
+        raise IndexError('edges contains a vertex outside the point set.')
+    if np.any(edge_array[:, 0] == edge_array[:, 1]):
+        raise ValueError('Delaunay graph edges cannot be self-loops.')
+
+    edge_array = np.sort(edge_array, axis=1)
+    edge_array = np.unique(edge_array, axis=0)
+    adjacency = [set() for _ in range(n_points)]
+    for first, second in edge_array:
+        first = int(first)
+        second = int(second)
+        adjacency[first].add(second)
+        adjacency[second].add(first)
+    return tuple(tuple(sorted(row)) for row in adjacency)
+
+
+def _unique_delaunay_edges(simplices):
+    vertex_pairs = tuple(combinations(range(4), 2))
+    edges = np.concatenate([simplices[:, pair] for pair in vertex_pairs], axis=0)
+    edges = np.sort(edges.astype(np.int64, copy=False), axis=1)
+    return np.unique(edges, axis=0)
+
+
+def build_delaunay_graph(object_positions, random_positions) -> DelaunayGraph:
+
+    objects = _positions_array(object_positions, 'object_positions')
+    randoms = _positions_array(random_positions, 'random_positions')
+    positions = np.concatenate((objects, randoms), axis=0)
+    if len(positions) < 4:
+        raise ValueError('A three-dimensional Delaunay triangulation needs at least four combined points.')
+    if len(np.unique(positions, axis=0)) != len(positions):
+        raise ValueError('Combined object and random positions must be distinct.')
+
+    try:
+        triangulation = Delaunay(positions)
+    except QhullError as exc:
+        raise ValueError('The combined positions do not define a valid 3-D Delaunay triangulation.') from exc
+
+    edges = _unique_delaunay_edges(triangulation.simplices)
+    neighbors = neighbors_from_edges(len(positions), edges)
+    if any(len(row) == 0 for row in neighbors):
+        raise ValueError('The Delaunay graph contains a point with no neighbours, so r '
+                         'is undefined for that point.')
+
+    is_data = np.zeros(len(positions), dtype=bool)
+    is_data[:len(objects)] = True
+
+    return DelaunayGraph(positions=positions, is_data=is_data, edges=edges,
+                         neighbors=neighbors, n_data=len(objects), n_random=len(randoms))
+
+
+def _normalized_neighbors(neighbors):
+
+    n_points = len(neighbors)
+    if n_points < 1:
+        raise ValueError('neighbors must contain at least one point.')
+    normalized = []
+    for point, row in enumerate(neighbors):
+        array = np.asarray(tuple(row))
+        if array.size == 0:
+            normalized.append(())
+            continue
+        if array.ndim != 1 or not np.issubdtype(array.dtype, np.integer):
+            raise TypeError('neighbors must contain one-dimensional integers.')
+        array = np.unique(array.astype(np.int64, copy=False))
+        if np.min(array) < 0 or np.max(array) >= n_points:
+            raise IndexError(
+                f'neighbors[{point}] contains an index outside the graph.')
+        if np.any(array == point):
+            raise ValueError('neighbors cannot contain self-neighbours.')
+        normalized.append(tuple(int(value) for value in array))
+
+    normalized = tuple(normalized)
+    for point, row in enumerate(normalized):
+        for other in row:
+            if point not in normalized[other]:
+                raise ValueError('neighbors must describe an undirected graph.')
+    isolated = [point for point, row in enumerate(normalized) if not row]
+    if isolated:
+        raise ValueError(f'A Delaunay grouping graph cannot contain points without neighbors; indices={isolated}.')
+    return normalized
+
+
+def compute_density_contrast(neighbors, is_data) -> DensityContrast:
+
+    graph = _normalized_neighbors(neighbors)
+    labels = np.asarray(is_data)
+    if labels.ndim != 1 or len(labels) != len(graph):
+        raise ValueError('is_data must be one-dimensional and match the graph size.')
+    if labels.dtype.kind != 'b':
+        raise TypeError('is_data must have boolean dtype.')
+
+    n_data_neighbors = np.fromiter((sum(bool(labels[neighbor]) for neighbor in row) for row in graph),
+                                   dtype=np.int64, count=len(graph))
+    degrees = np.fromiter((len(row) for row in graph), dtype=np.int64, count=len(graph))
+    if np.any(degrees == 0):
+        indices = np.flatnonzero(degrees == 0)
+        raise ValueError(f'r is undefined for points without Delaunay neighbours - indices={indices.tolist()}.')
+
+    n_random_neighbors = degrees - n_data_neighbors
+    r_values = ((n_data_neighbors - n_random_neighbors) / degrees.astype(np.float64))
+    return DensityContrast(n_data_neighbors=n_data_neighbors, n_random_neighbors=n_random_neighbors,
+                           r_values=r_values)
+
+
+def average_r_values(r_values_by_realization, point_ids_by_realization=None):
+
+    values = np.asarray(r_values_by_realization, dtype=np.float64)
+    if values.ndim == 1:
+        values = values[None, :]
+    if values.ndim != 2 or values.shape[0] < 1 or values.shape[1] < 1:
+        raise ValueError('r_values_by_realization must have shape (n_realizations, n_points).')
+    if not np.all(np.isfinite(values)):
+        raise ValueError('Every aligned r value must be finite.')
+    if np.any((values < -1.0) | (values > 1.0)):
+        raise ValueError('r values must lie within [-1, 1].')
+
+    if point_ids_by_realization is not None:
+        point_ids = np.asarray(point_ids_by_realization)
+        if point_ids.shape != values.shape:
+            raise ValueError('point_ids_by_realization must match the r-value shape.')
+        if len(np.unique(point_ids[0])) != values.shape[1]:
+            raise ValueError('Point IDs must be unique within each realization.')
+        if not np.all(point_ids == point_ids[0][None, :]):
+            raise ValueError('Point IDs must be identically aligned in every realization.')
+    elif values.shape[0] > 1:
+        raise ValueError('Multiple realizations require identically aligned point_ids_by_realization.')
+    return np.mean(values, axis=0)
+
+
+def group_void_points(neighbors, r_values, r_threshold = DEFAULT_R_THRESHOLD, min_members = DEFAULT_MIN_MEMBERS) -> VoidGrouping:
+
+    graph = _normalized_neighbors(neighbors)
+    r_values = np.asarray(r_values, dtype=np.float64)
+    if r_values.ndim != 1 or len(r_values) != len(graph):
+        raise ValueError('r_values must be one-dimensional and match the graph size.')
+    if not np.all(np.isfinite(r_values)):
+        raise ValueError('r_values must be finite.')
+    if np.any((r_values < -1.0) | (r_values > 1.0)):
+        raise ValueError('r_values must lie within [-1, 1].')
+
+    r_threshold = _finite_unit_interval_number(r_threshold, 'r_threshold')
+    min_members = _positive_integer(min_members, 'min_members')
+
+    selected = r_values <= r_threshold
+    selected_indices = np.flatnonzero(selected)
+    stable_order = np.argsort(r_values[selected_indices], kind='stable')
+    processing_order = selected_indices[stable_order]
+
+    group_ids = np.full(len(graph), UNASSIGNED, dtype=np.int64)
+    next_group_id = 0
+    for point in processing_order:
+        point = int(point)
+        neighboring_groups = tuple(sorted({int(group_ids[neighbor]) for neighbor in graph[point]
+                                           if group_ids[neighbor] >= 0}))
+        if not neighboring_groups:
+            group_ids[point] = next_group_id
+            next_group_id += 1
+        else:
+            group_ids[point] = min(neighboring_groups)
+
+    assigned = group_ids >= 0
+    if np.any(assigned):
+        sizes = np.bincount(group_ids[assigned], minlength=next_group_id)
+        discard = sizes < min_members
+        assigned_indices = np.flatnonzero(assigned)
+        discard_members = discard[group_ids[assigned_indices]]
+        group_ids[assigned_indices[discard_members]] = UNASSIGNED
+
+    retained = group_ids >= 0
+    if np.any(retained):
+        retained_sizes = np.bincount(group_ids[retained], minlength=next_group_id)
+        group_sizes = {int(group_id): int(size) for group_id, size in enumerate(retained_sizes)
+                       if size > 0}
+    else:
+        group_sizes = {}
+
+    return VoidGrouping(group_ids=group_ids, group_sizes=group_sizes, threshold_selected=selected,
+                        retained=group_ids >= 0, processing_order=processing_order, r_values=r_values.copy())
+
+
+def group_aligned_realizations(neighbors, r_values_by_realization, point_ids_by_realization=None,
+                               graph_point_ids=None, r_threshold = DEFAULT_R_THRESHOLD,
+                               min_members = DEFAULT_MIN_MEMBERS) -> VoidGrouping:
+
+    realization_values = np.asarray(r_values_by_realization, dtype=np.float64)
+    n_realizations = (1 if realization_values.ndim == 1
+                      else realization_values.shape[0]
+                      if realization_values.ndim == 2
+                      else 0)
+    averaged = average_r_values(realization_values, point_ids_by_realization=point_ids_by_realization)
+
+    if graph_point_ids is not None:
+        graph_ids = np.asarray(graph_point_ids)
+        if graph_ids.ndim != 1 or len(graph_ids) != len(averaged):
+            raise ValueError('graph_point_ids must be one-dimensional and match the grouping graph size.')
+        if point_ids_by_realization is not None:
+            aligned_ids = np.asarray(point_ids_by_realization)
+            if aligned_ids.ndim == 1:
+                aligned_ids = aligned_ids[None, :]
+            if not np.all(graph_ids == aligned_ids[0]):
+                raise ValueError('graph_point_ids must match the aligned point-ID order.')
+
+    elif n_realizations > 1:
+        raise ValueError('Multiple realizations require graph_point_ids so each averaged '
+                         'column is tied to the corresponding graph vertex.')
+    return group_void_points(neighbors=neighbors, r_values=averaged,
+                             r_threshold=r_threshold, min_members=min_members)
+
+
+def run_group_finder(object_positions, random_positions, r_threshold = DEFAULT_R_THRESHOLD,
+                     min_members = DEFAULT_MIN_MEMBERS) -> GroupFinderResult:
+
+    graph = build_delaunay_graph(object_positions, random_positions)
+    contrast = compute_density_contrast(neighbors=graph.neighbors, is_data=graph.is_data)
+    grouping = group_void_points(neighbors=graph.neighbors, r_values=contrast.r_values,
+                                 r_threshold=r_threshold, min_members=min_members)
+    return GroupFinderResult(graph=graph, contrast=contrast, grouping=grouping)

@@ -14,6 +14,14 @@ from astropy.table import Table
 
 DEFAULT_CATALOG = '/pscratch/sd/v/vtorresg/void_catalog/dr2/voids_LRG_NGC.fits'
 DEFAULT_OUTPUT_DIR = 'plots/void_catalog_diagnostics'
+SURVEY_EDGE_COLUMNS = ('FOOTPRINT_EDGE',
+                       'TOUCHES_RADIAL_EDGE',
+                       'CENTER_NEAR_RADIAL_EDGE',
+                       'TOUCHES_RA_EDGE',
+                       'TOUCHES_DEC_EDGE',
+                       'TOUCHES_HEALPIX_EDGE',
+                       'TOUCHES_CART_EDGE',
+                       'CENTER_NEAR_CART_EDGE')
 
 
 def parse_args():
@@ -28,16 +36,19 @@ def parse_args():
                         help='Histogram bins. Default: %(default)s')
     parser.add_argument('--dpi', type=int, default=180,
                         help='Output figure DPI. Default: %(default)s')
+    parser.add_argument('--radius-column', default='R_EFF',
+                        help='Radius-like catalogue column to plot. Default: %(default)s')
     parser.add_argument('--min-reff', type=float, default=None,
-                        help='Optional minimum R_EFF cut.')
+                        help='Optional minimum cut on --radius-column.')
     parser.add_argument('--max-reff', type=float, default=None,
-                        help='Optional maximum R_EFF cut.')
+                        help='Optional maximum cut on --radius-column.')
     parser.add_argument('--exclude-footprint-edge', action='store_true',
                         help='If FOOTPRINT_EDGE exists, plot only FOOTPRINT_EDGE == False.')
+    parser.add_argument('--interior-only', action='store_true')
     return parser.parse_args()
 
 
-def read_void_table(path):
+def read_void_table(path, radius_column='R_EFF'):
     with fits.open(path, memmap=True) as hdul:
         hdu_name = 'VOIDS' if 'VOIDS' in hdul else 1
         table = Table(hdul[hdu_name].data)
@@ -45,8 +56,8 @@ def read_void_table(path):
             if card.keyword not in ('', 'COMMENT', 'HISTORY'):
                 table.meta[card.keyword] = card.value
 
-    if 'R_EFF' not in table.colnames:
-        raise KeyError(f'{path} missing required column R_EFF')
+    if radius_column not in table.colnames:
+        raise KeyError(f'{path} missing requested radius column {radius_column}')
     return table
 
 
@@ -93,7 +104,7 @@ def finite_percentiles(values):
 
 
 def apply_cuts(table, args):
-    reff = as_float_array(table, 'R_EFF')
+    reff = as_float_array(table, args.radius_column)
     mask = np.isfinite(reff) & (reff > 0.0)
     if args.min_reff is not None:
         mask &= reff >= float(args.min_reff)
@@ -103,6 +114,13 @@ def apply_cuts(table, args):
         if 'FOOTPRINT_EDGE' not in table.colnames:
             raise KeyError('--exclude-footprint-edge requested, but catalogue has no FOOTPRINT_EDGE column.')
         mask &= ~np.asarray(table['FOOTPRINT_EDGE'], dtype=bool)
+    if args.interior_only:
+        available = [name for name in SURVEY_EDGE_COLUMNS if name in table.colnames]
+        if not available:
+            raise KeyError('--interior-only requested, but the catalogue has none of the '
+                           f'expected edge columns: {", ".join(SURVEY_EDGE_COLUMNS)}')
+        for name in available:
+            mask &= ~np.asarray(table[name], dtype=bool)
     return table[mask]
 
 
@@ -136,33 +154,40 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.prefix or catalog.stem
 
-    table = apply_cuts(read_void_table(str(catalog)), args)
+    source_table = read_void_table(str(catalog), radius_column=args.radius_column)
+    table = apply_cuts(source_table, args)
     if len(table) == 0:
         raise RuntimeError('No voids left after cuts.')
 
-    reff = as_float_array(table, 'R_EFF')
+    reff = as_float_array(table, args.radius_column)
     ellip = ellipticity(table)
 
-    reff_path = output_dir / f'{prefix}_R_EFF.png'
+    radius_tag = str(args.radius_column).strip().upper()
+    reff_path = output_dir / f'{prefix}_{radius_tag}.png'
     ellip_path = output_dir / f'{prefix}_ELLIP.png'
 
     plot_hist(reff, reff_path, bins=args.bins, dpi=args.dpi,
-              xlabel=r'$R_{\rm eff}$ [Mpc/h]',
-              title=r'$R_{\rm eff}=\sqrt{5\langle r^2\rangle/3}$',
+              xlabel=f'{radius_tag} [Mpc/h]',
+              title=f'{radius_tag} distribution',
               color='#2563EB')
     plot_hist(ellip, ellip_path, bins=args.bins, dpi=args.dpi,
               xlabel='ELLIP',
               title=r'Ellipticity: $1-(\lambda_3/\lambda_1)^{1/4}$',
               color='#DC2626', xlim=(-0.02, 1.02))
 
-    print(f'Loaded voids: {len(table):,}')
+    print(f'Input voids: {len(source_table):,}')
+    print(f'Voids after cuts: {len(table):,}')
+    print(f'Radius column: {args.radius_column}')
+    if args.interior_only:
+        active = [name for name in SURVEY_EDGE_COLUMNS if name in source_table.colnames]
+        print(f'Interior-only edge columns: {", ".join(active)}')
     if 'FOOTPRINT_EDGE' in table.colnames:
         footprint_edge = np.asarray(table['FOOTPRINT_EDGE'], dtype=bool)
         print(f'FOOTPRINT_EDGE=True: {int(np.count_nonzero(footprint_edge)):,}')
     if 'EDGE' in table.colnames:
         edge = np.asarray(table['EDGE'], dtype=bool)
         print(f'EDGE=True: {int(np.count_nonzero(edge)):,}')
-    print('R_EFF:', finite_percentiles(reff).replace('\n', '; '))
+    print(f'{args.radius_column}:', finite_percentiles(reff).replace('\n', '; '))
     print('ELLIP:', finite_percentiles(ellip).replace('\n', '; '))
     print(f'Wrote: {reff_path}')
     print(f'Wrote: {ellip_path}')
