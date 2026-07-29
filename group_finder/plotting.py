@@ -14,17 +14,18 @@ from matplotlib.lines import Line2D
 plt.rcParams.update({'font.family': 'serif',
                          'axes.grid': True,
                          'grid.alpha': 0.18,
-                         'figure.facecolor': 'black',
-                         'axes.facecolor': 'black',
-                         'savefig.facecolor': 'black'})
+                        #  'figure.facecolor': 'black',
+                        #  'axes.facecolor': 'black',
+                        #  'savefig.facecolor': 'black'
+                         })
 
 from .read_data import TRACER_DISPLAY, normalize_tracer, normalize_zone
 
 
-TRACER_COLORS = {'BGS_BRIGHT': 'cyan',
-                 'LRG': 'orange',
-                 'ELG_LOPnotqso': 'limegreen',
-                 'QSO': 'magenta'}
+TRACER_COLORS = {'BGS_BRIGHT': '#5677A4',
+                 'LRG': '#9761B0',
+                 'ELG_LOPnotqso': '#85B5B2',
+                 'QSO': '#D4819A'}
 ZONE_LINESTYLES = {'NGC': '-', 'SGC': '--'}
 
 
@@ -142,8 +143,9 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
     seed_sequence = np.random.SeedSequence(int(seed))
     child_seeds = iter(seed_sequence.spawn(2 * len(samples) + 2 * len(TRACER_COLORS) + 4))
 
-    figure = plt.figure(figsize=(15, 6))
-    outer = figure.add_gridspec(1, 2, left=0.07, right=0.985, bottom=0.10, top=0.82, wspace=0.16)
+    figure = plt.figure(figsize=(12, 5))
+    outer = figure.add_gridspec(1, 2, left=0.07, right=0.985, bottom=0.10,
+                               top=0.78, wspace=0.1)
     labels = {'ELLIP': r'$\epsilon$', 'R_EFF': r'$R_{\mathrm{eff}}\,[\mathrm{Mpc}/h]$'}
 
     try:
@@ -167,7 +169,7 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
                                        estimate['lower'],
                                        estimate['upper'],
                                        color=color,
-                                       alpha=0.09,
+                                       alpha=0.2,
                                        linewidth=0.0)
                     upper.plot(centers,
                                estimate['pdf'],
@@ -186,19 +188,24 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
                                                   min_combined_count=min_combined_count,
                                                   rng=np.random.default_rng(next(child_seeds)))
                 lower.plot(centers, significance, color=TRACER_COLORS[tracer], linewidth=1.35)
+            if variable == 'ELLIP':
+                upper.set_title('Ellipticity', fontsize=12)
+            elif variable == 'R_EFF':
+                upper.set_title('Effective Radius', fontsize=12)
 
-            upper.set_title(labels[variable], fontsize=16)
-            upper.set_ylabel(r'$\mathrm{Normalized\ PDF}$')
             upper.set_ylim(bottom=0.0)
             upper.tick_params(labelbottom=False)
-            lower.axhspan(-1.0, 1.0, color='white', alpha=0.12, zorder=0)
-            lower.axhline(0.0, color='white', alpha=0.5, linestyle='--')
-            lower.axhline(2.0, color='white', alpha=0.35, linestyle=':')
-            lower.axhline(-2.0, color='white', alpha=0.35, linestyle=':')
-            lower.set_ylabel(r'$\Delta_{\mathrm{NGC-SGC}}/\sigma_{\mathrm{null}}$')
-            lower.set_xlabel(labels[variable])
+            lower.axhspan(-1.0, 1.0, color='black', alpha=0.12, zorder=0)
+            lower.axhline(0.0, color='black', alpha=0.5, linestyle='--')
+            lower.axhline(2.0, color='black', alpha=0.35, linestyle=':')
+            lower.axhline(-2.0, color='black', alpha=0.35, linestyle=':')
+            lower.set_xlabel(labels[variable], fontsize=14)
             lower.set_ylim(-3.0, 3.0)
             upper.set_xlim(edges[0], edges[-1])
+
+            if variable == 'ELLIP':
+                lower.set_ylabel(r'$\Delta_{\mathrm{zone}}/\sigma_{\mathrm{null}}$', fontsize=14)
+                upper.set_ylabel(r'$\mathrm{Normalized\ PDF}$', fontsize=14)
 
         tracer_handles = [Line2D([0], [0],
                                  color=TRACER_COLORS[tracer],
@@ -207,21 +214,25 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
             for tracer in TRACER_COLORS
             if any(key[0] == tracer for key in samples)]
         zone_handles = [Line2D([0], [0],
-                                color='white',
+                                color='black',
                                 linestyle=ZONE_LINESTYLES[zone],
                                 linewidth=1.8,
                                 label=zone)
             for zone in ('NGC', 'SGC')
             if any(key[1] == zone for key in samples)]
-        figure.legend(handles=tracer_handles + zone_handles,
+        figure.legend(handles=tracer_handles,
                       loc='upper center',
-                      ncol=max(1, len(tracer_handles) + len(zone_handles)),
+                      ncol=max(1, len(tracer_handles)),
                       frameon=False,
-                      bbox_to_anchor=(0.5, 0.965))
-        figure.suptitle(rf'$\mathrm{{ASTRA}}\quad'
-                        rf'\mathrm{{RANDITER}}={int(iteration)},\quad{{}}'
-                        rf'r_{{\mathrm{{threshold}}}}={float(r_threshold):.3f}$',
-                        y=0.995, fontsize=15)
+                      bbox_to_anchor=(0.5, 0.955))
+        figure.legend(handles=zone_handles,
+                      loc='upper center',
+                      ncol=max(1, len(zone_handles)),
+                      frameon=False,
+                      bbox_to_anchor=(0.5, 0.900))
+        figure.suptitle(rf'$\mathrm{{ASTRA}} \quad{{}}  \mathrm{{iteration}} \, {int(iteration)} ,\quad{{}}'
+                        rf'r_{{\mathrm{{threshold}}}}={float(r_threshold):.2f}$',
+                        y=1.02, fontsize=15)
 
         output_path = Path(output_path)
         if not output_path.suffix:

@@ -63,6 +63,13 @@ def _summary_path(output_root, iteration):
     return (Path(output_root) / f'run_iter{int(iteration):03d}_summary.json')
 
 
+def _json_default(value):
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    raise TypeError(f'Object of type {value.__class__.__name__} '
+                    'is not JSON serializable')
+
+
 def _write_json(path, payload, overwrite=False):
     path = Path(path)
     if path.exists() and not overwrite:
@@ -70,7 +77,8 @@ def _write_json(path, payload, overwrite=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
     try:
-        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True,
+                                        allow_nan=False, default=_json_default)
                              + '\n', encoding='utf-8')
         os.replace(temporary, path)
     finally:
@@ -139,6 +147,41 @@ def _preflight(args, tracers, zones):
 def _catalog_samples(table):
     return {'R_EFF': np.asarray(table['R_EFF'], dtype=np.float64),
             'ELLIP': np.asarray(table['ELLIP'], dtype=np.float64),}
+
+
+def _plot_existing_catalogs(args, tracers, zones):
+    samples = {}
+    missing = []
+    for tracer in tracers:
+        for zone in zones:
+            path = _catalog_paths(args.output_root, tracer, zone, args.iteration)['all']
+            if not path.is_file():
+                missing.append(str(path))
+                continue
+            samples[(tracer, zone)] = _catalog_samples(Table.read(path))
+    if missing:
+        raise FileNotFoundError('Cannot use --plot-only; catalog files are missing: '
+                                + ', '.join(missing))
+
+    nonempty_samples = {key: values for key, values in samples.items()
+                        if len(values['R_EFF']) and len(values['ELLIP'])}
+    if not nonempty_samples:
+        raise ValueError('No measurable voids are available for the comparison plot.')
+
+    figure_path = _plot_path(args.output_root, args.iteration)
+    if figure_path.exists() and not args.overwrite:
+        raise FileExistsError(f'Output already exists: {figure_path}. Use --overwrite.')
+    return plot_all_tracers(
+        nonempty_samples,
+        figure_path,
+        iteration=args.iteration,
+        r_threshold=args.r_threshold,
+        ellip_bins=args.ellip_bins,
+        reff_bins=args.reff_bins,
+        n_bootstrap=args.plot_bootstrap_samples,
+        seed=args.plot_seed,
+        min_combined_count=args.min_combined_count,
+        use_tex=not args.no_tex)
 
 
 def run_case(args, tracer, zone):
@@ -268,6 +311,7 @@ def parse_args(argv=None):
     parser.add_argument('--min-combined-count', type=int, default=5)
     parser.add_argument('--no-tex', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--plot-only', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     return parser.parse_args(argv)
 
@@ -276,6 +320,20 @@ def main(argv=None):
     args = parse_args(argv)
     _validate_args(args)
     tracers, zones = _normalized_selection(args)
+
+    if args.plot_only:
+        if args.dry_run:
+            for tracer in tracers:
+                for zone in zones:
+                    path = _catalog_paths(
+                        args.output_root, tracer, zone, args.iteration)['all']
+                    print(f'{TRACER_DISPLAY[tracer]} {zone}: {path}')
+            print(f'Figure: {_plot_path(args.output_root, args.iteration)}')
+            return 0
+        figure_path = _plot_existing_catalogs(args, tracers, zones)
+        print(f'Figure: {figure_path}', flush=True)
+        return 0
+
     _preflight(args, tracers, zones)
 
     if args.dry_run:
