@@ -11,6 +11,12 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+plt.rcParams.update({'font.family': 'serif',
+                         'axes.grid': True,
+                         'grid.alpha': 0.18,
+                         'figure.facecolor': 'black',
+                         'axes.facecolor': 'black',
+                         'savefig.facecolor': 'black'})
 
 from .read_data import TRACER_DISPLAY, normalize_tracer, normalize_zone
 
@@ -123,16 +129,10 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
     if n_bootstrap < 2:
         raise ValueError('n_bootstrap must be at least 2.')
 
-    plt.style.use('dark_background')
+    # plt.style.use('dark_background')
     plt.rcParams.update({'text.usetex': True})
     if not bool(use_tex):
         plt.rcParams.update({'text.usetex': False})
-    plt.rcParams.update({'font.family': 'serif',
-                         'axes.grid': True,
-                         'grid.alpha': 0.18,
-                         'figure.facecolor': 'black',
-                         'axes.facecolor': 'black',
-                         'savefig.facecolor': 'black'})
 
     variable_samples = {
         variable: {key: values[variable] for key, values in samples.items()
@@ -142,7 +142,7 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
     seed_sequence = np.random.SeedSequence(int(seed))
     child_seeds = iter(seed_sequence.spawn(2 * len(samples) + 2 * len(TRACER_COLORS) + 4))
 
-    figure = plt.figure(figsize=(15.5, 6.6))
+    figure = plt.figure(figsize=(15, 6))
     outer = figure.add_gridspec(1, 2, left=0.07, right=0.985, bottom=0.10, top=0.82, wspace=0.16)
     labels = {'ELLIP': r'$\epsilon$', 'R_EFF': r'$R_{\mathrm{eff}}\,[\mathrm{Mpc}/h]$'}
 
@@ -229,7 +229,7 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = output_path.with_name(
             f'.{output_path.stem}.{os.getpid()}{output_path.suffix}')
-        figure.savefig(temporary, dpi=200, bbox_inches='tight')
+        figure.savefig(temporary, dpi=360, bbox_inches='tight')
         os.replace(temporary, output_path)
     finally:
         plt.close(figure)

@@ -713,7 +713,7 @@ def _prune_to_seed_connected_components(group_ids, edges, internal_group_edge,
     if invalid_member.shape != (n_points,):
         raise ValueError('invalid_member must match group_ids.')
     if (internal_group_edge.shape != (len(edges),)
-            or invalid_edge.shape != (len(edges))):
+            or invalid_edge.shape != (len(edges),)):
         raise ValueError('edge masks must match edges.')
     if processing_order.ndim != 1:
         raise ValueError('processing_order must be one-dimensional.')
