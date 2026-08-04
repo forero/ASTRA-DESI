@@ -19,7 +19,7 @@ TRACERS = ['BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
 LOCAL_TRACERS = ['BGS_ANY', 'BGS_BRIGHT', 'BGS_BRIGHT-21.5',
                  'ELG_LOPnotqso', 'LRG', 'QSO']
 REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
-RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
+RANDOM_SUFFIX = {'N': '_NGC_{i}_clustering.ran.fits', 'S': '_SGC_{i}_clustering.ran.fits'}
 N_RANDOM_FILES = 18
 REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
 RANDOM_COLUMNS = REAL_COLUMNS

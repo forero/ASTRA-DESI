@@ -37,7 +37,7 @@ PROJECT_ROOT=$PWD
 MAIN_SCRIPT="${PROJECT_ROOT}/src/main.py"
 MASK_SCRIPT="${PROJECT_ROOT}/src/releases/dr1_mask.py"
 
-CLUSTER_DIR="/global/cfs/cdirs/desi/public/dr1/vac/dr1/lss/guadalupe/v1.0/LSScats/clustering"
+CLUSTER_DIR="/global/cfs/cdirs/desi/public/dr1/survey/catalogs/dr1/LSS/iron/LSScats/v1.5pip"
 SCRATCH_ROOT="/pscratch/sd/v/vtorresg/cosmic-web/dr1"
 
 RAW_OUT="${SCRATCH_ROOT}/raw"
