@@ -81,6 +81,10 @@ python src/main.py \
 
 **DR1 example**
 
+DR1 reads the native `{tracer}_NGC_*` and `{tracer}_SGC_*` catalogues directly;
+it does not derive the two regions from RA/DEC and does not filter ASTRA inputs
+with the auxiliary footprint masks.
+
 ```bash
 python src/main.py \
   --release DR1 \
@@ -90,7 +94,7 @@ python src/main.py \
   --groups-out /path/to/work/dr1/groups \
   --plot-output /path/to/work/dr1/figs \
   --zones NGC SGC \
-  --tracers BGS_BRIGHT ELG \
+  --tracers BGS_ANY BGS_BRIGHT ELG_LOPnotqso LRG QSO \
   --n-random 100 \
   --r-lower -0.9 --r-upper 0.9 \
   --plot
@@ -124,9 +128,13 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
 
 - `jobs/run_edr.sbatch` submits one SLURM array per EDR zone, running the full pipeline
   (including plotting). Scratch outputs are written under `/pscratch/.../edr/`.
-- `jobs/run_dr1.sbatch` is adapted to DR1; edit `ZLABELS` to match the desired
-  zones. The script also enforces
-  `PAIR_NJOBS_CAP`, capping multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
+- `jobs/run_dr1.sbatch` submits a 10-task array covering NGC/SGC for `BGS_ANY`,
+  `BGS_BRIGHT`, `LRG`, `ELG_LOPnotqso`, and `QSO`. Before ASTRA starts, it
+  generates and saves auxiliary bright/dark HEALPix masks under
+  `masks/bright_dark/`. NGC and SGC mask membership comes from the corresponding
+  catalogue filenames, not from an RA/DEC split, and the masks are not applied
+  to ASTRA's input rows. The script also enforces `PAIR_NJOBS_CAP`, capping
+  multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
 - `jobs/run_dr3.sbatch` processes one DR3 tracer/zone in per-iteration shards,
   parallelising shards across the allocated node. Set `TRACER` and `ZONE` at
   submission time; accepted tracer aliases include `LRG`, `ELG`, `QSO`, `BGS`,

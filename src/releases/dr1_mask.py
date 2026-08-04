@@ -24,9 +24,10 @@ from matplotlib.patches import Patch
 
 
 DEFAULT_TILES_PATH = '/global/cfs/cdirs/desi/public/dr1/survey/ops/surveyops/tags/1.0/ops/tiles-main.ecsv'
-DEFAULT_LSS_BASE = '/global/cfs/cdirs/desi/public/dr1/vac/dr1/lss/guadalupe/v1.0/LSScats/clustering'
-PROGRAM_CONFIG = {'bright': {'tile_program': 'BRIGHT', 'tracers': ('BGS_BRIGHT',)},
+DEFAULT_LSS_BASE = '/global/cfs/cdirs/desi/public/dr1/survey/catalogs/dr1/LSS/iron/LSScats/v1.5pip'
+PROGRAM_CONFIG = {'bright': {'tile_program': 'BRIGHT', 'tracers': ('BGS_ANY', 'BGS_BRIGHT')},
                   'dark': {'tile_program': 'DARK', 'tracers': ('LRG', 'ELG_LOPnotqso', 'QSO')},}
+CATALOG_ZONES = ('NGC', 'SGC')
 
 
 def parse_args():
@@ -100,15 +101,18 @@ def read_lss_radec(path):
     return ra[valid], dec[valid], int(valid.sum())
 
 
-def build_lss_count_map(nside, lss_base, tracers):
-    npix = hp.nside2npix(nside)
-    lss_count_map = np.zeros(npix, dtype=np.int32)
+def build_lss_count_maps_by_zone(nside, lss_base, tracers):
+    """Build independent HEALPix count maps from the NGC and SGC catalogues."""
+    count_maps = {
+        zone: np.zeros(hp.nside2npix(nside), dtype=np.int32)
+        for zone in CATALOG_ZONES
+    }
     n_total_rows = 0
     per_file_rows = {}
 
     for tracer in tracers:
-        for region in ('N', 'S'):
-            path = Path(lss_base) / f'{tracer}_{region}_clustering.dat.fits'
+        for zone in CATALOG_ZONES:
+            path = Path(lss_base) / f'{tracer}_{zone}_clustering.dat.fits'
             if not path.exists():
                 raise FileNotFoundError(f'Missing file: {path}')
 
@@ -116,21 +120,14 @@ def build_lss_count_map(nside, lss_base, tracers):
             theta = np.radians(90.0 - dec)
             phi = np.radians(ra)
             pix = hp.ang2pix(nside, theta, phi)
-            lss_count_map += np.bincount(pix, minlength=npix).astype(np.int32, copy=False)
+            count_maps[zone] += np.bincount(
+                pix, minlength=count_maps[zone].size
+            ).astype(np.int32, copy=False)
 
             per_file_rows[path.name] = n_valid
             n_total_rows += n_valid
 
-    return lss_count_map, n_total_rows, per_file_rows
-
-
-def build_ngc_sgc_pixel_masks(nside):
-    npix = hp.nside2npix(nside)
-    theta, phi = hp.pix2ang(nside, np.arange(npix))
-    ra = np.degrees(phi)
-    ngc = (ra > 90.0) & (ra < 300.0)
-    sgc = ~ngc
-    return ngc, sgc
+    return count_maps, n_total_rows, per_file_rows
 
 
 def build_zone_plot_map(mask_ngc, mask_sgc):
@@ -162,7 +159,8 @@ def apply_manual_ra_cut(mask, ra_max_deg=None, nest=False):
 
 def write_program_outputs(out_dir, program_key, nside, tile_count_map, lss_count_map,
                           tile_mask, lss_mask, final_mask, final_ngc, final_sgc,
-                          smoothed_map=None):
+                          smoothed_map=None, lss_count_map_ngc=None,
+                          lss_count_map_sgc=None):
     prefix = out_dir / f'dr1_mask_{program_key}_nside{nside}'
     path_final = Path(f'{prefix}_final.fits')
     path_ngc = Path(f'{prefix}_ngc.fits')
@@ -182,18 +180,25 @@ def write_program_outputs(out_dir, program_key, nside, tile_count_map, lss_count
     hp.write_map(path_sgc, final_sgc.astype(np.int16), overwrite=True, dtype=np.int16, coord='C')
     hp.write_map(path_zones, zone_labels, overwrite=True, dtype=np.int16, coord='C')
 
-    np.savez_compressed(path_npz,
-                        nside=np.int32(nside),
-                        program=np.array(program_key),
-                        tile_count_map=tile_count_map,
-                        lss_count_map=lss_count_map,
-                        tile_mask=tile_mask.astype(np.uint8),
-                        lss_mask=lss_mask.astype(np.uint8),
-                        final_mask=final_mask.astype(np.uint8),
-                        final_mask_ngc=final_ngc.astype(np.uint8),
-                        final_mask_sgc=final_sgc.astype(np.uint8),
-                        final_mask_zones=zone_labels,
-                        smoothed_map=np.asarray(smoothed_map, dtype=np.float32))
+    maps = {
+        'nside': np.int32(nside),
+        'program': np.array(program_key),
+        'zone_source': np.array('catalog_filename'),
+        'tile_count_map': tile_count_map,
+        'lss_count_map': lss_count_map,
+        'tile_mask': tile_mask.astype(np.uint8),
+        'lss_mask': lss_mask.astype(np.uint8),
+        'final_mask': final_mask.astype(np.uint8),
+        'final_mask_ngc': final_ngc.astype(np.uint8),
+        'final_mask_sgc': final_sgc.astype(np.uint8),
+        'final_mask_zones': zone_labels,
+        'smoothed_map': np.asarray(smoothed_map, dtype=np.float32),
+    }
+    if lss_count_map_ngc is not None:
+        maps['lss_count_map_ngc'] = np.asarray(lss_count_map_ngc, dtype=np.int32)
+    if lss_count_map_sgc is not None:
+        maps['lss_count_map_sgc'] = np.asarray(lss_count_map_sgc, dtype=np.int32)
+    np.savez_compressed(path_npz, **maps)
 
     return path_final, path_ngc, path_sgc, path_zones, path_npz
 
@@ -316,7 +321,7 @@ def save_mollweide_two_programs(bright_zone_plot, dark_zone_plot, output_path, d
     plt.close(fig)
 
 
-def process_program(program_key, program_cfg, args, ngc_pix, sgc_pix, out_dir):
+def process_program(program_key, program_cfg, args, out_dir):
     tile_program = program_cfg['tile_program']
     tracers = program_cfg['tracers']
 
@@ -324,24 +329,39 @@ def process_program(program_key, program_cfg, args, ngc_pix, sgc_pix, out_dir):
     tile_count_map = build_tile_count_map(args.nside, tiles, args.tile_radius_deg)
     tile_mask = tile_count_map >= int(args.min_tiles)
 
-    lss_count_map, n_lss, per_file_rows = build_lss_count_map(args.nside, args.lss_base, tracers)
-    lss_mask = lss_count_map >= int(args.min_lss_objects)
+    lss_count_maps, n_lss, per_file_rows = build_lss_count_maps_by_zone(
+        args.nside, args.lss_base, tracers
+    )
+    lss_masks = {
+        zone: lss_count_maps[zone] >= int(args.min_lss_objects)
+        for zone in CATALOG_ZONES
+    }
 
-    final_mask_raw = tile_mask & lss_mask
-    if args.disable_smoothing:
-        final_mask = final_mask_raw.copy()
-        smoothed_map = final_mask_raw.astype(float)
-    else:
-        final_mask, smoothed_map = smooth_and_threshold_mask(
-            final_mask_raw,
-            sigma_deg=args.smooth_sigma_deg,
-            threshold=args.smooth_threshold,
-            nest=False
+    final_by_zone = {}
+    smoothed_by_zone = {}
+    for zone in CATALOG_ZONES:
+        raw_zone_mask = tile_mask & lss_masks[zone]
+        if args.disable_smoothing:
+            final_zone = raw_zone_mask.copy()
+            smoothed_zone = raw_zone_mask.astype(float)
+        else:
+            final_zone, smoothed_zone = smooth_and_threshold_mask(
+                raw_zone_mask,
+                sigma_deg=args.smooth_sigma_deg,
+                threshold=args.smooth_threshold,
+                nest=False
+            )
+        final_by_zone[zone] = apply_manual_ra_cut(
+            final_zone, ra_max_deg=args.manual_ra_cut_max, nest=False
         )
+        smoothed_by_zone[zone] = smoothed_zone
 
-    final_mask = apply_manual_ra_cut(final_mask, ra_max_deg=args.manual_ra_cut_max, nest=False)
-    final_ngc = final_mask & ngc_pix
-    final_sgc = final_mask & sgc_pix
+    final_ngc = final_by_zone['NGC']
+    final_sgc = final_by_zone['SGC']
+    final_mask = final_ngc | final_sgc
+    lss_mask = lss_masks['NGC'] | lss_masks['SGC']
+    lss_count_map = lss_count_maps['NGC'] + lss_count_maps['SGC']
+    smoothed_map = np.maximum(smoothed_by_zone['NGC'], smoothed_by_zone['SGC'])
 
     print(f'[{program_key}] tile program={tile_program} tracers={",".join(tracers)}')
     print(f'[{program_key}] selected tiles={len(tiles)}')
@@ -350,8 +370,7 @@ def process_program(program_key, program_cfg, args, ngc_pix, sgc_pix, out_dir):
         print(f'[{program_key}] {name}: {count}')
     print(f'[{program_key}] tile_mask pixels={int(tile_mask.sum())} ({tile_mask.mean():.4f})')
     print(f'[{program_key}] lss_mask pixels={int(lss_mask.sum())} ({lss_mask.mean():.4f})')
-    print(f'[{program_key}] raw final_mask pixels={int(final_mask_raw.sum())} ({final_mask_raw.mean():.4f})')
-    print(f'[{program_key}] smoothed final_mask pixels={int(final_mask.sum())} ({final_mask.mean():.4f})')
+    print(f'[{program_key}] combined final_mask pixels={int(final_mask.sum())} ({final_mask.mean():.4f})')
     print(f'[{program_key}] final NGC pixels={int(final_ngc.sum())} ({final_ngc.mean():.4f})')
     print(f'[{program_key}] final SGC pixels={int(final_sgc.sum())} ({final_sgc.mean():.4f})')
 
@@ -359,7 +378,9 @@ def process_program(program_key, program_cfg, args, ngc_pix, sgc_pix, out_dir):
                                       tile_count_map, lss_count_map,
                                       tile_mask, lss_mask,
                                       final_mask, final_ngc, final_sgc,
-                                      smoothed_map=smoothed_map)
+                                      smoothed_map=smoothed_map,
+                                      lss_count_map_ngc=lss_count_maps['NGC'],
+                                      lss_count_map_sgc=lss_count_maps['SGC'])
     return final_ngc, final_sgc, out_paths
 
 
@@ -380,16 +401,14 @@ def main():
     print(f'-- smooth_threshold={args.smooth_threshold}')
     print(f'-- manual_ra_cut_max={args.manual_ra_cut_max}')
 
-    ngc_pix, sgc_pix = build_ngc_sgc_pixel_masks(args.nside)
-
     bright_ngc, bright_sgc, bright_paths = process_program('bright',
                                                            PROGRAM_CONFIG['bright'],
                                                            args,
-                                                           ngc_pix, sgc_pix, out_dir)
+                                                           out_dir)
     dark_ngc, dark_sgc, dark_paths = process_program('dark',
                                                      PROGRAM_CONFIG['dark'],
                                                      args,
-                                                     ngc_pix, sgc_pix, out_dir)
+                                                     out_dir)
 
     bright_zone_plot = build_zone_plot_map(bright_ngc, bright_sgc)
     dark_zone_plot = build_zone_plot_map(dark_ngc, dark_sgc)

@@ -15,10 +15,10 @@ from .dr2 import build_raw_dr2_zone
 from .base import ReleaseConfig
 
 
-TRACERS = ['BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
+TRACERS = ['BGS_ANY', 'BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
 LOCAL_TRACERS = ['BGS_ANY', 'BGS_BRIGHT', 'BGS_BRIGHT-21.5',
                  'ELG_LOPnotqso', 'LRG', 'QSO']
-REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
+REAL_SUFFIX = {'N': '_NGC_clustering.dat.fits', 'S': '_SGC_clustering.dat.fits'}
 RANDOM_SUFFIX = {'N': '_NGC_{i}_clustering.ran.fits', 'S': '_SGC_{i}_clustering.ran.fits'}
 N_RANDOM_FILES = 18
 REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
@@ -26,7 +26,8 @@ RANDOM_COLUMNS = REAL_COLUMNS
 DEFAULT_ZONES = ['NGC', 'SGC']
 ZONE_ALIASES = {'NGC': 'NGC', 'SGC': 'SGC'}
 ZONE_VALUES = {'NGC': 1001, 'SGC': 1002}
-TRACER_ALIAS = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso',
+TRACER_ALIAS = {'bgs': 'BGS_BRIGHT', 'bgs_any': 'BGS_ANY',
+                'bgs_bright': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso',
                 'lrg': 'LRG', 'qso': 'QSO'}
 LOCAL_TRACER_ALIAS = {'bgs': 'BGS_BRIGHT',
                       'bgs_any': 'BGS_ANY',
@@ -553,9 +554,6 @@ def create_config(args):
             raise RuntimeError('--config for DR1 must be a JSON object')
         user_cfg = loaded
 
-    local_zone_files = bool(getattr(args, 'local_zone_files', False)
-                            or user_cfg.get('local_zone_files', False))
-
     if args.zones is not None:
         zones = [_normalize_zone_label(z) for z in args.zones]
     elif isinstance(user_cfg.get('zones'), list):
@@ -572,73 +570,38 @@ def create_config(args):
         dedup.append(zone)
     zones = dedup
 
-    if local_zone_files:
-        tracer_ids = {name: idx for idx, name in enumerate(LOCAL_TRACERS)}
-        tracer_full_labels = {}
-        for tracer_name, tracer_idx in tracer_ids.items():
-            tracer_full_labels[(tracer_idx, True)] = tracer_name.encode('ascii')
-            tracer_full_labels[(tracer_idx, False)] = tracer_name.encode('ascii')
-        register_tracer_mapping(tracer_ids, tracer_full_labels)
+    use_extended_tracers = bool(getattr(args, 'local_zone_files', False)
+                                or user_cfg.get('local_zone_files', False))
+    available_tracers = LOCAL_TRACERS if use_extended_tracers else TRACERS
+    tracer_alias = LOCAL_TRACER_ALIAS if use_extended_tracers else TRACER_ALIAS
+    tracer_ids = {name: idx for idx, name in enumerate(available_tracers)}
+    tracer_full_labels = {}
+    for tracer_name, tracer_idx in tracer_ids.items():
+        tracer_full_labels[(tracer_idx, True)] = tracer_name.encode('ascii')
+        tracer_full_labels[(tracer_idx, False)] = tracer_name.encode('ascii')
+    register_tracer_mapping(tracer_ids, tracer_full_labels)
 
-        def _build_local(zone, real_tables, random_tables, sel_tracers,
-                         parsed_args, release_tag):
-            label = _normalize_zone_label(zone)
-            zone_value = ZONE_VALUES.get(label, 1999)
-            return build_raw_dr2_zone(
-                label, sel_tracers, real_tables, random_tables,
-                parsed_args.raw_out, parsed_args.n_random, zone_value,
-                out_tag=parsed_args.out_tag, release_tag=release_tag,
-                tracer_ids=tracer_ids, tracer_full_labels=tracer_full_labels,
-                log_label='dr1-local')
-
-        preload_kwargs = {
-            'real_template': '{tracer}_{zone}_clustering.dat.fits',
-            'random_template': '{tracer}_{zone}_{idx}_clustering.ran.fits',
-            'log_label': 'dr1-local',
-            'zones_to_keep': zones,
-        }
-        return ReleaseConfig(
-            name='DR1', release_tag='DR1', tracers=LOCAL_TRACERS,
-            tracer_alias=LOCAL_TRACER_ALIAS, real_suffix=None, random_suffix=None,
-            n_random_files=N_RANDOM_FILES, real_columns=REAL_COLUMNS,
-            random_columns=RANDOM_COLUMNS, use_dr2_preload=True,
-            preload_kwargs=preload_kwargs, zones=zones,
-            build_raw=_build_local, combine_outputs=False)
-
-    mask_dir = _resolve_mask_dir(args, user_cfg)
-    all_masks, mask_paths, mask_nside = _load_dr1_masks(mask_dir)
-
-    for program in MASK_PROGRAMS:
-        for zone in DEFAULT_ZONES:
-            path = mask_paths[program][zone]
-            pix = int(all_masks[program][zone].sum())
-            print(f'[dr1] mask {program}/{zone}: {path} (pixels={pix})', flush=True)
-    print(f'[dr1] using DR1 mask_dir={mask_dir} nside={mask_nside}', flush=True)
-
-    def _build(zone, real_tables, random_tables, sel_tracers, parsed_args, release_tag):
-        """
-        Build the raw table for a given zone.
-
-        Args:
-            zone: Zone label.
-            real_tables: Dictionary with real tables per tracer.
-            random_tables: Dictionary with random tables per tracer.
-            sel_tracers: List of selected tracers to process.
-            parsed_args: Parsed command line arguments.
-            release_tag: Release tag string or None.
-        Returns:
-            The combined table written to disk.
-        """
+    def _build(zone, real_tables, random_tables, sel_tracers,
+               parsed_args, release_tag):
         label = _normalize_zone_label(zone)
-        zone_value = ZONE_VALUES.get(label, 9999)
-        zone_masks = {program: all_masks[program][label] for program in MASK_PROGRAMS}
-        return build_raw_region(label, 'ALL', sel_tracers, real_tables, random_tables,
-                                parsed_args.raw_out, parsed_args.n_random, zone_value,
-                                out_tag=parsed_args.out_tag, release_tag=release_tag,
-                                zone_masks=zone_masks, nside=mask_nside)
+        zone_value = ZONE_VALUES.get(label, 1999)
+        return build_raw_dr2_zone(
+            label, sel_tracers, real_tables, random_tables,
+            parsed_args.raw_out, parsed_args.n_random, zone_value,
+            out_tag=parsed_args.out_tag, release_tag=release_tag,
+            tracer_ids=tracer_ids, tracer_full_labels=tracer_full_labels,
+            log_label='dr1')
 
-    return ReleaseConfig(name='DR1', release_tag='DR1', tracers=TRACERS, tracer_alias=TRACER_ALIAS,
-                         real_suffix=REAL_SUFFIX, random_suffix=RANDOM_SUFFIX,
-                         n_random_files=N_RANDOM_FILES, real_columns=REAL_COLUMNS,
-                         random_columns=RANDOM_COLUMNS, use_dr2_preload=False,
-                         preload_kwargs={}, zones=zones, build_raw=_build)
+    preload_kwargs = {
+        'real_template': '{tracer}_{zone}_clustering.dat.fits',
+        'random_template': '{tracer}_{zone}_{idx}_clustering.ran.fits',
+        'log_label': 'dr1',
+        'zones_to_keep': zones,
+    }
+    return ReleaseConfig(
+        name='DR1', release_tag='DR1', tracers=available_tracers,
+        tracer_alias=tracer_alias, real_suffix=None, random_suffix=None,
+        n_random_files=N_RANDOM_FILES, real_columns=REAL_COLUMNS,
+        random_columns=RANDOM_COLUMNS, use_dr2_preload=True,
+        preload_kwargs=preload_kwargs, zones=zones,
+        build_raw=_build, combine_outputs=False)

@@ -574,7 +574,7 @@ def main():
                        help='Override the default chunk size used when writing FITS outputs.')
 
         p.add_argument('--release', choices=['EDR','DR1','DR2','DR3'], default='EDR',
-                       help='Data release: EDR (rosettes), DR1 (mask-based NGC/SGC), DR2 (full-sky NGC/SGC split), DR3 (nonKP clustering)')
+                       help='Data release: EDR (rosettes), DR1 (native NGC/SGC catalogues), DR2 (full-sky NGC/SGC split), DR3 (nonKP clustering)')
         p.add_argument('--region', choices=['N','S'], default='N',
                        help='Legacy argument kept for compatibility; ignored by DR1/DR2/DR3.')
         p.add_argument('--zones', nargs='+', type=str, default=None,
@@ -582,8 +582,8 @@ def main():
         p.add_argument('--config', type=str, default=None,
                        help='Optional DR1 JSON config (e.g., {"mask_dir": "...", "zones": ["NGC","SGC"]}).')
         p.add_argument('--local-zone-files', action='store_true',
-                       help='For DR1 local catalogues already split into NGC/SGC; read '
-                            '{tracer}_{zone}_clustering.dat.fits directly and skip NERSC masks/emline data.')
+                       help='DR1 compatibility option enabling the extended local tracer list; '
+                            'DR1 always reads native {tracer}_{zone} files without RA/DEC or mask filtering.')
 
         args = p.parse_args()
 
