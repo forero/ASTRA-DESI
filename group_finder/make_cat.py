@@ -7,19 +7,15 @@ from astropy.cosmology import Planck18
 from astropy.table import Table
 import numpy as np
 
-from .shapes import (DEFAULT_BOOTSTRAP_SEED,
-                     DEFAULT_MAX_ELLIPTICITY_SIGMA,
-                     DEFAULT_MAX_RELATIVE_R_EFF_SIGMA,
-                     DEFAULT_MIN_RANDOM_MEMBERS,
-                     DEFAULT_MIN_VALID_BOOTSTRAP_FRACTION,
-                     DEFAULT_N_BOOTSTRAP,
-                     VoidShapes,
+from .shapes import (VoidShapes,
                      compute_void_shapes)
 
 from .read_data import TRACER_CODES, normalize_tracer, normalize_zone
 
 
-REQUIRED_COLUMNS = ('VOID_ID', 'RA', 'DEC', 'REDSHIFT', 'R_EFF', 'ELLIP')
+REQUIRED_COLUMNS = ('VOID_ID', 'XCART', 'YCART', 'ZCART', 'R_EFF', 'ELLIP')
+MEMBERSHIP_REQUIRED_COLUMNS = ('TARGETID', 'RA', 'DEC', 'Z', 'RANDITER',
+                               'GROUP_ID', 'VOID_ID', 'MEMBER')
 R_EFF_DEFINITION = ('sqrt(5)*(lambda_1*lambda_2*lambda_3)**(1/6)')
 ELLIPTICITY_DEFINITION = ('1-((lambda_3+lambda_2)/(lambda_2+lambda_1))**(1/4)')
 
@@ -28,32 +24,6 @@ ELLIPTICITY_DEFINITION = ('1-((lambda_3+lambda_2)/(lambda_2+lambda_1))**(1/4)')
 class VoidCatalogs:
     all_voids: Table
     clean_voids: Table
-
-
-def comoving_distance_to_redshift(distance_mpc, cosmology=Planck18, n_grid: int = 20_000):
-
-    distance = np.asarray(distance_mpc, dtype=np.float64)
-    result = np.full(distance.shape, np.nan, dtype=np.float64)
-    finite = np.isfinite(distance)
-    if np.any(distance[finite] < 0.0):
-        raise ValueError('Comoving distances cannot be negative.')
-    if not np.any(finite):
-        return result
-    maximum = float(np.max(distance[finite]))
-    if maximum == 0.0:
-        result[finite] = 0.0
-        return result
-
-    n_grid = max(int(n_grid), 2)
-    z_max = 2.0
-    z_grid = np.linspace(0.0, z_max, n_grid)
-    chi_grid = cosmology.comoving_distance(z_grid).to_value(u.Mpc)
-    while chi_grid[-1] < maximum:
-        z_max *= 2.0
-        z_grid = np.linspace(0.0, z_max, n_grid)
-        chi_grid = cosmology.comoving_distance(z_grid).to_value(u.Mpc)
-    result[finite] = np.interp(distance[finite], chi_grid, z_grid)
-    return result
 
 
 def _global_void_ids(group_ids, tracer, zone, iteration):
@@ -77,9 +47,9 @@ def _global_void_ids(group_ids, tracer, zone, iteration):
 def _empty_catalog(include_border):
     table = Table()
     table['VOID_ID'] = np.empty(0, dtype=np.int64)
-    table['RA'] = np.empty(0, dtype=np.float64)
-    table['DEC'] = np.empty(0, dtype=np.float64)
-    table['REDSHIFT'] = np.empty(0, dtype=np.float64)
+    table['XCART'] = np.empty(0, dtype=np.float64)
+    table['YCART'] = np.empty(0, dtype=np.float64)
+    table['ZCART'] = np.empty(0, dtype=np.float64)
     table['R_EFF'] = np.empty(0, dtype=np.float64)
     table['ELLIP'] = np.empty(0, dtype=np.float64)
     if include_border:
@@ -96,14 +66,13 @@ def _set_catalog_metadata(table, tracer, zone, iteration, h, kind):
                        'REFF_DEF': R_EFF_DEFINITION,
                        'ELLIPDF': ELLIPTICITY_DEFINITION,
                        'REFFUNIT': 'Mpc/h',
+                       'XYZUNIT': 'Mpc/h',
                        'CENTER': 'mean retained random-member Cartesian position',
                        'SHAPEPTS': 'retained random members'})
-    table['RA'].unit = u.deg
-    table['DEC'].unit = u.deg
 
 
 def build_void_catalogs(shapes: VoidShapes, border_group_ids, tracer, zone, iteration,
-                        h = float(Planck18.h), cosmology=Planck18) -> VoidCatalogs:
+                        h = float(Planck18.h)) -> VoidCatalogs:
 
     if not isinstance(shapes, VoidShapes):
         raise TypeError('shapes must be a VoidShapes instance.')
@@ -114,13 +83,7 @@ def build_void_catalogs(shapes: VoidShapes, border_group_ids, tracer, zone, iter
     zone = normalize_zone(zone)
     iteration = int(iteration)
 
-    valid = (np.asarray(shapes.valid_shape, dtype=bool)
-             & np.isfinite(shapes.r_eff)
-             & (np.asarray(shapes.r_eff) > 0.0)
-             & np.isfinite(shapes.ellipticity)
-             & np.all(np.isfinite(shapes.center), axis=1))
-
-    if not np.any(valid):
+    if len(shapes.group_id) == 0:
         all_voids = _empty_catalog(include_border=True)
         clean_voids = _empty_catalog(include_border=False)
         _set_catalog_metadata(
@@ -129,27 +92,18 @@ def build_void_catalogs(shapes: VoidShapes, border_group_ids, tracer, zone, iter
             clean_voids, tracer, zone, iteration, h, 'clean')
         return VoidCatalogs(all_voids, clean_voids)
 
-    group_ids = np.asarray(shapes.group_id[valid], dtype=np.int64)
-    centers_mpc_h = np.asarray(shapes.center[valid], dtype=np.float64)
-    radius_mpc_h = np.linalg.norm(centers_mpc_h, axis=1)
-    nonzero = radius_mpc_h > 0.0
-    if not np.all(nonzero):
-        raise ValueError('A valid void center cannot lie at the origin.')
-
-    ra = np.degrees(np.arctan2(centers_mpc_h[:, 1], centers_mpc_h[:, 0],)) % 360.0
-    dec = np.degrees(np.arcsin(np.clip(centers_mpc_h[:, 2] / radius_mpc_h,
-                                       -1.0, 1.0)))
-    redshift = comoving_distance_to_redshift(radius_mpc_h / h, cosmology=cosmology)
+    group_ids = np.asarray(shapes.group_id, dtype=np.int64)
+    centers_mpc_h = np.asarray(shapes.center, dtype=np.float64)
     border_ids = np.asarray(border_group_ids, dtype=np.int64).reshape(-1)
     border = np.isin(group_ids, border_ids)
 
     all_voids = Table()
     all_voids['VOID_ID'] = _global_void_ids(group_ids, tracer=tracer, zone=zone, iteration=iteration)
-    all_voids['RA'] = ra
-    all_voids['DEC'] = dec
-    all_voids['REDSHIFT'] = redshift
-    all_voids['R_EFF'] = np.asarray(shapes.r_eff[valid], dtype=np.float64)
-    all_voids['ELLIP'] = np.asarray(shapes.ellipticity[valid], dtype=np.float64)
+    all_voids['XCART'] = centers_mpc_h[:, 0]
+    all_voids['YCART'] = centers_mpc_h[:, 1]
+    all_voids['ZCART'] = centers_mpc_h[:, 2]
+    all_voids['R_EFF'] = np.asarray(shapes.r_eff, dtype=np.float64)
+    all_voids['ELLIP'] = np.asarray(shapes.ellipticity, dtype=np.float64)
     all_voids['BORDER'] = border
     _set_catalog_metadata(
         all_voids, tracer, zone, iteration, h, 'all_survivors')
@@ -162,6 +116,83 @@ def build_void_catalogs(shapes: VoidShapes, border_group_ids, tracer, zone, iter
     if len(np.unique(all_voids['VOID_ID'])) != len(all_voids):
         raise RuntimeError('VOID_ID generation produced duplicate IDs.')
     return VoidCatalogs(all_voids, clean_voids)
+
+
+def build_random_membership_catalog(randoms, group_ids, group_ids_before_mask,
+                                    r_values, threshold_selected,
+                                    selection_pruned_member, border_group_ids,
+                                    tracer, zone, iteration) -> Table:
+    """Build one row per input random, including unassigned randoms."""
+
+    required_input = ('TARGETID', 'RA', 'DEC', 'Z', 'XCART', 'YCART', 'ZCART')
+    names = getattr(getattr(randoms, 'dtype', None), 'names', None)
+    if names is None:
+        raise TypeError('randoms must be a structured array.')
+    missing = [name for name in required_input if name not in names]
+    if missing:
+        raise ValueError('Random input is missing membership columns: '
+                         + ', '.join(missing))
+
+    n_random = len(randoms)
+
+    def aligned(values, name, dtype):
+        result = np.asarray(values, dtype=dtype)
+        if result.shape != (n_random,):
+            raise ValueError(f'{name} must have one value per random point.')
+        return result
+
+    group_ids = aligned(group_ids, 'group_ids', np.int64)
+    pre_mask_ids = aligned(group_ids_before_mask,
+                           'group_ids_before_mask', np.int64)
+    r_values = aligned(r_values, 'r_values', np.float64)
+    threshold_selected = aligned(threshold_selected,
+                                 'threshold_selected', bool)
+    selection_pruned = aligned(selection_pruned_member,
+                               'selection_pruned_member', bool)
+    if not np.all(np.isfinite(r_values)):
+        raise ValueError('r_values must be finite.')
+    if np.any(group_ids < -1) or np.any(pre_mask_ids < -1):
+        raise ValueError('Group IDs must be -1 or non-negative.')
+
+    tracer = normalize_tracer(tracer)
+    zone = normalize_zone(zone)
+    iteration = int(iteration)
+    member = group_ids >= 0
+    void_ids = np.full(n_random, -1, dtype=np.int64)
+    void_ids[member] = _global_void_ids(group_ids[member], tracer=tracer,
+                                        zone=zone, iteration=iteration)
+
+    border_ids = np.asarray(border_group_ids, dtype=np.int64).reshape(-1)
+    touched_border = ((pre_mask_ids >= 0)
+                      & np.isin(pre_mask_ids, border_ids))
+    table = Table()
+    table['TARGETID'] = np.asarray(randoms['TARGETID'])
+    table['RA'] = np.asarray(randoms['RA'], dtype=np.float64)
+    table['DEC'] = np.asarray(randoms['DEC'], dtype=np.float64)
+    table['Z'] = np.asarray(randoms['Z'], dtype=np.float64)
+    table['XCART'] = np.asarray(randoms['XCART'], dtype=np.float64)
+    table['YCART'] = np.asarray(randoms['YCART'], dtype=np.float64)
+    table['ZCART'] = np.asarray(randoms['ZCART'], dtype=np.float64)
+    table['RANDITER'] = np.full(n_random, iteration, dtype=np.int32)
+    table['R_VALUE'] = r_values
+    table['THRESHOLD_SELECTED'] = threshold_selected
+    table['GROUP_ID_PREMASK'] = pre_mask_ids
+    table['GROUP_ID'] = group_ids
+    table['VOID_ID'] = void_ids
+    table['MEMBER'] = member
+    table['PRUNED_BY_MASK'] = selection_pruned
+    table['BORDER'] = touched_border
+    table.meta.update({'TRACER': tracer,
+                       'ZONE': zone,
+                       'RANDITER': iteration,
+                       'CAT_KIND': 'random_membership',
+                       'UNASSIGN': -1,
+                       'GRPSTATE': 'GROUP_ID is final post-mask membership',
+                       'PREMASK': 'GROUP_ID_PREMASK is membership before selection pruning',
+                       'BORDER': 'pre-mask group touched angular/radial selection'})
+    table['RA'].unit = u.deg
+    table['DEC'].unit = u.deg
+    return table
 
 
 def write_void_catalog(path, table: Table, overwrite: bool = False) -> Path:
@@ -187,18 +218,41 @@ def write_void_catalog(path, table: Table, overwrite: bool = False) -> Path:
     return path
 
 
-__all__ = ['DEFAULT_BOOTSTRAP_SEED',
-           'DEFAULT_MAX_ELLIPTICITY_SIGMA',
-           'DEFAULT_MAX_RELATIVE_R_EFF_SIGMA',
-           'DEFAULT_MIN_RANDOM_MEMBERS',
-           'DEFAULT_MIN_VALID_BOOTSTRAP_FRACTION',
-           'DEFAULT_N_BOOTSTRAP',
-           'ELLIPTICITY_DEFINITION',
+def write_membership_catalog(path, table: Table,
+                             overwrite: bool = False) -> Path:
+    path = Path(path)
+    if path.suffix.lower() not in ('.fits', '.fit'):
+        raise ValueError('Membership catalog output must use .fits or .fit.')
+    if path.exists() and not overwrite:
+        raise FileExistsError(
+            f'Output already exists: {path}. Use --overwrite to replace it.')
+    missing = [name for name in MEMBERSHIP_REQUIRED_COLUMNS
+               if name not in table.colnames]
+    if missing:
+        raise ValueError('Membership catalog is missing required columns: '
+                         + ', '.join(missing))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp.fits')
+    try:
+        table.write(temporary, format='fits', overwrite=True)
+        if path.exists() and not overwrite:
+            raise FileExistsError(f'Output already exists: {path}.')
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return path
+
+
+__all__ = ['ELLIPTICITY_DEFINITION',
+           'MEMBERSHIP_REQUIRED_COLUMNS',
            'REQUIRED_COLUMNS',
            'R_EFF_DEFINITION',
            'VoidCatalogs',
            'VoidShapes',
+           'build_random_membership_catalog',
            'build_void_catalogs',
-           'comoving_distance_to_redshift',
            'compute_void_shapes',
+           'write_membership_catalog',
            'write_void_catalog']

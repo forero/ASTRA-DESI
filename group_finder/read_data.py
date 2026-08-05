@@ -21,8 +21,8 @@ RAW_COLUMNS = ('TARGETID', 'RA', 'DEC', 'Z', 'XCART', 'YCART', 'ZCART')
 
 def _decode_text(value):
     if isinstance(value, (bytes, np.bytes_)):
-        return value.decode('utf-8').strip()
-    return str(value).strip()
+        return value.decode('utf-8').strip(' \x00')
+    return str(value).strip(' \x00')
 
 
 def normalize_zone(value):
@@ -48,8 +48,38 @@ def normalize_tracer(value):
     return aliases[upper]
 
 
-def raw_zone_path(raw_dir, zone):
-    return Path(raw_dir) / f'zone_{normalize_zone(zone)}.fits.gz'
+def raw_tracer_label_pairs(value):
+    """Return accepted (data, random) TRACERTYPE pairs in lookup order."""
+    tracer = normalize_tracer(value)
+    display = TRACER_DISPLAY[tracer]
+    pairs = [(tracer, tracer), (display, display)]
+    if display == 'BGS':
+        pairs.append(('BGS_ANY_DATA', 'BGS_ANY_RAND'))
+    else:
+        pairs.append((f'{display}_DATA', f'{display}_RAND'))
+    return tuple(dict.fromkeys(pairs))
+
+
+def raw_random_tracer_labels(value):
+    return tuple(dict.fromkeys(
+        random_label for _, random_label in raw_tracer_label_pairs(value)))
+
+
+def raw_zone_path(raw_dir, zone, tracer=None):
+    raw_dir = Path(raw_dir)
+    zone = normalize_zone(zone)
+    combined = raw_dir / f'zone_{zone}.fits.gz'
+    if combined.is_file() or tracer is None:
+        return combined
+
+    tracer = normalize_tracer(tracer)
+    label = TRACER_DISPLAY[tracer]
+    split_candidates = (raw_dir / f'zone_{zone}_{label}.fits.gz',
+                        raw_dir / f'zone_{zone}_{label}_xyz.fits.gz')
+    for candidate in split_candidates:
+        if candidate.is_file():
+            return candidate
+    return combined
 
 
 def _row_key(hdu, row):
@@ -83,14 +113,33 @@ def read_raw_realization(path, tracer, iteration):
 
     with fitsio.FITS(str(path)) as raw:
         hdu = raw[1]
-        data_start = _lower_bound(hdu, (tracer, -1))
-        data_stop = _lower_bound(hdu, (tracer, 0))
-        random_start = _lower_bound(hdu, (tracer, iteration))
-        random_stop = _lower_bound(hdu, (tracer, iteration + 1))
-        if data_start == data_stop:
-            raise ValueError(f'No object rows found for tracer={tracer}.')
-        if random_start == random_stop:
-            raise ValueError(f'No random rows found for tracer={tracer}, RANDITER={iteration}.')
+        found_data = False
+        source_data_tracer = None
+        source_random_tracer = None
+        for data_label, random_label in raw_tracer_label_pairs(tracer):
+            data_start = _lower_bound(hdu, (data_label, -1))
+            data_stop = _lower_bound(hdu, (data_label, 0))
+            if data_start == data_stop:
+                continue
+            found_data = True
+            random_start = _lower_bound(hdu, (random_label, iteration))
+            random_stop = _lower_bound(hdu, (random_label, iteration + 1))
+            if random_start == random_stop:
+                continue
+            source_data_tracer = data_label
+            source_random_tracer = random_label
+            break
+
+        if source_data_tracer is None:
+            pairs = ', '.join(
+                f'{data}/{random}'
+                for data, random in raw_tracer_label_pairs(tracer))
+            if not found_data:
+                raise ValueError(
+                    f'No object rows found for TRACERTYPE pairs ({pairs}).')
+            raise ValueError(
+                f'No random rows found for TRACERTYPE pairs ({pairs}), '
+                f'RANDITER={iteration}.')
 
         objects = hdu.read(columns=list(RAW_COLUMNS), rows=np.arange(data_start, data_stop, dtype=np.int64))
         randoms = hdu.read(columns=list(RAW_COLUMNS), rows=np.arange(random_start, random_stop, dtype=np.int64))
@@ -103,6 +152,8 @@ def read_raw_realization(path, tracer, iteration):
         table_header.get('RELEASE', primary_header.get('RELEASE', 'UNKNOWN')))
     return objects, randoms, {'input': str(path),
                               'tracer': tracer,
+                              'source_data_tracer': source_data_tracer,
+                              'source_random_tracer': source_random_tracer,
                               'zone': zone,
                               'release': release,
                               'iteration': iteration,
@@ -131,5 +182,7 @@ __all__ = ['RAW_COLUMNS',
            'cartesian_positions',
            'normalize_tracer',
            'normalize_zone',
+           'raw_random_tracer_labels',
+           'raw_tracer_label_pairs',
            'raw_zone_path',
            'read_raw_realization']

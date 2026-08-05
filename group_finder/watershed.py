@@ -9,6 +9,7 @@ import healpy as hp
 import numpy as np
 
 from .astra import (GroupFinderResult, UNASSIGNED)
+from .read_data import raw_random_tracer_labels
 
 
 DEFAULT_HEALPIX_NSIDE = 128
@@ -145,8 +146,8 @@ def _positive_finite(value, name):
 
 def _decode_text(value):
     if isinstance(value, (bytes, np.bytes_)):
-        return value.decode('utf-8').strip()
-    return str(value).strip()
+        return value.decode('utf-8').strip(' \x00')
+    return str(value).strip(' \x00')
 
 
 def _row_key(hdu, row):
@@ -334,10 +335,17 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
             raise KeyError(
                 f'Raw FITS is missing mask columns: {", ".join(sorted(missing))}.')
 
-        start = _lower_bound(hdu, (tracer, 0))
-        stop = _lower_bound(hdu, (tracer, np.iinfo(np.int64).max))
-        if start == stop:
-            raise ValueError(f'No random rows found for TRACERTYPE={tracer!r}.')
+        source_tracer = None
+        for candidate in raw_random_tracer_labels(tracer):
+            start = _lower_bound(hdu, (candidate, 0))
+            stop = _lower_bound(hdu, (candidate, np.iinfo(np.int64).max))
+            if start != stop:
+                source_tracer = candidate
+                break
+        if source_tracer is None:
+            labels = ', '.join(raw_random_tracer_labels(tracer))
+            raise ValueError(
+                f'No random rows found for TRACERTYPE in ({labels}).')
 
         first_iteration = _row_key(hdu, start)[1]
         last_iteration = _row_key(hdu, stop - 1)[1]
@@ -407,6 +415,7 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
 
     metadata = {**expected,
                 'kind': 'all-random-angular-radial-counts',
+                'source_tracer': source_tracer,
                 'row_range': {'start': int(start), 'stop': int(stop)},
                 'first_randiter': int(first_iteration),
                 'last_randiter': int(last_iteration),

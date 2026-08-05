@@ -10,16 +10,12 @@ from astropy.table import Table
 import numpy as np
 
 from .astra import run_group_finder
-from .make_cat import (DEFAULT_BOOTSTRAP_SEED,
-                       DEFAULT_MAX_ELLIPTICITY_SIGMA,
-                       DEFAULT_MAX_RELATIVE_R_EFF_SIGMA,
-                       DEFAULT_MIN_RANDOM_MEMBERS,
-                       DEFAULT_MIN_VALID_BOOTSTRAP_FRACTION,
-                       DEFAULT_N_BOOTSTRAP,
-                       ELLIPTICITY_DEFINITION,
+from .make_cat import (ELLIPTICITY_DEFINITION,
                        R_EFF_DEFINITION,
+                       build_random_membership_catalog,
                        build_void_catalogs,
                        compute_void_shapes,
+                       write_membership_catalog,
                        write_void_catalog)
 from .plotting import plot_all_tracers
 from .read_data import (TRACER_DISPLAY,
@@ -51,7 +47,8 @@ def _catalog_paths(output_root,tracer, zone, iteration):
     base = Path(output_root) / 'catalogs' / label / zone
     stem = f'{label}_{zone}_iter{int(iteration):03d}'
     return {'all': base / f'{stem}_all.fits',
-            'clean': base / f'{stem}_clean.fits'}
+            'clean': base / f'{stem}_clean.fits',
+            'membership': base / f'{stem}_membership.fits'}
 
 
 def _plot_path(output_root, iteration):
@@ -110,8 +107,6 @@ def _validate_args(args):
                  'healpix_nside',
                  'min_randoms_per_pixel',
                  'min_randoms_per_radial_bin',
-                 'min_random_shape',
-                 'shape_bootstrap_samples',
                  'plot_bootstrap_samples',
                  'ellip_bins',
                  'reff_bins',
@@ -119,12 +114,8 @@ def _validate_args(args):
 
         if int(getattr(args, name)) < 1:
             raise ValueError(f'--{name.replace("_", "-")} must be positive.')
-    if args.shape_bootstrap_samples < 2:
-        raise ValueError('--shape-bootstrap-samples must be at least 2.')
     if args.plot_bootstrap_samples < 2:
         raise ValueError('--plot-bootstrap-samples must be at least 2.')
-    if args.min_random_shape < 4:
-        raise ValueError('--min-random-shape must be at least 4.')
     if args.radial_bin_width <= 0.0:
         raise ValueError('--radial-bin-width must be positive.')
     if args.h <= 0.0:
@@ -145,8 +136,11 @@ def _preflight(args, tracers, zones):
 
 
 def _catalog_samples(table):
-    return {'R_EFF': np.asarray(table['R_EFF'], dtype=np.float64),
-            'ELLIP': np.asarray(table['ELLIP'], dtype=np.float64),}
+    radius = np.asarray(table['R_EFF'], dtype=np.float64)
+    ellipticity = np.asarray(table['ELLIP'], dtype=np.float64)
+    finite = np.isfinite(radius) & np.isfinite(ellipticity)
+    return {'R_EFF': radius[finite],
+            'ELLIP': ellipticity[finite]}
 
 
 def _plot_existing_catalogs(args, tracers, zones):
@@ -188,7 +182,7 @@ def run_case(args, tracer, zone):
 
     tracer = normalize_tracer(tracer)
     zone = normalize_zone(zone)
-    input_path = raw_zone_path(args.raw_dir, zone)
+    input_path = raw_zone_path(args.raw_dir, zone, tracer=tracer)
     started = time.time()
     print(f'[{TRACER_DISPLAY[tracer]} {zone}] reading objects and '
           f'RANDITER={args.iteration}', flush=True)
@@ -226,23 +220,30 @@ def run_case(args, tracer, zone):
     shapes = compute_void_shapes(positions=result.graph.positions,
                                  is_data=result.graph.is_data,
                                  group_ids=result.grouping.group_ids,
-                                 coordinate_scale=args.h,
-                                 min_random_members=args.min_random_shape,
-                                 n_bootstrap=args.shape_bootstrap_samples,
-                                 bootstrap_seed=args.shape_bootstrap_seed,
-                                 max_relative_r_eff_sigma=args.max_relative_r_eff_sigma,
-                                 max_ellipticity_sigma=args.max_ellipticity_sigma,
-                                 min_valid_bootstrap_fraction=args.min_valid_bootstrap_fraction)
+                                 coordinate_scale=args.h)
     catalogs = build_void_catalogs(shapes,
                                    border_group_ids=masked.edge_group_ids,
                                    tracer=tracer,
                                    zone=zone,
                                    iteration=args.iteration,
-                                   h=args.h,
-                                   cosmology=Planck18)
+                                   h=args.h)
+    random_start = int(result.graph.n_data)
+    membership = build_random_membership_catalog(
+        randoms=randoms,
+        group_ids=result.grouping.group_ids[random_start:],
+        group_ids_before_mask=masked.group_ids_before_mask[random_start:],
+        r_values=result.grouping.r_values[random_start:],
+        threshold_selected=result.grouping.threshold_selected[random_start:],
+        selection_pruned_member=masked.selection_pruned_member[random_start:],
+        border_group_ids=masked.edge_group_ids,
+        tracer=tracer,
+        zone=zone,
+        iteration=args.iteration)
     paths = _catalog_paths(args.output_root, tracer, zone, args.iteration)
     write_void_catalog(paths['all'], catalogs.all_voids, overwrite=args.overwrite)
     write_void_catalog(paths['clean'], catalogs.clean_voids, overwrite=args.overwrite)
+    write_membership_catalog(paths['membership'], membership,
+                             overwrite=args.overwrite)
 
     summary = {'tracer': tracer,
                'display_tracer': TRACER_DISPLAY[tracer],
@@ -250,6 +251,8 @@ def run_case(args, tracer, zone):
                'iteration': int(args.iteration),
                'input': input_path,
                'release': raw_metadata['release'],
+               'source_data_tracer': raw_metadata['source_data_tracer'],
+               'source_random_tracer': raw_metadata['source_random_tracer'],
                'n_data': int(result.graph.n_data),
                'n_random': int(result.graph.n_random),
                'n_edges': int(len(result.graph.edges)),
@@ -262,13 +265,17 @@ def run_case(args, tracer, zone):
                'n_groups_pruned': int(len(masked.pruned_group_ids)),
                'n_groups_discarded': int(len(masked.discarded_group_ids)),
                'n_groups_after_mask': int(len(result.grouping.group_sizes)),
-               'n_valid_shapes': int(np.count_nonzero(shapes.valid_shape)),
+               'n_defined_shapes': int(np.count_nonzero(
+                   np.isfinite(shapes.r_eff) & np.isfinite(shapes.ellipticity))),
                'n_catalog_all': int(len(catalogs.all_voids)),
                'n_catalog_border': int(np.count_nonzero(
                    catalogs.all_voids['BORDER'])),
                'n_catalog_clean': int(len(catalogs.clean_voids)),
                'all_catalog': paths['all'],
                'clean_catalog': paths['clean'],
+               'membership_catalog': paths['membership'],
+               'n_random_membership_rows': int(len(membership)),
+               'n_random_assigned': int(np.count_nonzero(membership['MEMBER'])),
                'mask_random_iterations': int(selection.n_random_iterations),
                'elapsed_seconds': float(time.time() - started)}
 
@@ -297,12 +304,6 @@ def parse_args(argv=None):
     parser.add_argument('--mask-cache', default='temp/group_finder/healpix_masks')
     parser.add_argument('--mask-chunk-size', type=int, default=1_000_000)
     parser.add_argument('--edge-chunk-size', type=int, default=250_000)
-    parser.add_argument('--min-random-shape', type=int, default=DEFAULT_MIN_RANDOM_MEMBERS)
-    parser.add_argument('--shape-bootstrap-samples', type=int, default=DEFAULT_N_BOOTSTRAP)
-    parser.add_argument('--shape-bootstrap-seed', type=int, default=DEFAULT_BOOTSTRAP_SEED)
-    parser.add_argument('--max-relative-r-eff-sigma', type=float, default=DEFAULT_MAX_RELATIVE_R_EFF_SIGMA)
-    parser.add_argument('--max-ellipticity-sigma', type=float, default=DEFAULT_MAX_ELLIPTICITY_SIGMA)
-    parser.add_argument('--min-valid-bootstrap-fraction', type=float, default=DEFAULT_MIN_VALID_BOOTSTRAP_FRACTION)
     parser.add_argument('--h', type=float, default=float(Planck18.h))
     parser.add_argument('--ellip-bins', type=int, default=30)
     parser.add_argument('--reff-bins', type=int, default=30)
@@ -341,8 +342,9 @@ def main(argv=None):
             for zone in zones:
                 paths = _catalog_paths(args.output_root, tracer, zone, args.iteration)
                 print(f'{TRACER_DISPLAY[tracer]} {zone}: '
-                      f'{raw_zone_path(args.raw_dir, zone)} -> '
-                      f'{paths["all"]}, {paths["clean"]}')
+                      f'{raw_zone_path(args.raw_dir, zone, tracer=tracer)} -> '
+                      f'{paths["all"]}, {paths["clean"]}, '
+                      f'{paths["membership"]}')
         print(f'Figure: {_plot_path(args.output_root, args.iteration)}')
         return 0
 
@@ -361,7 +363,7 @@ def main(argv=None):
     nonempty_samples = {key: values for key, values in samples.items()
                         if len(values['R_EFF']) and len(values['ELLIP'])}
     if not nonempty_samples:
-        raise ValueError('No measurable post-mask voids remain for the comparison plot.')
+        raise ValueError('No finite post-mask void shapes remain for the comparison plot.')
     figure_path = plot_all_tracers(nonempty_samples,
                                    _plot_path(args.output_root, args.iteration),
                                    iteration=args.iteration,
@@ -385,8 +387,8 @@ def main(argv=None):
               'r_eff_definition': R_EFF_DEFINITION,
               'ellipticity_definition': ELLIPTICITY_DEFINITION,
               'catalog_policy': {
-              'all': ('measurable post-mask survivors; BORDER marks any group '
-                      'that touched the angular/radial selection'),
+              'all': ('all post-mask groups; undefined shapes are NaN and '
+                      'BORDER marks groups that touched the selection'),
               'clean': 'post-mask survivors with BORDER=False'},
               'cases': cases,
               'figure': figure_path,
