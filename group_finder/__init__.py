@@ -13,7 +13,8 @@ from .make_cat import (ELLIPTICITY_DEFINITION,
 from .watershed import (EdgeMaskApplication,
                         RandomHealpixMask,
                         apply_random_healpix_edge_mask,
-                        build_all_random_healpix_mask)
+                        build_all_random_healpix_mask,
+                        build_random_healpix_mask)
 
 __all__ = ['DelaunayGraph',
            'DensityContrast',
@@ -27,6 +28,7 @@ __all__ = ['DelaunayGraph',
            'VoidShapes',
            'apply_random_healpix_edge_mask',
            'build_all_random_healpix_mask',
+           'build_random_healpix_mask',
            'build_random_membership_catalog',
            'build_void_catalogs',
            'compute_void_shapes',

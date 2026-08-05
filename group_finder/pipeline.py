@@ -27,7 +27,7 @@ from .read_data import (TRACER_DISPLAY,
                         raw_zone_path,
                         read_raw_realization)
 from .watershed import (apply_random_healpix_edge_mask,
-                        build_all_random_healpix_mask)
+                        build_random_healpix_mask)
 
 
 DEFAULT_R_THRESHOLD = -0.25
@@ -192,17 +192,19 @@ def run_case(args, tracer, zone):
     object_positions = cartesian_positions(objects)
     random_positions = cartesian_positions(randoms)
 
-    print(f'[{TRACER_DISPLAY[tracer]} {zone}] all-RANDITER mask '
-          f'(NSIDE={args.healpix_nside}, mean count >= '
+    print(f'[{TRACER_DISPLAY[tracer]} {zone}] RANDITER={args.iteration} mask '
+          f'(NSIDE={args.healpix_nside}, count >= '
           f'{args.min_randoms_per_pixel})', flush=True)
-    selection = build_all_random_healpix_mask(raw_path=input_path,
-                                              tracer=tracer,
-                                              nside=args.healpix_nside,
-                                              min_randoms_per_pixel=args.min_randoms_per_pixel,
-                                              min_randoms_per_radial_bin=args.min_randoms_per_radial_bin,
-                                              radial_bin_width=args.radial_bin_width,
-                                              cache_path=args.mask_cache,
-                                              chunk_size=args.mask_chunk_size)
+    selection = build_random_healpix_mask(
+        raw_path=input_path,
+        tracer=tracer,
+        iteration=args.iteration,
+        nside=args.healpix_nside,
+        min_randoms_per_pixel=args.min_randoms_per_pixel,
+        min_randoms_per_radial_bin=args.min_randoms_per_radial_bin,
+        radial_bin_width=args.radial_bin_width,
+        cache_path=args.mask_cache,
+        chunk_size=args.mask_chunk_size)
 
     print(f'[{TRACER_DISPLAY[tracer]} {zone}] Delaunay: '
           f'{len(objects):,} data + {len(randoms):,} random', flush=True)
@@ -375,7 +377,7 @@ def main(argv=None):
                                    min_combined_count=args.min_combined_count,
                                    use_tex=not args.no_tex)
     summary = {'algorithm': 'ASTRA literal lowest-index Delaunay watershed',
-               'mask': ('all-RANDITER mean-count angular/radial selection with '
+               'mask': ('single-RANDITER angular/radial count selection with '
                         'seed-connected topology pruning'),
               'iteration': int(args.iteration),
               'r_threshold': float(args.r_threshold),

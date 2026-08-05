@@ -18,7 +18,7 @@ DEFAULT_MIN_RANDOMS_PER_RADIAL_BIN = 3
 DEFAULT_RADIAL_BIN_WIDTH = 10.0
 DEFAULT_EDGE_CHUNK_SIZE = 250_000
 DEFAULT_MASK_CACHE = Path('temp/group_finder/healpix_masks')
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -179,7 +179,8 @@ def _safe_label(value):
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(value).strip()) or 'UNKNOWN'
 
 
-def _cache_file(cache_path, raw_path, tracer, nside, nest, radial_bin_width):
+def _cache_file(cache_path, raw_path, tracer, iteration, nside, nest,
+                radial_bin_width):
     if cache_path is None:
         return None
     cache_path = Path(cache_path)
@@ -191,20 +192,23 @@ def _cache_file(cache_path, raw_path, tracer, nside, nest, radial_bin_width):
     radial_tag = format(float(radial_bin_width), '.12g').replace('.', 'p')
     raw_identity_tag = hashlib.sha256(str(Path(raw_path).resolve()).encode('utf-8')).hexdigest()[:12]
     return (cache_path / (f'{_safe_label(Path(raw_path).name)}.{raw_identity_tag}.'
-                          f'{_safe_label(tracer)}.nside{int(nside)}.{ordering}.'
-                          f'radial{radial_tag}.all-random-selection-counts.npz'))
+                          f'{_safe_label(tracer)}.iter{int(iteration):03d}.'
+                          f'nside{int(nside)}.{ordering}.radial{radial_tag}.'
+                          f'random-selection-counts.npz'))
 
 
-def _expected_cache_metadata(raw_path, tracer, nside, nest, radial_bin_width):
+def _expected_cache_metadata(raw_path, tracer, iteration, nside, nest,
+                             radial_bin_width):
     return {'cache_version': _CACHE_VERSION,
             'raw': _raw_identity(raw_path),
             'tracer': str(tracer),
+            'iteration': int(iteration),
             'nside': int(nside),
             'nest': bool(nest),
             'radial_bin_width': float(radial_bin_width),
             'radial_coordinate_units': 'raw Cartesian coordinate units',
-            'random_iterations': 'all non-negative RANDITER values',
-            'count_normalization': 'mean per distinct RANDITER'}
+            'random_iterations': 'one requested RANDITER value',
+            'count_normalization': 'single RANDITER counts'}
 
 
 def _load_cache(path, expected, angular_minimum, radial_minimum) -> RandomHealpixMask | None:
@@ -282,14 +286,16 @@ def _threshold_metadata(metadata, random_counts, radial_counts, n_random_iterati
                 np.count_nonzero(radial_counts >= radial_required))}
 
 
-def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
-                                  min_randoms_per_pixel=DEFAULT_MIN_RANDOMS_PER_PIXEL,
-                                  min_randoms_per_radial_bin=DEFAULT_MIN_RANDOMS_PER_RADIAL_BIN,
-                                  radial_bin_width=DEFAULT_RADIAL_BIN_WIDTH,
-                                  nest=False,
-                                  cache_path=DEFAULT_MASK_CACHE,
-                                  chunk_size=1_000_000,
-                                  force=False) -> RandomHealpixMask:
+def build_random_healpix_mask(raw_path, tracer, iteration=0,
+                              nside=DEFAULT_HEALPIX_NSIDE,
+                              min_randoms_per_pixel=DEFAULT_MIN_RANDOMS_PER_PIXEL,
+                              min_randoms_per_radial_bin=DEFAULT_MIN_RANDOMS_PER_RADIAL_BIN,
+                              radial_bin_width=DEFAULT_RADIAL_BIN_WIDTH,
+                              nest=False,
+                              cache_path=DEFAULT_MASK_CACHE,
+                              chunk_size=1_000_000,
+                              force=False) -> RandomHealpixMask:
+    """Build the angular and radial mask from one random realization."""
 
     raw_path = Path(raw_path)
     tracer = str(tracer).strip()
@@ -297,6 +303,12 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
         raise FileNotFoundError(f'Raw FITS does not exist: {raw_path}.')
     if not tracer:
         raise ValueError('tracer cannot be empty.')
+    if isinstance(iteration, (bool, np.bool_)) or not isinstance(
+            iteration, Integral):
+        raise TypeError('iteration must be a non-negative integer.')
+    iteration = int(iteration)
+    if iteration < 0:
+        raise ValueError('iteration must be a non-negative integer.')
     nside = _positive_integer(nside, 'nside')
 
     minimum = _positive_integer(min_randoms_per_pixel, 'min_randoms_per_pixel')
@@ -308,8 +320,10 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
     if not hp.isnsideok(nside):
         raise ValueError(f'Invalid HEALPix nside={nside}.')
 
-    cache_file = _cache_file(cache_path, raw_path, tracer, nside, bool(nest), radial_bin_width)
-    expected = _expected_cache_metadata(raw_path, tracer, nside, bool(nest), radial_bin_width)
+    cache_file = _cache_file(cache_path, raw_path, tracer, iteration, nside,
+                             bool(nest), radial_bin_width)
+    expected = _expected_cache_metadata(raw_path, tracer, iteration, nside,
+                                        bool(nest), radial_bin_width)
     if not force:
         cached = _load_cache(cache_file,
                              expected,
@@ -320,7 +334,6 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
 
     counts = np.zeros(hp.nside2npix(nside), dtype=np.int64)
     radial_counts_by_index: dict[int, int] = {}
-    random_iterations: set[int] = set()
     n_rows = 0
     n_valid_angular = 0
     n_valid_radial = 0
@@ -337,18 +350,17 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
 
         source_tracer = None
         for candidate in raw_random_tracer_labels(tracer):
-            start = _lower_bound(hdu, (candidate, 0))
-            stop = _lower_bound(hdu, (candidate, np.iinfo(np.int64).max))
+            start = _lower_bound(hdu, (candidate, iteration))
+            stop = _lower_bound(hdu, (candidate, iteration + 1))
             if start != stop:
                 source_tracer = candidate
                 break
         if source_tracer is None:
             labels = ', '.join(raw_random_tracer_labels(tracer))
             raise ValueError(
-                f'No random rows found for TRACERTYPE in ({labels}).')
+                f'No random rows found for TRACERTYPE in ({labels}), '
+                f'RANDITER={iteration}.')
 
-        first_iteration = _row_key(hdu, start)[1]
-        last_iteration = _row_key(hdu, stop - 1)[1]
         for chunk_start in range(start, stop, chunk_size):
             chunk_stop = min(chunk_start + chunk_size, stop)
             rows = np.arange(chunk_start, chunk_stop, dtype=np.int64)
@@ -361,9 +373,9 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
             y = np.asarray(chunk['YCART'], dtype=np.float64)
             z = np.asarray(chunk['ZCART'], dtype=np.float64)
             iterations = np.asarray(chunk['RANDITER'], dtype=np.int64)
-            if np.any(iterations < 0):
-                raise ValueError('The selected all-random row range contains a negative RANDITER.')
-            random_iterations.update(int(value) for value in np.unique(iterations))
+            if np.any(iterations != iteration):
+                raise ValueError('The selected random row range contains an '
+                                 'unexpected RANDITER value.')
 
             angular_valid = (np.isfinite(ra)
                              & np.isfinite(dec)
@@ -393,8 +405,9 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
             n_valid_joint += int(np.count_nonzero(
                 angular_valid & radial_valid))
 
-    if not random_iterations:
-        raise ValueError(f'No non-negative random iterations found for {tracer!r}.')
+    if n_rows == 0:
+        raise ValueError(f'No random rows found for {tracer!r}, '
+                         f'RANDITER={iteration}.')
     if not radial_counts_by_index:
         raise ValueError(f'No valid random Cartesian radii found for {tracer!r}.')
 
@@ -410,15 +423,15 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
     for index, count in radial_counts_by_index.items():
         radial_counts[index - first_radial_index] = count
     radial_bin_edges = (np.arange(first_radial_index, last_radial_index + 2, dtype=np.float64) * radial_bin_width)
-    iteration_values = sorted(random_iterations)
-    n_iterations = len(iteration_values)
+    iteration_values = [iteration]
+    n_iterations = 1
 
     metadata = {**expected,
-                'kind': 'all-random-angular-radial-counts',
+                'kind': 'single-random-angular-radial-counts',
                 'source_tracer': source_tracer,
                 'row_range': {'start': int(start), 'stop': int(stop)},
-                'first_randiter': int(first_iteration),
-                'last_randiter': int(last_iteration),
+                'first_randiter': iteration,
+                'last_randiter': iteration,
                 'random_iteration_values': iteration_values,
                 'n_random_iterations': int(n_iterations),
                 'n_random_rows': int(n_rows),
@@ -449,6 +462,10 @@ def build_all_random_healpix_mask(raw_path, tracer, nside=DEFAULT_HEALPIX_NSIDE,
                              min_randoms_per_radial_bin=radial_minimum,
                              source=str(cache_file) if cache_file is not None else str(raw_path),
                              metadata=returned_metadata)
+
+
+# Backward-compatible import name. It now follows the single-iteration policy.
+build_all_random_healpix_mask = build_random_healpix_mask
 
 
 def cartesian_healpix_pixels(positions, nside, nest=False):

@@ -39,9 +39,9 @@ For split DR2 files, separate raw labels such as `BGS_ANY_DATA` /
 4. **Grow watershed basins:** Process selected vertices from lowest to highest
    `r`. A point with no assigned neighbor seeds a new group; otherwise it joins the lowest-ID neighboring group. Existing groups are not merged when basins meet. Groups with fewer than four total data-plus-random members are removed by default.
 
-5. **Apply the selection mask:** Use all non-negative random realizations to
+5. **Apply the selection mask:** Use only the requested random realization to
    build an angular HEALPix mask and a radial count mask. The defaults are
-   `NSIDE=128`, at least 3 mean randoms per pixel, radial-bin width 5, and at least 3 mean randoms per radial bin.
+   `NSIDE=128`, at least 3 randoms per pixel, radial-bin width 5, and at least 3 randoms per radial bin.
 
 6. **Boundaries:** Remove invalid members and internal edges that cross invalid angular or radial regions. Any affected group is
    marked `BORDER`.
