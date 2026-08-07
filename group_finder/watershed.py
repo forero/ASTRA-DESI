@@ -10,6 +10,8 @@ import numpy as np
 
 from .astra import (GroupFinderResult, UNASSIGNED)
 from .read_data import raw_random_tracer_labels
+from numba import njit
+
 
 
 DEFAULT_HEALPIX_NSIDE = 128
@@ -19,6 +21,82 @@ DEFAULT_RADIAL_BIN_WIDTH = 10.0
 DEFAULT_EDGE_CHUNK_SIZE = 250_000
 DEFAULT_MASK_CACHE = Path('temp/group_finder/healpix_masks')
 _CACHE_VERSION = 3
+
+
+def _python_connected_roots(edges, internal_edge, invalid_edge, valid_member):
+    n_points = len(valid_member)
+    parent = np.arange(n_points, dtype=np.int32)
+    rank = np.zeros(n_points, dtype=np.int8)
+
+    for edge_index in range(len(edges)):
+        if not internal_edge[edge_index] or invalid_edge[edge_index]:
+            continue
+        first = int(edges[edge_index, 0])
+        second = int(edges[edge_index, 1])
+        if not valid_member[first] or not valid_member[second]:
+            continue
+
+        root_first = first
+        while parent[root_first] != root_first:
+            parent[root_first] = parent[parent[root_first]]
+            root_first = int(parent[root_first])
+        root_second = second
+        while parent[root_second] != root_second:
+            parent[root_second] = parent[parent[root_second]]
+            root_second = int(parent[root_second])
+        if root_first == root_second:
+            continue
+        if rank[root_first] < rank[root_second]:
+            root_first, root_second = root_second, root_first
+        parent[root_second] = root_first
+        if rank[root_first] == rank[root_second]:
+            rank[root_first] += 1
+
+    roots = np.full(n_points, -1, dtype=np.int32)
+    for point in range(n_points):
+        if not valid_member[point]:
+            continue
+        root = point
+        while parent[root] != root:
+            parent[root] = parent[parent[root]]
+            root = int(parent[root])
+        roots[point] = root
+    return roots
+
+
+def _python_seed_points(group_ids, processing_order, group_to_row,
+                        n_groups):
+    seeds = np.full(n_groups, -1, dtype=np.int32)
+    for point_value in processing_order:
+        point = int(point_value)
+        group_id = int(group_ids[point])
+        if group_id < 0:
+            continue
+        row = int(group_to_row[group_id])
+        if seeds[row] < 0:
+            seeds[row] = point
+    return seeds
+
+
+if njit is not None:
+    _connected_roots_compiled = njit(cache=True)(_python_connected_roots)
+    _seed_points_compiled = njit(cache=True)(_python_seed_points)
+else:
+    _connected_roots_compiled = _python_connected_roots
+    _seed_points_compiled = _python_seed_points
+
+
+def warmup_accelerators():
+    """Compile topology-pruning kernels before multiprocessing starts."""
+    if njit is None:
+        return
+    edges = np.array([[0, 1]], dtype=np.int32)
+    flags = np.array([True])
+    valid = np.array([True, True])
+    _connected_roots_compiled(edges, flags, ~flags, valid)
+    _seed_points_compiled(np.array([0, 0], dtype=np.int32),
+                          np.array([0, 1], dtype=np.int32),
+                          np.array([0], dtype=np.int32), 1)
 
 
 @dataclass(frozen=True)
@@ -294,7 +372,8 @@ def build_random_healpix_mask(raw_path, tracer, iteration=0,
                               nest=False,
                               cache_path=DEFAULT_MASK_CACHE,
                               chunk_size=1_000_000,
-                              force=False) -> RandomHealpixMask:
+                              force=False,
+                              random_records=None) -> RandomHealpixMask:
     """Build the angular and radial mask from one random realization."""
 
     raw_path = Path(raw_path)
@@ -338,72 +417,94 @@ def build_random_healpix_mask(raw_path, tracer, iteration=0,
     n_valid_angular = 0
     n_valid_radial = 0
     n_valid_joint = 0
-    with fitsio.FITS(str(raw_path)) as raw:
-        hdu = raw[1]
-        columns = {_decode_text(name).upper() for name in hdu.get_colnames()}
-        required_columns = {'RA', 'DEC', 'XCART', 'YCART', 'ZCART', 'RANDITER'}
-        missing = required_columns.difference(columns)
 
-        if missing:
-            raise KeyError(
-                f'Raw FITS is missing mask columns: {", ".join(sorted(missing))}.')
-
-        source_tracer = None
-        for candidate in raw_random_tracer_labels(tracer):
-            start = _lower_bound(hdu, (candidate, iteration))
-            stop = _lower_bound(hdu, (candidate, iteration + 1))
-            if start != stop:
-                source_tracer = candidate
-                break
-        if source_tracer is None:
-            labels = ', '.join(raw_random_tracer_labels(tracer))
-            raise ValueError(
-                f'No random rows found for TRACERTYPE in ({labels}), '
-                f'RANDITER={iteration}.')
-
-        for chunk_start in range(start, stop, chunk_size):
-            chunk_stop = min(chunk_start + chunk_size, stop)
-            rows = np.arange(chunk_start, chunk_stop, dtype=np.int64)
-            chunk = hdu.read(columns=['RA', 'DEC', 'XCART', 'YCART', 'ZCART', 'RANDITER'],
-                             rows=rows)
-
-            ra = np.asarray(chunk['RA'], dtype=np.float64)
-            dec = np.asarray(chunk['DEC'], dtype=np.float64)
-            x = np.asarray(chunk['XCART'], dtype=np.float64)
-            y = np.asarray(chunk['YCART'], dtype=np.float64)
-            z = np.asarray(chunk['ZCART'], dtype=np.float64)
-            iterations = np.asarray(chunk['RANDITER'], dtype=np.int64)
-            if np.any(iterations != iteration):
+    def _accumulate(chunk, check_iteration):
+        nonlocal n_rows, n_valid_angular, n_valid_radial, n_valid_joint
+        ra = np.asarray(chunk['RA'], dtype=np.float64)
+        dec = np.asarray(chunk['DEC'], dtype=np.float64)
+        x = np.asarray(chunk['XCART'], dtype=np.float64)
+        y = np.asarray(chunk['YCART'], dtype=np.float64)
+        z = np.asarray(chunk['ZCART'], dtype=np.float64)
+        if check_iteration:
+            iteration_values = np.asarray(chunk['RANDITER'], dtype=np.int64)
+            if np.any(iteration_values != iteration):
                 raise ValueError('The selected random row range contains an '
                                  'unexpected RANDITER value.')
 
-            angular_valid = (np.isfinite(ra)
-                             & np.isfinite(dec)
-                             & (dec >= -90.0)
-                             & (dec <= 90.0))
+        angular_valid = (np.isfinite(ra)
+                         & np.isfinite(dec)
+                         & (dec >= -90.0)
+                         & (dec <= 90.0))
+        if np.any(angular_valid):
+            pixels = hp.ang2pix(nside,
+                                np.radians(90.0 - dec[angular_valid]),
+                                np.radians(np.mod(ra[angular_valid], 360.0)),
+                                nest=bool(nest))
+            counts[:] += np.bincount(
+                pixels, minlength=counts.size).astype(np.int64, copy=False)
 
-            if np.any(angular_valid):
-                pixels = hp.ang2pix(nside,
-                                    np.radians(90.0 - dec[angular_valid]),
-                                    np.radians(np.mod(ra[angular_valid], 360.0)),
-                                    nest=bool(nest))
-                counts += np.bincount(pixels, minlength=counts.size).astype(np.int64, copy=False)
+        radius = np.hypot(np.hypot(x, y), z)
+        radial_valid = np.isfinite(radius) & (radius > 0.0)
+        if np.any(radial_valid):
+            radial_indices = np.floor(
+                radius[radial_valid] / radial_bin_width).astype(np.int64)
+            unique_indices, unique_counts = np.unique(
+                radial_indices, return_counts=True)
+            for index, count in zip(unique_indices, unique_counts):
+                key = int(index)
+                radial_counts_by_index[key] = (
+                    radial_counts_by_index.get(key, 0) + int(count))
 
-            radius = np.hypot(np.hypot(x, y), z)
-            radial_valid = np.isfinite(radius) & (radius > 0.0)
-            if np.any(radial_valid):
-                radial_indices = np.floor(radius[radial_valid] / radial_bin_width).astype(np.int64)
-                unique_indices, unique_counts = np.unique(radial_indices, return_counts=True)
+        n_rows += len(chunk)
+        n_valid_angular += int(np.count_nonzero(angular_valid))
+        n_valid_radial += int(np.count_nonzero(radial_valid))
+        n_valid_joint += int(np.count_nonzero(angular_valid & radial_valid))
 
-                for index, count in zip(unique_indices, unique_counts):
-                    key = int(index)
-                    radial_counts_by_index[key] = (radial_counts_by_index.get(key, 0) + int(count))
+    required_record_columns = {'RA', 'DEC', 'XCART', 'YCART', 'ZCART'}
+    if random_records is not None:
+        record_names = set(getattr(getattr(random_records, 'dtype', None),
+                                   'names', ()) or ())
+        missing = required_record_columns.difference(record_names)
+        if missing:
+            raise KeyError('Preloaded random records are missing mask columns: '
+                           + ', '.join(sorted(missing)))
+        source_tracer = 'preloaded-random-records'
+        start, stop = 0, len(random_records)
+        for chunk_start in range(start, stop, chunk_size):
+            _accumulate(random_records[chunk_start:min(chunk_start + chunk_size,
+                                                       stop)],
+                        check_iteration=False)
+    else:
+        with fitsio.FITS(str(raw_path)) as raw:
+            hdu = raw[1]
+            columns = {_decode_text(name).upper()
+                       for name in hdu.get_colnames()}
+            required_columns = required_record_columns | {'RANDITER'}
+            missing = required_columns.difference(columns)
+            if missing:
+                raise KeyError('Raw FITS is missing mask columns: '
+                               + ', '.join(sorted(missing)))
 
-            n_rows += len(chunk)
-            n_valid_angular += int(np.count_nonzero(angular_valid))
-            n_valid_radial += int(np.count_nonzero(radial_valid))
-            n_valid_joint += int(np.count_nonzero(
-                angular_valid & radial_valid))
+            source_tracer = None
+            for candidate in raw_random_tracer_labels(tracer):
+                start = _lower_bound(hdu, (candidate, iteration))
+                stop = _lower_bound(hdu, (candidate, iteration + 1))
+                if start != stop:
+                    source_tracer = candidate
+                    break
+            if source_tracer is None:
+                labels = ', '.join(raw_random_tracer_labels(tracer))
+                raise ValueError(
+                    f'No random rows found for TRACERTYPE in ({labels}), '
+                    f'RANDITER={iteration}.')
+
+            columns_to_read = ['RA', 'DEC', 'XCART', 'YCART', 'ZCART',
+                               'RANDITER']
+            for chunk_start in range(start, stop, chunk_size):
+                chunk_stop = min(chunk_start + chunk_size, stop)
+                chunk = hdu.read_slice(chunk_start, chunk_stop,
+                                       columns=columns_to_read)
+                _accumulate(chunk, check_iteration=True)
 
     if n_rows == 0:
         raise ValueError(f'No random rows found for {tracer!r}, '
@@ -538,7 +639,7 @@ def cartesian_radial_bins(positions, radial_bin_edges):
 
 
 def _group_ids_for_members(group_ids, selected):
-    values = np.asarray(group_ids, dtype=np.int64)[selected]
+    values = np.asarray(group_ids)[selected]
     values = values[values >= 0]
     return np.unique(values).astype(np.int64, copy=False)
 
@@ -546,7 +647,7 @@ def _group_ids_for_members(group_ids, selected):
 def _group_ids_for_edges(group_ids, edges, selected):
     if not np.any(selected):
         return np.empty(0, dtype=np.int64)
-    values = np.asarray(group_ids, dtype=np.int64)[np.asarray(edges, dtype=np.int64)[selected, 0]]
+    values = np.asarray(group_ids)[np.asarray(edges)[selected, 0]]
     return np.unique(values[values >= 0]).astype(np.int64, copy=False)
 
 
@@ -554,17 +655,20 @@ def _angular_edge_crossings(positions, edges, internal, point_pixels, point_angu
                             mask: RandomHealpixMask, sample_step, chunk_size):
 
     positions = np.asarray(positions, dtype=np.float64)
-    edges = np.asarray(edges, dtype=np.int64)
+    edges = np.asarray(edges)
     crossings = np.zeros(len(edges), dtype=bool)
-    internal_indices = np.flatnonzero(internal)
-    if not len(internal_indices):
+    if not np.any(internal):
         return crossings
 
     valid_mask = mask.valid_pixels
     tiny = np.finfo(np.float64).tiny
     antipodal_tolerance = 1.0e-10
-    for chunk_start in range(0, len(internal_indices), chunk_size):
-        chunk_indices = internal_indices[chunk_start:chunk_start + chunk_size]
+    for chunk_start in range(0, len(edges), chunk_size):
+        chunk_stop = min(chunk_start + chunk_size, len(edges))
+        local_indices = np.flatnonzero(internal[chunk_start:chunk_stop])
+        if not len(local_indices):
+            continue
+        chunk_indices = local_indices + chunk_start
 
         chunk_edges = edges[chunk_indices]
         first = chunk_edges[:, 0]
@@ -647,10 +751,9 @@ def _angular_edge_crossings(positions, edges, internal, point_pixels, point_angu
 def _radial_edge_crossings(positions, edges, internal, mask: RandomHealpixMask, chunk_size):
 
     positions = np.asarray(positions, dtype=np.float64)
-    edges = np.asarray(edges, dtype=np.int64)
+    edges = np.asarray(edges)
     crossings = np.zeros(len(edges), dtype=bool)
-    internal_indices = np.flatnonzero(internal)
-    if not len(internal_indices):
+    if not np.any(internal):
         return crossings
 
     radial_edges = mask.radial_bin_edges
@@ -658,8 +761,12 @@ def _radial_edge_crossings(positions, edges, internal, mask: RandomHealpixMask, 
     invalid_prefix = np.concatenate((np.zeros(1, dtype=np.int64),
                                      np.cumsum(~radial_valid, dtype=np.int64)))
 
-    for chunk_start in range(0, len(internal_indices), chunk_size):
-        chunk_indices = internal_indices[chunk_start:chunk_start + chunk_size]
+    for chunk_start in range(0, len(edges), chunk_size):
+        chunk_stop = min(chunk_start + chunk_size, len(edges))
+        local_indices = np.flatnonzero(internal[chunk_start:chunk_stop])
+        if not len(local_indices):
+            continue
+        chunk_indices = local_indices + chunk_start
         chunk_edges = edges[chunk_indices]
         p0 = positions[chunk_edges[:, 0]]
         p1 = positions[chunk_edges[:, 1]]
@@ -728,12 +835,12 @@ def _prune_to_seed_connected_components(group_ids, edges, internal_group_edge,
                                         invalid_member, invalid_edge, processing_order,
                                         min_members) -> _SeedTopologyPruning:
 
-    group_ids = np.asarray(group_ids, dtype=np.int64)
-    edges = np.asarray(edges, dtype=np.int64)
+    group_ids = np.asarray(group_ids)
+    edges = np.asarray(edges)
     internal_group_edge = np.asarray(internal_group_edge, dtype=bool)
     invalid_member = np.asarray(invalid_member, dtype=bool)
     invalid_edge = np.asarray(invalid_edge, dtype=bool)
-    processing_order = np.asarray(processing_order, dtype=np.int64)
+    processing_order = np.asarray(processing_order)
     n_points = len(group_ids)
     retained = group_ids >= 0
     if invalid_member.shape != (n_points,):
@@ -772,57 +879,22 @@ def _prune_to_seed_connected_components(group_ids, edges, internal_group_edge,
                                     undersized_component_group_ids=empty_groups.copy(),
                                     discarded_group_ids=empty_groups.copy())
 
-    seed_point = np.full(n_groups, -1, dtype=np.int64)
-    group_row = {int(group_id): row for row, group_id in enumerate(audited_group_ids)}
-    for point in processing_order:
-        group_id = int(group_ids[point])
-        if group_id < 0:
-            continue
-        row = group_row[group_id]
-        if seed_point[row] < 0:
-            seed_point[row] = point
+    max_group_id = int(audited_group_ids[-1])
+    group_to_row = np.full(max_group_id + 1, -1, dtype=np.int32)
+    group_to_row[audited_group_ids] = np.arange(n_groups, dtype=np.int32)
+    seed_point = _seed_points_compiled(group_ids, processing_order,
+                                       group_to_row, n_groups)
     if np.any(seed_point < 0):
         missing = audited_group_ids[seed_point < 0].tolist()
         raise ValueError('Every retained group must have a member in processing_order; '
                          f'missing group IDs: {missing}.')
 
     valid_member = retained & ~invalid_member
-    parent = np.arange(n_points, dtype=np.int64)
-    rank = np.zeros(n_points, dtype=np.int8)
-
-    def find(point):
-        point = int(point)
-        while parent[point] != point:
-            parent[point] = parent[parent[point]]
-            point = int(parent[point])
-        return point
-
-    def union(first, second):
-        root_first = find(first)
-        root_second = find(second)
-        if root_first == root_second:
-            return
-        if rank[root_first] < rank[root_second]:
-            root_first, root_second = root_second, root_first
-        parent[root_second] = root_first
-        if rank[root_first] == rank[root_second]:
-            rank[root_first] += 1
-
-    if len(edges):
-        valid_internal_edge = (internal_group_edge
-                               & ~invalid_edge
-                               & valid_member[edges[:, 0]]
-                               & valid_member[edges[:, 1]])
-
-        for first, second in edges[valid_internal_edge]:
-            union(first, second)
-
+    roots = _connected_roots_compiled(edges, internal_group_edge,
+                                      invalid_edge, valid_member)
     valid_points = np.flatnonzero(valid_member)
-    roots = np.full(n_points, -1, dtype=np.int64)
-    for point in valid_points:
-        roots[point] = find(point)
 
-    row_for_point = np.full(n_points, -1, dtype=np.int64)
+    row_for_point = np.full(n_points, -1, dtype=np.int32)
     if np.any(retained):
         row_for_point[retained] = np.searchsorted(audited_group_ids,
                                                   group_ids[retained])
@@ -875,7 +947,8 @@ def _prune_to_seed_connected_components(group_ids, edges, internal_group_edge,
 
 def apply_random_healpix_edge_mask(result: GroupFinderResult, mask: RandomHealpixMask,
                                    random_ra=None, random_dec=None, angular_sample_step=None,
-                                   edge_chunk_size=DEFAULT_EDGE_CHUNK_SIZE, min_members=4) -> EdgeMaskApplication:
+                                   edge_chunk_size=DEFAULT_EDGE_CHUNK_SIZE, min_members=4,
+                                   retain_edge_diagnostics=True) -> EdgeMaskApplication:
 
     if not isinstance(result, GroupFinderResult):
         raise TypeError('result must be a GroupFinderResult.')
@@ -890,7 +963,7 @@ def apply_random_healpix_edge_mask(result: GroupFinderResult, mask: RandomHealpi
     else:
         angular_sample_step = _positive_finite(angular_sample_step, 'angular_sample_step')
 
-    group_ids_before = np.asarray(result.grouping.group_ids, dtype=np.int64).copy()
+    group_ids_before = np.asarray(result.grouping.group_ids).copy()
     pixels, valid_pixels = cartesian_healpix_pixels(result.graph.positions,
                                                     nside=mask.nside,
                                                     nest=mask.nest)
@@ -932,14 +1005,20 @@ def apply_random_healpix_edge_mask(result: GroupFinderResult, mask: RandomHealpi
                       & retained_members)
     low_count_random_member = (invalid_angular_member & random_members)
 
-    edges = np.asarray(result.graph.edges, dtype=np.int64)
+    edges = np.asarray(result.graph.edges)
     if edges.ndim != 2 or edges.shape[1] != 2:
         raise ValueError('result.graph.edges must have shape (n_edges, 2).')
     if len(edges):
         if np.min(edges) < 0 or np.max(edges) >= len(group_ids_before):
             raise IndexError('result.graph.edges contains an index outside the graph.')
-        internal_group_edge = ((group_ids_before[edges[:, 0]] >= 0) &
-                               (group_ids_before[edges[:, 0]] == group_ids_before[edges[:, 1]]))
+        internal_group_edge = np.zeros(len(edges), dtype=bool)
+        for chunk_start in range(0, len(edges), edge_chunk_size):
+            chunk_stop = min(chunk_start + edge_chunk_size, len(edges))
+            chunk = edges[chunk_start:chunk_stop]
+            first_groups = group_ids_before[chunk[:, 0]]
+            internal_group_edge[chunk_start:chunk_stop] = (
+                (first_groups >= 0)
+                & (first_groups == group_ids_before[chunk[:, 1]]))
     else:
         internal_group_edge = np.zeros(0, dtype=bool)
 
@@ -1000,6 +1079,15 @@ def apply_random_healpix_edge_mask(result: GroupFinderResult, mask: RandomHealpi
                                         contrast=result.contrast,
                                         grouping=filtered_grouping)
 
+    if retain_edge_diagnostics:
+        returned_internal = internal_group_edge
+        returned_angular_crossing = angular_edge_crossing
+        returned_radial_crossing = radial_edge_crossing
+    else:
+        returned_internal = np.empty(0, dtype=bool)
+        returned_angular_crossing = np.empty(0, dtype=bool)
+        returned_radial_crossing = np.empty(0, dtype=bool)
+
     return EdgeMaskApplication(result=filtered_result,
                                group_ids_before_mask=group_ids_before,
                                edge_group_removed=edge_group_removed,
@@ -1008,9 +1096,9 @@ def apply_random_healpix_edge_mask(result: GroupFinderResult, mask: RandomHealpi
                                invalid_radial_member=invalid_radial_member,
                                healpix_pixel=pixels,
                                radial_bin=radial_bins,
-                               internal_group_edge=internal_group_edge,
-                               angular_edge_crossing=angular_edge_crossing,
-                               radial_edge_crossing=radial_edge_crossing,
+                               internal_group_edge=returned_internal,
+                               angular_edge_crossing=returned_angular_crossing,
+                               radial_edge_crossing=returned_radial_crossing,
                                angular_member_group_ids=angular_member_group_ids,
                                radial_member_group_ids=radial_member_group_ids,
                                angular_edge_group_ids=angular_edge_group_ids,

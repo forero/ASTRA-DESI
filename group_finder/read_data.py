@@ -99,68 +99,114 @@ def _lower_bound(hdu, target):
     return lower
 
 
-def read_raw_realization(path, tracer, iteration):
-    path = Path(path)
-    tracer = normalize_tracer(tracer)
-    if not path.is_file():
-        raise FileNotFoundError(f'Raw FITS does not exist: {path}.')
+def _locate_realization_rows(hdu, tracer, iteration):
+    found_data = False
+    for data_label, random_label in raw_tracer_label_pairs(tracer):
+        data_start = _lower_bound(hdu, (data_label, -1))
+        data_stop = _lower_bound(hdu, (data_label, 0))
+        if data_start == data_stop:
+            continue
+        found_data = True
+        random_start = _lower_bound(hdu, (random_label, iteration))
+        random_stop = _lower_bound(hdu, (random_label, iteration + 1))
+        if random_start != random_stop:
+            return {'source_data_tracer': data_label,
+                    'source_random_tracer': random_label,
+                    'data_start': int(data_start),
+                    'data_stop': int(data_stop),
+                    'random_start': int(random_start),
+                    'random_stop': int(random_stop)}
+
+    pairs = ', '.join(
+        f'{data}/{random}' for data, random in raw_tracer_label_pairs(tracer))
+    if not found_data:
+        raise ValueError(f'No object rows found for TRACERTYPE pairs ({pairs}).')
+    raise ValueError(f'No random rows found for TRACERTYPE pairs ({pairs}), '
+                     f'RANDITER={iteration}.')
+
+
+def _read_contiguous(hdu, columns, start, stop):
+    """Read a contiguous FITS row interval without allocating row indices."""
+    return hdu.read_slice(int(start), int(stop), columns=list(columns))
+
+
+def _raw_metadata(raw, hdu, path, tracer, iteration, rows):
+    table_header = hdu.read_header()
+    primary_header = raw[0].read_header()
+    zone = _decode_text(
+        table_header.get('ZONE', primary_header.get('ZONE', 'UNKNOWN')))
+    release = _decode_text(
+        table_header.get('RELEASE', primary_header.get('RELEASE', 'UNKNOWN')))
+    return {'input': str(path),
+            'tracer': tracer,
+            'source_data_tracer': rows['source_data_tracer'],
+            'source_random_tracer': rows['source_random_tracer'],
+            'zone': zone,
+            'release': release,
+            'iteration': int(iteration),
+            **{name: int(rows[name]) for name in (
+                'data_start', 'data_stop', 'random_start', 'random_stop')}}
+
+
+def _validate_iteration(iteration):
     if isinstance(iteration, (bool, np.bool_)) or not isinstance(
             iteration, (int, np.integer)):
         raise TypeError('iteration must be a non-negative integer.')
     iteration = int(iteration)
     if iteration < 0:
         raise ValueError('iteration must be a non-negative integer.')
+    return iteration
+
+
+def read_raw_realization(path, tracer, iteration):
+    path = Path(path)
+    tracer = normalize_tracer(tracer)
+    if not path.is_file():
+        raise FileNotFoundError(f'Raw FITS does not exist: {path}.')
+    iteration = _validate_iteration(iteration)
 
     with fitsio.FITS(str(path)) as raw:
         hdu = raw[1]
-        found_data = False
-        source_data_tracer = None
-        source_random_tracer = None
-        for data_label, random_label in raw_tracer_label_pairs(tracer):
-            data_start = _lower_bound(hdu, (data_label, -1))
-            data_stop = _lower_bound(hdu, (data_label, 0))
-            if data_start == data_stop:
-                continue
-            found_data = True
-            random_start = _lower_bound(hdu, (random_label, iteration))
-            random_stop = _lower_bound(hdu, (random_label, iteration + 1))
-            if random_start == random_stop:
-                continue
-            source_data_tracer = data_label
-            source_random_tracer = random_label
-            break
+        rows = _locate_realization_rows(hdu, tracer, iteration)
+        objects = _read_contiguous(hdu, RAW_COLUMNS,
+                                   rows['data_start'], rows['data_stop'])
+        randoms = _read_contiguous(hdu, RAW_COLUMNS,
+                                   rows['random_start'], rows['random_stop'])
+        metadata = _raw_metadata(raw, hdu, path, tracer, iteration, rows)
+    return objects, randoms, metadata
 
-        if source_data_tracer is None:
-            pairs = ', '.join(
-                f'{data}/{random}'
-                for data, random in raw_tracer_label_pairs(tracer))
-            if not found_data:
-                raise ValueError(
-                    f'No object rows found for TRACERTYPE pairs ({pairs}).')
-            raise ValueError(
-                f'No random rows found for TRACERTYPE pairs ({pairs}), '
-                f'RANDITER={iteration}.')
 
-        objects = hdu.read(columns=list(RAW_COLUMNS), rows=np.arange(data_start, data_stop, dtype=np.int64))
-        randoms = hdu.read(columns=list(RAW_COLUMNS), rows=np.arange(random_start, random_stop, dtype=np.int64))
-        table_header = hdu.read_header()
-        primary_header = raw[0].read_header()
+def read_raw_object_positions(path, tracer, reference_iteration=0):
+    """Read common data coordinates once for a multi-iteration worker pool."""
+    path = Path(path)
+    tracer = normalize_tracer(tracer)
+    reference_iteration = _validate_iteration(reference_iteration)
+    if not path.is_file():
+        raise FileNotFoundError(f'Raw FITS does not exist: {path}.')
+    with fitsio.FITS(str(path)) as raw:
+        hdu = raw[1]
+        rows = _locate_realization_rows(hdu, tracer, reference_iteration)
+        records = _read_contiguous(hdu, ('XCART', 'YCART', 'ZCART'),
+                                   rows['data_start'], rows['data_stop'])
+        metadata = _raw_metadata(raw, hdu, path, tracer,
+                                 reference_iteration, rows)
+    return cartesian_positions(records), metadata
 
-    zone = _decode_text(
-        table_header.get('ZONE', primary_header.get('ZONE', 'UNKNOWN')))
-    release = _decode_text(
-        table_header.get('RELEASE', primary_header.get('RELEASE', 'UNKNOWN')))
-    return objects, randoms, {'input': str(path),
-                              'tracer': tracer,
-                              'source_data_tracer': source_data_tracer,
-                              'source_random_tracer': source_random_tracer,
-                              'zone': zone,
-                              'release': release,
-                              'iteration': iteration,
-                              'data_start': int(data_start),
-                              'data_stop': int(data_stop),
-                              'random_start': int(random_start),
-                              'random_stop': int(random_stop)}
+
+def read_raw_random_realization(path, tracer, iteration):
+    """Read only the random records for one realization."""
+    path = Path(path)
+    tracer = normalize_tracer(tracer)
+    iteration = _validate_iteration(iteration)
+    if not path.is_file():
+        raise FileNotFoundError(f'Raw FITS does not exist: {path}.')
+    with fitsio.FITS(str(path)) as raw:
+        hdu = raw[1]
+        rows = _locate_realization_rows(hdu, tracer, iteration)
+        randoms = _read_contiguous(hdu, RAW_COLUMNS,
+                                   rows['random_start'], rows['random_stop'])
+        metadata = _raw_metadata(raw, hdu, path, tracer, iteration, rows)
+    return randoms, metadata
 
 
 def cartesian_positions(records):
@@ -185,4 +231,6 @@ __all__ = ['RAW_COLUMNS',
            'raw_random_tracer_labels',
            'raw_tracer_label_pairs',
            'raw_zone_path',
+           'read_raw_object_positions',
+           'read_raw_random_realization',
            'read_raw_realization']

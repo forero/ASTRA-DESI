@@ -11,16 +11,156 @@
 """
 
 from dataclasses import dataclass
+import gc
 from itertools import combinations
 from numbers import Integral, Real
 
 import numpy as np
 from scipy.spatial import Delaunay, QhullError
+from numba import njit
 
 
 DEFAULT_R_THRESHOLD = -0.25
 DEFAULT_MIN_MEMBERS = 4
 UNASSIGNED = -1
+
+
+@dataclass(frozen=True)
+class CSRNeighbors:
+    """Compact read-only adjacency lists for a large undirected graph."""
+
+    offsets: np.ndarray
+    indices: np.ndarray
+
+    def __post_init__(self):
+        offsets = np.asarray(self.offsets)
+        indices = np.asarray(self.indices)
+        if offsets.ndim != 1 or len(offsets) < 2:
+            raise ValueError('CSR offsets must contain at least two values.')
+        if indices.ndim != 1:
+            raise ValueError('CSR indices must be one-dimensional.')
+        if offsets.dtype.kind not in 'iu' or indices.dtype.kind not in 'iu':
+            raise TypeError('CSR offsets and indices must contain integers.')
+        if int(offsets[0]) != 0 or int(offsets[-1]) != len(indices):
+            raise ValueError('CSR offsets do not span the indices array.')
+        if np.any(np.diff(offsets) < 0):
+            raise ValueError('CSR offsets must be non-decreasing.')
+        n_points = len(offsets) - 1
+        if len(indices) and (int(np.min(indices)) < 0
+                             or int(np.max(indices)) >= n_points):
+            raise IndexError('CSR contains a vertex outside the point set.')
+        object.__setattr__(self, 'offsets', offsets)
+        object.__setattr__(self, 'indices', indices)
+
+    def __len__(self):
+        return len(self.offsets) - 1
+
+    def __getitem__(self, point):
+        if not isinstance(point, (int, np.integer)):
+            raise TypeError('CSRNeighbors indices must be integers.')
+        point = int(point)
+        if point < 0:
+            point += len(self)
+        if point < 0 or point >= len(self):
+            raise IndexError(point)
+        return self.indices[int(self.offsets[point]):int(self.offsets[point + 1])]
+
+    def __iter__(self):
+        for point in range(len(self)):
+            yield self[point]
+
+    @property
+    def n_edges(self):
+        return len(self.indices) // 2
+
+
+def _python_csr_upper_edges(offsets, indices):
+    n_points = len(offsets) - 1
+    n_edges = sum(np.count_nonzero(
+        indices[int(offsets[point]):int(offsets[point + 1])] > point)
+        for point in range(n_points))
+    edges = np.empty((n_edges, 2), dtype=indices.dtype)
+    cursor = 0
+    for point in range(n_points):
+        row = indices[int(offsets[point]):int(offsets[point + 1])]
+        upper = row[row > point]
+        stop = cursor + len(upper)
+        edges[cursor:stop, 0] = point
+        edges[cursor:stop, 1] = upper
+        cursor = stop
+    return edges
+
+
+def _python_group_csr(offsets, indices, processing_order):
+    group_ids = np.full(len(offsets) - 1, UNASSIGNED, dtype=np.int32)
+    next_group_id = 0
+    for point_value in processing_order:
+        point = int(point_value)
+        smallest = np.iinfo(np.int32).max
+        for neighbor in indices[int(offsets[point]):int(offsets[point + 1])]:
+            group_id = int(group_ids[int(neighbor)])
+            if 0 <= group_id < smallest:
+                smallest = group_id
+        if smallest == np.iinfo(np.int32).max:
+            group_ids[point] = next_group_id
+            next_group_id += 1
+        else:
+            group_ids[point] = smallest
+    return group_ids, next_group_id
+
+
+if njit is not None:
+    @njit(cache=True)
+    def _csr_upper_edges_compiled(offsets, indices):
+        n_points = len(offsets) - 1
+        n_edges = 0
+        for point in range(n_points):
+            for cursor in range(offsets[point], offsets[point + 1]):
+                if indices[cursor] > point:
+                    n_edges += 1
+        edges = np.empty((n_edges, 2), dtype=indices.dtype)
+        output = 0
+        for point in range(n_points):
+            for cursor in range(offsets[point], offsets[point + 1]):
+                neighbor = indices[cursor]
+                if neighbor > point:
+                    edges[output, 0] = point
+                    edges[output, 1] = neighbor
+                    output += 1
+        return edges
+
+    @njit(cache=True)
+    def _group_csr_compiled(offsets, indices, processing_order):
+        group_ids = np.full(len(offsets) - 1, UNASSIGNED,
+                            dtype=np.int32)
+        next_group_id = 0
+        sentinel = np.iinfo(np.int32).max
+        for order_index in range(len(processing_order)):
+            point = processing_order[order_index]
+            smallest = sentinel
+            for cursor in range(offsets[point], offsets[point + 1]):
+                group_id = group_ids[indices[cursor]]
+                if group_id >= 0 and group_id < smallest:
+                    smallest = group_id
+            if smallest == sentinel:
+                group_ids[point] = next_group_id
+                next_group_id += 1
+            else:
+                group_ids[point] = smallest
+        return group_ids, next_group_id
+else:
+    _csr_upper_edges_compiled = _python_csr_upper_edges
+    _group_csr_compiled = _python_group_csr
+
+
+def warmup_accelerators():
+    """Compile the two small Numba kernels before worker processes are forked."""
+    if njit is None:
+        return
+    offsets = np.array([0, 1, 2], dtype=np.int32)
+    indices = np.array([1, 0], dtype=np.int32)
+    _csr_upper_edges_compiled(offsets, indices)
+    _group_csr_compiled(offsets, indices, np.array([0, 1], dtype=np.int32))
 
 
 @dataclass(frozen=True)
@@ -129,7 +269,10 @@ def build_delaunay_graph(object_positions, random_positions) -> DelaunayGraph:
     positions = np.concatenate((objects, randoms), axis=0)
     if len(positions) < 4:
         raise ValueError('A three-dimensional Delaunay triangulation needs at least four combined points.')
-    if len(np.unique(positions, axis=0)) != len(positions):
+    # A full unique() of tens of millions of 3-D points adds a large sort and
+    # several GiB of peak memory.  Keep the explicit diagnostic for small
+    # inputs; large inputs are checked by the isolated-vertex test below.
+    if len(positions) <= 1_000_000 and len(np.unique(positions, axis=0)) != len(positions):
         raise ValueError('Combined object and random positions must be distinct.')
 
     try:
@@ -137,11 +280,24 @@ def build_delaunay_graph(object_positions, random_positions) -> DelaunayGraph:
     except QhullError as exc:
         raise ValueError('The combined positions do not define a valid 3-D Delaunay triangulation.') from exc
 
-    edges = _unique_delaunay_edges(triangulation.simplices)
-    neighbors = neighbors_from_edges(len(positions), edges)
-    if any(len(row) == 0 for row in neighbors):
+    offsets, indices = triangulation.vertex_neighbor_vertices
+    offsets = np.asarray(offsets)
+    indices = np.asarray(indices)
+    if offsets.dtype.itemsize > 4 and int(offsets[-1]) <= np.iinfo(np.int32).max:
+        offsets = offsets.astype(np.int32)
+    if indices.dtype.itemsize > 4 and len(positions) <= np.iinfo(np.int32).max:
+        indices = indices.astype(np.int32)
+    neighbors = CSRNeighbors(offsets=offsets, indices=indices)
+    if np.any(np.diff(neighbors.offsets) == 0):
         raise ValueError('The Delaunay graph contains a point with no neighbours, so r '
                          'is undefined for that point.')
+
+    # The CSR arrays are independent NumPy allocations.  Releasing the
+    # triangulation here drops simplices, neighbouring simplices and Qhull
+    # bookkeeping before the unique undirected edge list is allocated.
+    del triangulation
+    gc.collect()
+    edges = _csr_upper_edges_compiled(neighbors.offsets, neighbors.indices)
 
     is_data = np.zeros(len(positions), dtype=bool)
     is_data[:len(objects)] = True
@@ -151,6 +307,15 @@ def build_delaunay_graph(object_positions, random_positions) -> DelaunayGraph:
 
 
 def _normalized_neighbors(neighbors):
+
+    if isinstance(neighbors, CSRNeighbors):
+        if len(neighbors) < 1:
+            raise ValueError('neighbors must contain at least one point.')
+        isolated = np.flatnonzero(np.diff(neighbors.offsets) == 0)
+        if len(isolated):
+            raise ValueError('A Delaunay grouping graph cannot contain points '
+                             f'without neighbors; indices={isolated.tolist()}.')
+        return neighbors
 
     n_points = len(neighbors)
     if n_points < 1:
@@ -191,9 +356,19 @@ def compute_density_contrast(neighbors, is_data) -> DensityContrast:
     if labels.dtype.kind != 'b':
         raise TypeError('is_data must have boolean dtype.')
 
-    n_data_neighbors = np.fromiter((sum(bool(labels[neighbor]) for neighbor in row) for row in graph),
-                                   dtype=np.int64, count=len(graph))
-    degrees = np.fromiter((len(row) for row in graph), dtype=np.int64, count=len(graph))
+    if isinstance(graph, CSRNeighbors):
+        degrees = np.diff(graph.offsets).astype(np.int32, copy=False)
+        adjacent_is_data = labels[graph.indices]
+        n_data_neighbors = np.add.reduceat(
+            adjacent_is_data.view(np.uint8), graph.offsets[:-1]).astype(
+                np.int32, copy=False)
+        del adjacent_is_data
+    else:
+        n_data_neighbors = np.fromiter(
+            (sum(bool(labels[neighbor]) for neighbor in row) for row in graph),
+            dtype=np.int64, count=len(graph))
+        degrees = np.fromiter((len(row) for row in graph),
+                              dtype=np.int64, count=len(graph))
     if np.any(degrees == 0):
         indices = np.flatnonzero(degrees == 0)
         raise ValueError(f'r is undefined for points without Delaunay neighbours - indices={indices.tolist()}.')
@@ -247,18 +422,24 @@ def group_void_points(neighbors, r_values, r_threshold = DEFAULT_R_THRESHOLD, mi
     selected_indices = np.flatnonzero(selected)
     stable_order = np.argsort(r_values[selected_indices], kind='stable')
     processing_order = selected_indices[stable_order]
+    if len(graph) <= np.iinfo(np.int32).max:
+        processing_order = processing_order.astype(np.int32, copy=False)
 
-    group_ids = np.full(len(graph), UNASSIGNED, dtype=np.int64)
-    next_group_id = 0
-    for point in processing_order:
-        point = int(point)
-        neighboring_groups = tuple(sorted({int(group_ids[neighbor]) for neighbor in graph[point]
-                                           if group_ids[neighbor] >= 0}))
-        if not neighboring_groups:
-            group_ids[point] = next_group_id
-            next_group_id += 1
-        else:
-            group_ids[point] = min(neighboring_groups)
+    if isinstance(graph, CSRNeighbors):
+        group_ids, next_group_id = _group_csr_compiled(
+            graph.offsets, graph.indices, processing_order)
+    else:
+        group_ids = np.full(len(graph), UNASSIGNED, dtype=np.int64)
+        next_group_id = 0
+        for point in processing_order:
+            point = int(point)
+            neighboring_groups = tuple(sorted({int(group_ids[neighbor]) for neighbor in graph[point]
+                                               if group_ids[neighbor] >= 0}))
+            if not neighboring_groups:
+                group_ids[point] = next_group_id
+                next_group_id += 1
+            else:
+                group_ids[point] = min(neighboring_groups)
 
     assigned = group_ids >= 0
     if np.any(assigned):
@@ -276,8 +457,11 @@ def group_void_points(neighbors, r_values, r_threshold = DEFAULT_R_THRESHOLD, mi
     else:
         group_sizes = {}
 
-    return VoidGrouping(group_ids=group_ids, group_sizes=group_sizes, threshold_selected=selected,
-                        retained=group_ids >= 0, processing_order=processing_order, r_values=r_values.copy())
+    return VoidGrouping(group_ids=group_ids, group_sizes=group_sizes,
+                        threshold_selected=selected,
+                        retained=group_ids >= 0,
+                        processing_order=processing_order,
+                        r_values=r_values)
 
 
 def group_aligned_realizations(neighbors, r_values_by_realization, point_ids_by_realization=None,

@@ -112,11 +112,20 @@ def compute_void_shapes(positions, is_data, group_ids,
     groups = _group_labels(group_ids, len(xyz))
     scale = _positive_scale(coordinate_scale)
 
-    retained_group_ids = np.unique(groups[groups >= 0])
-    if len(retained_group_ids) == 0:
+    retained_points = np.flatnonzero(groups >= 0)
+    if len(retained_points) == 0:
         return _empty_shapes()
 
-    retained_group_ids = retained_group_ids.astype(np.int64, copy=False)
+    # Sort retained members once.  The previous implementation built a full
+    # N-point boolean mask for every group, which scales as N_points*N_groups
+    # (more than 10^12 comparisons for the DR2 BGS catalogue).
+    point_groups = groups[retained_points]
+    member_order = np.argsort(point_groups, kind='stable')
+    retained_points = retained_points[member_order]
+    point_groups = point_groups[member_order]
+    starts = np.r_[0, np.flatnonzero(point_groups[1:] != point_groups[:-1]) + 1]
+    stops = np.r_[starts[1:], len(point_groups)]
+    retained_group_ids = point_groups[starts].astype(np.int64, copy=False)
     n_groups = len(retained_group_ids)
     n_members = np.zeros(n_groups, dtype=np.int64)
     n_data = np.zeros(n_groups, dtype=np.int64)
@@ -127,19 +136,17 @@ def compute_void_shapes(positions, is_data, group_ids,
     r_eff = np.full(n_groups, np.nan, dtype=np.float64)
     ellipticity = np.full(n_groups, np.nan, dtype=np.float64)
 
-    scaled_positions = xyz * scale
-    for row, group_id in enumerate(retained_group_ids):
-        member_mask = groups == group_id
-        data_mask = member_mask & data_labels
-        random_mask = member_mask & ~data_labels
-
-        n_members[row] = np.count_nonzero(member_mask)
-        n_data[row] = np.count_nonzero(data_mask)
-        n_random[row] = np.count_nonzero(random_mask)
+    for row, (start, stop) in enumerate(zip(starts, stops)):
+        member_points = retained_points[start:stop]
+        member_is_data = data_labels[member_points]
+        n_members[row] = len(member_points)
+        n_data[row] = np.count_nonzero(member_is_data)
+        n_random[row] = len(member_points) - n_data[row]
         if n_random[row] == 0:
             continue
 
-        random_positions = scaled_positions[random_mask]
+        random_points = member_points[~member_is_data]
+        random_positions = xyz[random_points] * scale
         center[row] = np.mean(random_positions, axis=0, dtype=np.float64)
         measurements = _moment_measurements(random_positions)
         if measurements is None:

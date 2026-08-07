@@ -1,4 +1,5 @@
-from .astra import (DelaunayGraph,
+from .astra import (CSRNeighbors,
+                    DelaunayGraph,
                     DensityContrast,
                     GroupFinderResult,
                     VoidGrouping,
@@ -16,7 +17,8 @@ from .watershed import (EdgeMaskApplication,
                         build_all_random_healpix_mask,
                         build_random_healpix_mask)
 
-__all__ = ['DelaunayGraph',
+__all__ = ['CSRNeighbors',
+           'DelaunayGraph',
            'DensityContrast',
            'ELLIPTICITY_DEFINITION',
            'EdgeMaskApplication',

@@ -12,6 +12,7 @@ per-zone classifications of the cosmic web into **voids, sheets, filaments, and 
 - Python 3.9+ (tested with 3.12)
 - Packages: `numpy`, `scipy`, `pandas`, `astropy`, `matplotlib`
 - Raw void-catalogue finder: `fitsio`, `healpy`
+- Parallel group finder acceleration: `numba` (strongly recommended for DR2)
 - Optional: `requests` for Zenodo uploads (pulled in by `zenodo_push.py`)
 
 
