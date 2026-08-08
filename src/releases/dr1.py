@@ -1,10 +1,12 @@
-import glob, json, os, re
+import fcntl, glob, json, os, re
 import astropy.units as u
 import healpy as hp
 import numpy as np
 from argparse import Namespace
 from astropy.coordinates import SkyCoord
 from astropy.cosmology import Planck18
+from astropy.io import fits
+import fitsio
 from astropy.table import Column, Table, vstack
 
 from desiproc.implement_astra import register_tracer_mapping
@@ -52,6 +54,7 @@ EMLINE_OUTPUT_MAP = {'SED_SFR': ('SED_SFR', 'SFR_CG'),
                      'SED_MASS': ('SED_MASS', 'MASS_CG'),
                      'FLUX_G': ('FLUX_G',),
                      'FLUX_R': ('FLUX_R',)}
+PROPERTY_COLUMNS = ('TARGETID', 'SED_SFR', 'SED_MASS', 'FLUX_G', 'FLUX_R')
 _EMLINE_BEST_CACHE = None
 
 
@@ -64,18 +67,20 @@ def _float_with_nan(column):
     Returns:
         A numpy array of type float64 with masked values replaced by NaN.
     """
+    if np.ma.isMaskedArray(column):
+        return np.asarray(np.ma.filled(column, np.nan), dtype=np.float64)
     arr = np.asarray(column)
-    if np.ma.isMaskedArray(arr):
-        return np.asarray(arr.filled(np.nan), dtype=np.float64)
     return np.asarray(arr, dtype=np.float64)
 
 
-def _load_emline_best(catalog_path=EMLINE_CATALOG_PATH):
+def _load_emline_best(catalog_path=EMLINE_CATALOG_PATH, targetids=None):
     """
     Load the DR1 emline catalogue and keep one row per TARGETID with minimum ZERR.
 
     Args:
         catalog_path: Path to the DR1 emline catalogue FITS file.
+        targetids: Optional TARGETIDs to retain before sorting/deduplicating. This
+            avoids materialising irrelevant rows from the 49 GB VAC.
     Returns:
         A table containing the best emline entries per TARGETID.
     Raises:
@@ -83,43 +88,194 @@ def _load_emline_best(catalog_path=EMLINE_CATALOG_PATH):
         KeyError: If required columns are missing from the catalogue.
     """
     global _EMLINE_BEST_CACHE
-    if _EMLINE_BEST_CACHE is not None:
+    if targetids is None and _EMLINE_BEST_CACHE is not None:
         return _EMLINE_BEST_CACHE
 
     if not os.path.exists(catalog_path):
         raise FileNotFoundError(f'DR1 emline catalogue not found: {catalog_path}')
 
-    emline = Table.read(catalog_path, memmap=True)
-    missing = [name for name in EMLINE_REQUIRED_COLUMNS if name not in emline.colnames]
-    if missing:
-        raise KeyError(f'DR1 emline catalogue missing columns: {missing}')
+    desired = None
+    if targetids is not None:
+        desired = np.unique(np.asarray(targetids, dtype=np.int64))
 
-    optional_cols = []
-    for candidates in EMLINE_OUTPUT_MAP.values():
-        for name in candidates:
-            if name in emline.colnames:
-                optional_cols.append(name)
+    with fits.open(catalog_path, memmap=True, lazy_load_hdus=True) as hdul:
+        available = list(hdul[1].columns.names)
+        missing = [name for name in EMLINE_REQUIRED_COLUMNS if name not in available]
+        if missing:
+            raise KeyError(f'DR1 emline catalogue missing columns: {missing}')
 
-    selected_cols = list(EMLINE_REQUIRED_COLUMNS)
-    for name in optional_cols:
-        if name not in selected_cols:
-            selected_cols.append(name)
-    emline = emline[selected_cols]
+        optional_cols = []
+        for candidates in EMLINE_OUTPUT_MAP.values():
+            for name in candidates:
+                if name in available:
+                    optional_cols.append(name)
+
+        selected_cols = list(EMLINE_REQUIRED_COLUMNS)
+        for name in optional_cols:
+            if name not in selected_cols:
+                selected_cols.append(name)
+
+    row_index = None
+    if desired is not None:
+        if fitsio is not None:
+            target_rows = fitsio.read(catalog_path, ext=1, columns=['TARGETID'])
+            vac_targetid = np.asarray(target_rows['TARGETID'], dtype=np.int64)
+        else:
+            with fits.open(catalog_path, memmap=True, lazy_load_hdus=True) as hdul:
+                vac_targetid = np.asarray(hdul[1].data['TARGETID'], dtype=np.int64)
+        positions = np.searchsorted(desired, vac_targetid, side='left')
+        matched = positions < desired.size
+        matched[matched] &= desired[positions[matched]] == vac_targetid[matched]
+        row_index = np.flatnonzero(matched)
+
+    if fitsio is not None:
+        read_kwargs = {'ext': 1, 'columns': selected_cols}
+        if row_index is not None:
+            read_kwargs['rows'] = row_index
+        emline = Table(fitsio.read(catalog_path, **read_kwargs))
+    else:
+        fits_rows = slice(None) if row_index is None else row_index
+        with fits.open(catalog_path, memmap=True, lazy_load_hdus=True) as hdul:
+            data = hdul[1].data
+            emline = Table()
+            for name in selected_cols:
+                emline[name] = np.asarray(data[name][fits_rows])
+
     if len(emline) == 0:
-        _EMLINE_BEST_CACHE = emline
-        return _EMLINE_BEST_CACHE
+        if targetids is None:
+            _EMLINE_BEST_CACHE = emline
+        return emline
 
     score = _float_with_nan(emline['ZERR'])
+    score = np.where(np.isfinite(score), score, np.inf)
     order = np.lexsort((score, np.asarray(emline['TARGETID'], dtype=np.int64)))
     emline_sorted = emline[order]
 
     targetid_sorted = np.asarray(emline_sorted['TARGETID'], dtype=np.int64)
     keep = np.ones(len(emline_sorted), dtype=bool)
     keep[1:] = targetid_sorted[1:] != targetid_sorted[:-1]
-    _EMLINE_BEST_CACHE = emline_sorted[keep]
+    result = emline_sorted[keep]
+    if targetids is None:
+        _EMLINE_BEST_CACHE = result
 
-    print(f'[dr1] emline rows={len(emline)} unique-targetid={len(_EMLINE_BEST_CACHE)}', flush=True)
-    return _EMLINE_BEST_CACHE
+    print(f'[dr1] emline rows={len(emline)} unique-targetid={len(result)}', flush=True)
+    return result
+
+
+def _properties_for_targetids(targetids, emline_best):
+    """Return the requested DR1 properties for sorted, unique TARGETIDs."""
+    targetids = np.unique(np.asarray(targetids, dtype=np.int64))
+    result = Table()
+    result['TARGETID'] = targetids
+
+    best_tid = np.asarray(emline_best['TARGETID'], dtype=np.int64)
+    idx = np.searchsorted(best_tid, targetids, side='left')
+    valid = idx < best_tid.size
+    valid[valid] &= best_tid[idx[valid]] == targetids[valid]
+
+    mapping_used = {}
+    for out_name, candidates in EMLINE_OUTPUT_MAP.items():
+        src_name = next((name for name in candidates if name in emline_best.colnames), None)
+        values_out = np.full(targetids.size, np.nan, dtype=np.float64)
+        if src_name is not None:
+            values_in = _float_with_nan(emline_best[src_name])
+            values_out[valid] = values_in[idx[valid]]
+            mapping_used[out_name] = src_name
+        else:
+            mapping_used[out_name] = 'nan'
+        result[out_name] = values_out
+
+    print(f'[dr1] property matches={int(valid.sum())}/{len(result)} mapping={mapping_used}',
+          flush=True)
+    return result[list(PROPERTY_COLUMNS)]
+
+
+def _merge_properties(existing, incoming):
+    """Merge two property tables by TARGETID, preferring finite incoming values."""
+    old_tid = np.asarray(existing['TARGETID'], dtype=np.int64)
+    new_tid = np.asarray(incoming['TARGETID'], dtype=np.int64)
+    all_tid = np.union1d(old_tid, new_tid)
+
+    merged = Table()
+    merged['TARGETID'] = all_tid
+    old_pos = np.searchsorted(all_tid, old_tid)
+    new_pos = np.searchsorted(all_tid, new_tid)
+    for name in PROPERTY_COLUMNS[1:]:
+        values = np.full(all_tid.size, np.nan, dtype=np.float64)
+        old_values = _float_with_nan(existing[name])
+        new_values = _float_with_nan(incoming[name])
+        values[old_pos] = old_values
+        finite_new = np.isfinite(new_values)
+        values[new_pos[finite_new]] = new_values[finite_new]
+        merged[name] = values
+    return merged
+
+
+def _read_real_targetids(base_dir, tracers, zone_label):
+    """Read and deduplicate TARGETIDs from native DR1 real catalogues."""
+    parts = []
+    for tracer in tracers:
+        path = os.path.join(base_dir, f'{tracer}_{zone_label}_clustering.dat.fits')
+        if not os.path.exists(path):
+            raise FileNotFoundError(f'DR1 real catalogue not found: {path}')
+        with fits.open(path, memmap=True, lazy_load_hdus=True) as hdul:
+            names = list(hdul[1].data.columns.names)
+            if 'TARGETID' not in names:
+                raise KeyError(f'DR1 real catalogue missing TARGETID: {path}')
+            parts.append(np.asarray(hdul[1].data['TARGETID'], dtype=np.int64).copy())
+    if not parts:
+        return np.empty(0, dtype=np.int64)
+    return np.unique(np.concatenate(parts))
+
+
+def write_zone_properties(base_dir, properties_root, zone_label, tracers,
+                          release_tag='DR1', catalog_path=EMLINE_CATALOG_PATH):
+    """
+    Create/update ``properties/zone_REGION_properties.fits.gz`` for real DR1 rows.
+
+    Successive per-tracer executions are merged under an advisory file lock, so a
+    regional file contains the union of all TARGETIDs processed so far.
+    """
+    zone_label = _normalize_zone_label(zone_label)
+    properties_dir = os.path.join(properties_root, 'properties')
+    os.makedirs(properties_dir, exist_ok=True)
+    output_path = os.path.join(properties_dir, f'zone_{zone_label}_properties.fits.gz')
+    lock_path = output_path + '.lock'
+    requested_tid = _read_real_targetids(base_dir, tracers, zone_label)
+
+    with open(lock_path, 'a', encoding='utf-8') as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        existing = None
+        missing_tid = requested_tid
+        if os.path.exists(output_path):
+            existing = Table.read(output_path, memmap=True)
+            missing_cols = [name for name in PROPERTY_COLUMNS if name not in existing.colnames]
+            if missing_cols:
+                raise KeyError(f'Existing DR1 properties file missing columns: {missing_cols}')
+            existing = existing[list(PROPERTY_COLUMNS)]
+            existing_tid = np.unique(np.asarray(existing['TARGETID'], dtype=np.int64))
+            missing_tid = np.setdiff1d(requested_tid, existing_tid, assume_unique=True)
+
+        if missing_tid.size == 0:
+            print(f'[dr1] reuse complete properties {output_path}', flush=True)
+            return output_path
+
+        emline_best = _load_emline_best(catalog_path, targetids=missing_tid)
+        incoming = _properties_for_targetids(missing_tid, emline_best)
+        properties = incoming if existing is None else _merge_properties(existing, incoming)
+        properties.meta['ZONE'] = zone_label
+        properties.meta['RELEASE'] = str(release_tag)
+
+        tmp_path = f'{output_path}.tmp.{os.getpid()}.fits.gz'
+        try:
+            properties.write(tmp_path, format='fits', overwrite=True)
+            os.replace(tmp_path, output_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        print(f'[dr1] wrote properties rows={len(properties)} path={output_path}', flush=True)
+        return output_path
 
 
 def _append_emline_columns(raw_table, emline_best):
@@ -585,12 +741,22 @@ def create_config(args):
                parsed_args, release_tag):
         label = _normalize_zone_label(zone)
         zone_value = ZONE_VALUES.get(label, 1999)
-        return build_raw_dr2_zone(
+        raw = build_raw_dr2_zone(
             label, sel_tracers, real_tables, random_tables,
             parsed_args.raw_out, parsed_args.n_random, zone_value,
             out_tag=parsed_args.out_tag, release_tag=release_tag,
             tracer_ids=tracer_ids, tracer_full_labels=tracer_full_labels,
             log_label='dr1')
+        property_tracers = [
+            tracer for tracer in available_tracers
+            if os.path.exists(os.path.join(
+                parsed_args.base_dir, f'{tracer}_{label}_clustering.dat.fits'))
+        ]
+        if not property_tracers:
+            property_tracers = list(sel_tracers)
+        write_zone_properties(parsed_args.base_dir, parsed_args.class_out, label,
+                              property_tracers, release_tag=release_tag)
+        return raw
 
     preload_kwargs = {
         'real_template': '{tracer}_{zone}_clustering.dat.fits',

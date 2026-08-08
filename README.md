@@ -17,16 +17,7 @@ per-zone classifications of the cosmic web into **voids, sheets, filaments, and 
 ## Repository layout
 
 - **`src/desiproc/`** – Core data-processing modules
-  - `read_data.py`: helpers for loading DESI clustering catalogues and building Cartesian
-    coordinates
-  - `implement_astra.py`: Delaunay-based pair generation, web-type classification, and
-    probability estimation
-  - `gen_groups.py`: FoF group finder with configurable `r` thresholds
-  - `paths.py`: canonical naming helpers for raw/classification/probability/pairs files
 - **`src/plot/`** – Visualisation entry points
-  - `common.py`: shared loaders and path resolvers used by all plotting scripts
-  - `plot_wedges.py`: tracer-by-zone wedge plots for raw classifications (EDR/DR1/DR2), including FoF groups, global `--z-slice` cuts, per-tracer windows via `--tracer-z-slice`, and an optional `--view section` mode for annular “fan” wedges
-  - `plot_extra.py`: histograms, CDFs, and supplementary wedges
 - **`src/main.py`** – Command-line driver that orchestrates preprocessing, pair generation,
   classification, probabilities, and group finding (EDR/DR1/DR2)
 - **`jobs/`** – Ready-to-run scripts for either interactive shells (`run_edr.sh`) or
@@ -41,12 +32,13 @@ Each zone produces a consistent set of artefacts stored under the release root
 (`classification/`, `probabilities/`, `pairs/`):
 
 - **Raw tables** (`raw/zone_XX*.fits.gz`): combined real + random catalogue
-- **Pairs** (`pairs/zone_XX*_pairs.fits.gz`): Delaunay edges
+- **DR1 properties** (`properties/zone_REGION_properties.fits.gz`): one row per real
+  `TARGETID`, containing `SED_SFR`, `SED_MASS`, `FLUX_G`, and `FLUX_R`; successive
+  runs reuse and, when needed, merge the regional file
 - **Classification** (`classification/zone_XX_*classified.fits.gz`): counts of data/random
   neighbours
 - **Probabilities** (`probabilities/zone_XX*_probability.fits.gz`): void/sheet/filament/knot
   likelihoods using independent lower/upper `r` thresholds
-- **Groups** (`groups/zone_XX*_groups_fof_WEBTYPE.fits.gz`): FoF group catalogues
 - **Plots** (`figs/` or custom output): histograms, CDFs, standard wedges, FoF wedges
 
 
@@ -100,11 +92,6 @@ python src/main.py \
   --plot
 ```
 
-Environment variables such as `PAIR_NJOBS_CAP` (maximum multiprocessing workers for
-pair generation) can be exported beforehand when running on shared systems. When
-`SLURM_CPUS_PER_TASK` is not set, the pipeline now defaults to using all visible CPU
-cores (`os.cpu_count`).
-
 
 ### 2. Shell scripts in `jobs/`
 
@@ -114,14 +101,6 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
   clustering directory, and produces/plots outputs in `/pscratch/.../edr/`. The script
   defaults to `--only-plot`, making it ideal for regenerating visualisations once the
   heavy processing has completed.
-
-  ```bash
-  # Regenerate plots for all EDR zones
-  bash jobs/run_edr.sh all
-
-  # Regenerate plots for a single zone
-  bash jobs/run_edr.sh 05
-  ```
 
 
 ### 3. SLURM batch jobs (`jobs/*.sbatch`)
@@ -135,13 +114,6 @@ The shell helpers wrap `src/main.py` with common configurations and directory la
   catalogue filenames, not from an RA/DEC split, and the masks are not applied
   to ASTRA's input rows. The script also enforces `PAIR_NJOBS_CAP`, capping
   multiprocessing workers based on `SLURM_CPUS_PER_TASK`.
-- `jobs/run_dr3.sbatch` processes one DR3 tracer/zone in per-iteration shards,
-  parallelising shards across the allocated node. Set `TRACER` and `ZONE` at
-  submission time; accepted tracer aliases include `LRG`, `ELG`, `QSO`, `BGS`,
-  and `BGS_BRIGHT-21.35`. `PAIR_NJOBS_CAP` or `DR3_ITER_NJOBS_CAP` controls the
-  shard-worker cap, and `ITER_WORKERS` overrides it for a single submission.
-  Submit once with the default `MODE=iter`, then submit again with `MODE=prob`
-  after the iteration job finishes to build the aggregate probability file.
 
   ```bash
   sbatch -J lrg_ngc --export=ALL,TRACER=LRG,ZONE=NGC jobs/run_dr3.sbatch
@@ -162,8 +134,6 @@ Key entry points:
 - `plot_extra.py`: CDFs, histograms, and supplemental wedges. Supports on-disk caching
   (`--cache-dir`) to avoid repeated I/O.
 
-Each script has an independent CLI.
-
 
 ## Zenodo packaging (`zenodo/`)
 
@@ -177,18 +147,3 @@ Zenodo:
   slugifying titles, etc.).
 - `post_edr.sh` and `post_dr1.sh`: example shell wrappers invoking `zenodo_push.py` for the EDR and DR1 products.
 - `json/members.json`: sample metadata template for Zenodo creators.
-
-Basic usage (sandbox upload):
-
-```bash
-python zenodo/zenodo_push.py \
-  --paths /pscratch/.../edr/raw /pscratch/.../edr/class /pscratch/.../edr/groups \
-  --pscratch-dir /pscratch/.../cosmic-web \
-  --title "ASTRA-DESI EDR Release v0.2" \
-  --description "Early Data Release products for ASTRA-DESI (raw, class, groups)." \
-  --creators-json zenodo/json/members.json \
-  --keywords ASTRA DESI "cosmic web" \
-  --sandbox --publish --token-file ~/.zenodo_token
-```
-
-Add `--dry-run` to generate the staging tarballs without performing the upload.

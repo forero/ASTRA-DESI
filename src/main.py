@@ -555,6 +555,8 @@ def main():
         p.add_argument('--connect-lines', action='store_true', help='Connect points in groups plot')
         p.add_argument('--only-plot', action='store_true', help='Skip preproc and only plot')
         p.add_argument('--combine-only', action='store_true', help='Skip processing and only merge per-tracer outputs into combined files')
+        p.add_argument('--properties-only', action='store_true',
+                       help='DR1 only: build/reuse regional properties files and skip ASTRA processing')
         p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames (e.g., tracer)')
         p.add_argument('--tracers', nargs='+', default=None,
                        help='Process only these tracers (e.g., BGS_ANY ELG LRG QSO for EDR; BGS_BRIGHT ELG_LOPnotqso LRG QSO for DR1)')
@@ -586,6 +588,10 @@ def main():
                             'DR1 always reads native {tracer}_{zone} files without RA/DEC or mask filtering.')
 
         args = p.parse_args()
+
+        exclusive_modes = (args.only_plot, args.combine_only, args.properties_only)
+        if sum(bool(mode) for mode in exclusive_modes) > 1:
+            raise ValueError('--only-plot, --combine-only, and --properties-only are mutually exclusive')
 
         if args.progress:
             os.environ.setdefault('ASTRA_PROGRESS', '1')
@@ -655,6 +661,25 @@ def main():
         pipeline_start = time.time()
 
         zones = list(release_config.zones)
+
+        if args.properties_only:
+            if release != 'DR1':
+                raise RuntimeError('--properties-only is supported only for DR1')
+            from releases.dr1 import write_zone_properties
+            for z in zones:
+                label = str(z).upper()
+                property_tracers = [
+                    tracer for tracer in available_tracers
+                    if os.path.exists(os.path.join(
+                        args.base_dir, f'{tracer}_{label}_clustering.dat.fits'))
+                ]
+                if not property_tracers:
+                    raise FileNotFoundError(
+                        f'No native DR1 real catalogues found for zone {label} in {args.base_dir}')
+                write_zone_properties(args.base_dir, args.class_out, label,
+                                      property_tracers, release_tag=release_tag)
+            print(f'--- [pipeline] properties-only elapsed t {time.time()-pipeline_start:.2f} s')
+            return
 
         if args.only_plot:
             for z in zones:
