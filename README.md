@@ -39,7 +39,7 @@ Each zone produces a consistent set of artefacts stored under the release root
   neighbours
 - **Probabilities** (`probabilities/zone_XX*_probability.fits.gz`): void/sheet/filament/knot
   likelihoods using independent lower/upper `r` thresholds
-- **Plots** (`figs/` or custom output): histograms, CDFs, standard wedges, FoF wedges
+- **Plots** (`figs/` or custom output): histograms, CDFs, standard wedges, etc.
 
 
 ## Running the pipeline
