@@ -14,8 +14,10 @@ def parse_args():
                    help='Base directory containing the standard EDR layout (raw/, classification/, probabilities/, pairs/, groups/)')
     p.add_argument('--include-figs', action='store_true',
                    help='Include the figs/ subdirectory when --release-root is provided and the folder exists')
-    p.add_argument('--pscratch-dir', required=True, help='Nersc base at /pscratch to create temp folder')
+    p.add_argument('--pscratch-dir', default=None, help='Nersc base at /pscratch to create temp folder')
     p.add_argument('--keep-tree', action='store_true', help='Preserve directory structure (e.g., raw/, classification/, probabilities/).')
+    p.add_argument('--direct-upload', action='store_true',
+                   help='Upload the files passed with --paths as-is, without staging or creating new tarballs')
     p.add_argument('--title', required=True, help='Zenodo record title')
     p.add_argument('--description', default=None, help='Record description (plain text or HTML)')
     p.add_argument('--description-file', default=None, help='Path to a file containing the record description (overrides --description)')
@@ -29,14 +31,23 @@ def parse_args():
     p.add_argument('--related-identifiers-json', default=None, help='Json for other identifiers')
     p.add_argument('--existing-deposition-id', type=int, default=None,
                    help='Existing Zenodo deposition ID to create a new version')
+    p.add_argument('--resume-draft-id', type=int, default=None,
+                   help='Resume uploads to an already-created unpublished draft deposition')
     p.add_argument('--keep-existing-files', action='store_true',
                    help='Keep files carried over from the previous version when using --existing-deposition-id')
     p.add_argument('--reuse-metadata', action='store_true',
                    help='Reuse metadata already stored in the existing deposition')
 
     p.add_argument('--publish', action='store_true', help='Publish record after uploading')
+    p.add_argument('--create-draft-only', action='store_true',
+                   help='Create/update the Zenodo draft and metadata, but do not upload or publish files')
     p.add_argument('--sandbox', action='store_true', help='Use https://sandbox.zenodo.org')
-    p.add_argument('--dry-run', action='store_true', help='Only create staging and records, DONT upload')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Validate inputs and show the planned upload without contacting Zenodo')
+    p.add_argument('--max-total-size-gb', type=float, default=50.0,
+                   help='Preflight record-size limit in decimal GB (default: Zenodo standard 50 GB)')
+    p.add_argument('--allow-large-upload', action='store_true',
+                   help='Allow an upload over --max-total-size-gb after assigning a larger Zenodo quota')
 
     p.add_argument('--token-env', default='ZENODO_TOKEN', help='Env variable for token')
     p.add_argument('--token-file', default=None, help='Plain text file with token')
@@ -46,6 +57,20 @@ def parse_args():
         p.error('specify --paths and/or --release-root to select content to upload')
     if not args.description and not args.description_file:
         p.error('provide --description and/or --description-file for the Zenodo record')
+    if args.existing_deposition_id and args.resume_draft_id:
+        p.error('--existing-deposition-id and --resume-draft-id are mutually exclusive')
+    if args.create_draft_only and args.publish:
+        p.error('--create-draft-only and --publish are mutually exclusive')
+    if args.create_draft_only and args.dry_run:
+        p.error('--create-draft-only and --dry-run are mutually exclusive')
+    if args.direct_upload and args.release_root:
+        p.error('--direct-upload only accepts explicit files through --paths')
+    if args.direct_upload and not args.paths:
+        p.error('--direct-upload requires --paths')
+    if not args.direct_upload and not args.pscratch_dir:
+        p.error('--pscratch-dir is required unless --direct-upload is used')
+    if args.max_total_size_gb <= 0:
+        p.error('--max-total-size-gb must be greater than zero')
     return args
 
 
@@ -117,7 +142,9 @@ def _get_token(env_name, token_file):
     if token_file:
         with open(token_file, 'r') as f:
             return f.read().strip()
-    raise SystemExit(f'ERROR: not a valid token. Define venv {env_name} or --token-file PATH.')
+    raise SystemExit(
+        f'ERROR: no valid token. Define the {env_name} environment variable or use --token-file PATH.'
+    )
 
 
 def _resolve_description(text, path):
@@ -140,6 +167,21 @@ def _resolve_description(text, path):
     if text:
         return text
     raise SystemExit('ERROR: description text not provided. Use --description or --description-file.')
+
+
+def _validate_creators(creators):
+    """Validate the creator objects before creating or updating a Zenodo draft."""
+    if not isinstance(creators, list) or not creators:
+        raise SystemExit('ERROR: creators JSON must contain a non-empty list.')
+    allowed = {'name', 'affiliation', 'orcid'}
+    for index, creator in enumerate(creators):
+        if not isinstance(creator, dict) or not creator.get('name'):
+            raise SystemExit(f'ERROR: creator {index} must be an object with a non-empty name.')
+        unknown = set(creator) - allowed
+        if unknown:
+            raise SystemExit(
+                f'ERROR: creator {index} has unsupported fields: {", ".join(sorted(unknown))}'
+            )
 
 
 def _collect_release_paths(release_root, include_figs):
@@ -182,59 +224,125 @@ def _collect_release_paths(release_root, include_figs):
     return selected
 
 
+def _resolve_direct_files(paths):
+    """Validate and resolve files selected for an upload without staging."""
+    resolved = []
+    names = set()
+    for value in paths:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise SystemExit(f'ERROR: direct-upload path is not a file: {path}')
+        if path.name in names:
+            raise SystemExit(f'ERROR: duplicate destination filename: {path.name}')
+        names.add(path.name)
+        resolved.append(str(path))
+    return resolved
+
+
+def _print_upload_plan(paths, limit_gb, allow_large_upload, no_upload=False):
+    """Print file sizes and enforce the configured record-size preflight limit."""
+    total_bytes = 0
+    print(f'- Files to upload: {len(paths)}')
+    for value in paths:
+        path = Path(value)
+        size = path.stat().st_size
+        total_bytes += size
+        print(f'  - {path.name}: {size / 1_000_000_000:.3f} GB ({size} bytes)')
+
+    total_gb = total_bytes / 1_000_000_000
+    print(f'- Total upload size: {total_gb:.3f} GB ({total_bytes} bytes)')
+    if total_gb > limit_gb:
+        message = (f'upload size {total_gb:.3f} GB exceeds the configured '
+                   f'{limit_gb:.3f} GB record limit')
+        if no_upload:
+            print(f'WARNING: {message}; no files will be uploaded in this mode.')
+        elif allow_large_upload:
+            print(f'WARNING: {message}; continuing because --allow-large-upload was set.')
+        else:
+            raise SystemExit(
+                f'ERROR: {message}. Create the draft first, allocate additional storage '
+                'in Zenodo, then rerun with --allow-large-upload.'
+            )
+
+    return total_bytes
+
+
 def main():
     args = parse_args()
 
-    token = _get_token(args.token_env, args.token_file)
-    base_url = 'https://sandbox.zenodo.org' if args.sandbox else 'https://zenodo.org'
     init_t = time.time()
 
-    staging_name = slugify(args.title)
     description = _resolve_description(args.description, args.description_file)
-    release_paths = _collect_release_paths(args.release_root, args.include_figs) if args.release_root else []
-    manual_paths = args.paths or []
-    source_paths = list(dict.fromkeys(release_paths + manual_paths))
-    if not source_paths:
-        raise SystemExit('ERROR: no valid source paths to stage. Check --paths/--release-root inputs.')
+    creators = _load_json_or_string(args.creators_json) or []
+    _validate_creators(creators)
+    related = _load_json_or_string(args.related_identifiers_json)
+    staging_dir = None
 
-    print('- Source paths selected:')
-    for src in source_paths:
-        print(f'  - {src}')
-
-    staging_dir, copied_paths = ensure_pscratch_copy(source_paths=source_paths,
-                                                     pscratch_base_dir=args.pscratch_dir,
-                                                     staging_name=staging_name,
-                                                     keep_tree=args.keep_tree)
-
-    print(f'--- Staging folder:\n  {staging_dir}')
-    print(f'- Files copied: {len(copied_paths)}')
-    if len(copied_paths) <= 20:
-        for p in copied_paths:
-            print(f' - {p}')
+    if args.direct_upload:
+        upload_paths = _resolve_direct_files(args.paths)
+        print('- Direct upload selected; source archives will not be copied or recompressed.')
     else:
-        for p in copied_paths[:10]:
-            print(f' - {p}')
-        print(' - ...')
-        for p in copied_paths[-5:]:
-            print(f' - {p}')
+        staging_name = slugify(args.title)
+        release_paths = _collect_release_paths(args.release_root, args.include_figs) if args.release_root else []
+        manual_paths = args.paths or []
+        source_paths = list(dict.fromkeys(release_paths + manual_paths))
+        if not source_paths:
+            raise SystemExit('ERROR: no valid source paths to stage. Check --paths/--release-root inputs.')
 
-    tar_paths = _make_folder_tarballs(staging_dir)
-    print(f'- Tarballs to upload: {len(tar_paths)}')
-    for t in tar_paths:
-        print(f' - {t}')
+        print('- Source paths selected:')
+        for src in source_paths:
+            print(f'  - {src}')
+
+        staging_dir, copied_paths = ensure_pscratch_copy(source_paths=source_paths,
+                                                         pscratch_base_dir=args.pscratch_dir,
+                                                         staging_name=staging_name,
+                                                         keep_tree=args.keep_tree)
+
+        print(f'--- Staging folder:\n  {staging_dir}')
+        print(f'- Files copied: {len(copied_paths)}')
+        if len(copied_paths) <= 20:
+            for path in copied_paths:
+                print(f' - {path}')
+        else:
+            for path in copied_paths[:10]:
+                print(f' - {path}')
+            print(' - ...')
+            for path in copied_paths[-5:]:
+                print(f' - {path}')
+
+        upload_paths = _make_folder_tarballs(staging_dir)
+
+    _print_upload_plan(
+        upload_paths, args.max_total_size_gb, args.allow_large_upload,
+        no_upload=(args.create_draft_only or args.dry_run),
+    )
+
+    print(f'- Title: {args.title}')
+    print(f'- Version: {args.version or "(not set)"}')
+    print(f'- Description: {Path(args.description_file).expanduser().resolve() if args.description_file else "inline"}')
+    if args.resume_draft_id:
+        print(f'- Zenodo action: resume draft {args.resume_draft_id}')
+    elif args.existing_deposition_id:
+        print(f'- Zenodo action: create a new version from record {args.existing_deposition_id}')
+    else:
+        print('- Zenodo action: create a new record')
+    print(f'- Publish after upload: {args.publish}')
+    print(f'- Create draft only: {args.create_draft_only}')
 
     if args.dry_run:
-        print('---- SKIPPED upload: omitted due to --dry-run.')
+        print('---- DRY RUN complete: Zenodo was not contacted.')
         return
 
-    creators = _load_json_or_string(args.creators_json) or []
-    related = _load_json_or_string(args.related_identifiers_json)
+    token = _get_token(args.token_env, args.token_file)
+    base_url = 'https://sandbox.zenodo.org' if args.sandbox else 'https://zenodo.org'
 
-    dep = push_to_zenodo(token=token, base_url=base_url, files_on_disk=tar_paths,
+    dep = push_to_zenodo(token=token, base_url=base_url, files_on_disk=upload_paths,
                          title=args.title, description=description, creators=creators,
                          keywords=args.keywords, access_right=args.access_right, license_id=args.license,
                          communities=args.communities, publish=args.publish, version=args.version,
                          related_identifiers=related, existing_deposition_id=args.existing_deposition_id,
+                         resume_draft_id=args.resume_draft_id,
+                         create_draft_only=args.create_draft_only,
                          keep_existing_files=args.keep_existing_files, reuse_metadata=args.reuse_metadata)
 
     out = {'staging_dir': staging_dir,
@@ -242,7 +350,7 @@ def main():
            'state': dep.get('state'),
            'links': dep.get('links', {}),
            'title': dep.get('title') or dep.get('metadata', {}).get('title'),
-           'published': bool(dep.get('doi')),
+           'published': bool(dep.get('submitted') or dep.get('state') == 'done'),
            'doi': dep.get('doi'),
            'record_url': dep.get('links', {}).get('record_html') or dep.get('links', {}).get('html'),
            'elapsed t': f'{(time.time() - init_t)/60} min'}

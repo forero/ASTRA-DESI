@@ -140,9 +140,10 @@ Key entry points:
 The `zenodo` directory provides automation for staging outputs and publishing them on
 Zenodo:
 
-- `zenodo_push.py`: orchestrates staging on `/pscratch`, compression of release folders,
-  and upload via the Zenodo REST API. Supports sandbox mode, `--dry-run`, metadata JSON
-  inputs (creators/related identifiers), and optional publication.
+- `zenodo_push.py`: orchestrates staging and compression of release folders, or uploads
+  existing archives unchanged with `--direct-upload`. It supports sandbox mode, a
+  no-network `--dry-run`, resumable draft uploads, metadata JSON inputs, and optional
+  publication.
 - `zenodo_upl.py`: lower-level helpers used by `zenodo_push.py` (copying staging trees,
   slugifying titles, etc.).
 - `post_edr.sh` and `post_dr1.sh`: example shell wrappers invoking `zenodo_push.py` for the EDR and DR1 products.

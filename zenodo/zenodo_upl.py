@@ -3,6 +3,7 @@ import shutil, pathlib, mimetypes
 from os.path import commonprefix, relpath
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple, Union
+from urllib.parse import quote
 import requests
 
 
@@ -359,12 +360,33 @@ class ZenodoUploader:
             requests.HTTPError: If the upload fails.
         """
         filename = dest_name or os.path.basename(filepath)
-        upload_url = f"{bucket_url}/{filename}"
+        upload_url = f"{bucket_url}/{quote(filename, safe='')}"
 
-        with open(filepath, "rb") as f:
-            resp = self._request("PUT", upload_url, data=f,
-                                 headers={"Content-Type": "application/octet-stream"})
-        resp.raise_for_status()
+        # A retry must rewind the stream. Passing an open file through _request()
+        # would otherwise retry from its current position after a network failure.
+        with open(filepath, "rb") as stream:
+            for attempt in range(1, self.cfg.retries + 1):
+                stream.seek(0)
+                try:
+                    resp = self.session.request(
+                        "PUT", upload_url, data=stream, timeout=self.cfg.timeout,
+                        headers={"Content-Type": "application/octet-stream"},
+                    )
+                except requests.RequestException:
+                    if attempt == self.cfg.retries:
+                        raise
+                    time.sleep(self.cfg.retry_backoff_s * attempt)
+                    continue
+
+                if resp.status_code in (502, 503, 504) and attempt < self.cfg.retries:
+                    resp.close()
+                    time.sleep(self.cfg.retry_backoff_s * attempt)
+                    continue
+                resp.raise_for_status()
+                try:
+                    return resp.json()
+                except ValueError:
+                    return {}
 
     def publish(self, deposition_id: int) -> Dict[str, Any]:
         """
@@ -388,6 +410,8 @@ def push_to_zenodo(token: str, base_url: str, files_on_disk: List[str], title: s
                    version: Optional[str] = None,
                    related_identifiers: Optional[List[Dict[str, str]]] = None,
                    existing_deposition_id: Optional[int] = None,
+                   resume_draft_id: Optional[int] = None,
+                   create_draft_only: bool = False,
                    keep_existing_files: bool = False,
                    reuse_metadata: bool = False,) -> Dict[str, Any]:
     """
@@ -408,6 +432,8 @@ def push_to_zenodo(token: str, base_url: str, files_on_disk: List[str], title: s
         version (Optional[str]): Version string for the deposition.
         related_identifiers (Optional[List[Dict[str, str]]]): Related identifiers.
         existing_deposition_id (Optional[int]): Existing deposition to create a new Zenodo version from.
+        resume_draft_id (Optional[int]): Existing unpublished draft whose uploads should be resumed.
+        create_draft_only (bool): Create/update the draft without uploading or publishing files.
         keep_existing_files (bool): Keep files copied from the previous version.
         reuse_metadata (bool): Reuse metadata already stored in the deposition.
     Returns:
@@ -421,22 +447,43 @@ def push_to_zenodo(token: str, base_url: str, files_on_disk: List[str], title: s
                           license=license_id, communities=communities, version=version,
                           related_identifiers=related_identifiers)
 
-    if existing_deposition_id:
+    def metadata_payload_for_existing(deposition: Dict[str, Any]) -> Dict[str, Any]:
+        """Preserve inherited metadata fields while applying this release's overrides."""
+        metadata = copy.deepcopy(deposition.get('metadata') or {})
+        if not metadata:
+            raise RuntimeError('Existing deposition metadata missing.')
+        metadata.pop('prereserve_doi', None)
+        metadata.pop('doi', None)
+        if reuse_metadata:
+            if version is not None:
+                metadata['version'] = version
+        else:
+            metadata.update(meta.to_zenodo()['metadata'])
+        return {'metadata': metadata}
+
+    if existing_deposition_id and resume_draft_id:
+        raise ValueError('existing_deposition_id and resume_draft_id are mutually exclusive')
+    if create_draft_only and publish:
+        raise ValueError('create_draft_only and publish are mutually exclusive')
+
+    if resume_draft_id:
+        dep = up.get_deposition(resume_draft_id)
+        dep_id = dep.get('id')
+        if dep_id is None:
+            raise RuntimeError('Failed to retrieve the Zenodo draft deposition.')
+        if dep.get('submitted') or dep.get('state') == 'done':
+            raise RuntimeError(f'Zenodo deposition {dep_id} is already published and cannot be resumed.')
+        meta_payload = metadata_payload_for_existing(dep)
+        dep = up.update_deposition_metadata(dep_id, meta_payload)
+        print(f'- Resuming Zenodo draft deposition: {dep_id}', flush=True)
+    elif existing_deposition_id:
         dep = up.create_new_version(existing_deposition_id)
         dep_id = dep.get('id')
         if dep_id is None:
             raise RuntimeError('Failed to create new Zenodo draft version.')
-        if reuse_metadata:
-            metadata = copy.deepcopy(dep.get('metadata') or {})
-            if not metadata:
-                raise RuntimeError('Existing deposition metadata missing; cannot reuse.')
-            metadata.pop('prereserve_doi', None)
-            metadata.pop('doi', None)
-            if version is not None:
-                metadata['version'] = version
-            meta_payload = {'metadata': metadata}
-        else:
-            meta_payload = meta
+        print(f'- Created Zenodo draft deposition: {dep_id}', flush=True)
+        print(f'  If an upload is interrupted, rerun with RESUME_DRAFT_ID={dep_id}.', flush=True)
+        meta_payload = metadata_payload_for_existing(dep)
         dep = up.update_deposition_metadata(dep_id, meta_payload)
         if not keep_existing_files:
             up.clear_deposition_files(dep_id, dep.get('files'))
@@ -446,13 +493,48 @@ def push_to_zenodo(token: str, base_url: str, files_on_disk: List[str], title: s
         dep_id = dep.get('id')
         if dep_id is None:
             raise RuntimeError('Failed to create Zenodo deposition.')
+        print(f'- Created Zenodo draft deposition: {dep_id}', flush=True)
 
     bucket = dep.get('links', {}).get('bucket')
     if not bucket:
         raise RuntimeError('Zenodo response missing bucket upload URL.')
 
+    if create_draft_only:
+        draft_url = (dep.get('links', {}).get('latest_draft_html')
+                     or dep.get('links', {}).get('html'))
+        print('- Draft-only mode: no files were uploaded.', flush=True)
+        if draft_url:
+            print(f'  Open the draft to allocate storage: {draft_url}', flush=True)
+        return dep
+
+    remote_files = {}
+    if resume_draft_id:
+        for info in dep.get('files') or []:
+            filename = info.get('filename') or info.get('key')
+            size = info.get('filesize') if info.get('filesize') is not None else info.get('size')
+            if filename:
+                try:
+                    remote_files[filename] = int(size)
+                except (TypeError, ValueError):
+                    remote_files[filename] = None
+
     for fpath in files_on_disk:
-        up.upload_file_via_bucket(bucket, fpath)
+        filename = os.path.basename(fpath)
+        size = os.path.getsize(fpath)
+        if remote_files.get(filename) == size:
+            print(f'- Skipping already uploaded file: {filename} ({size} bytes)', flush=True)
+            continue
+        print(f'- Uploading {filename} ({size} bytes)...', flush=True)
+        try:
+            up.upload_file_via_bucket(bucket, fpath)
+        except Exception as exc:
+            raise RuntimeError(
+                f'Upload failed for {filename}. The draft is {dep_id}; resume with '
+                f'RESUME_DRAFT_ID={dep_id}.'
+            ) from exc
+        print(f'  Uploaded {filename}.', flush=True)
+
+    dep = up.get_deposition(dep_id)
 
     if publish:
         dep = up.publish(dep_id)
