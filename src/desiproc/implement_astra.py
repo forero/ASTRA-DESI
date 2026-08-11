@@ -11,6 +11,7 @@ __all__ = ['TempTableStore',
            'register_tracer_mapping',
            'generate_pairs',
            'generate_pairs_for_iterations',
+           'compute_delaunay_neighbor_counts',
            'save_pairs_fits',
            'load_pairs_fits',
            'build_class_rows_from_pairs',
@@ -505,6 +506,86 @@ def compute_delaunay_pairs(pts):
     if not out:
         return np.empty((0,2), dtype=np.int64)
     return np.asarray(out, dtype=np.int64)
+
+
+def compute_delaunay_neighbor_counts(pts, n_data, n_vertices=None,
+                                     chunk_vertices=250_000,
+                                     qhull_options=None):
+    """
+    Count data/random Delaunay neighbours without materialising pair rows.
+
+    The first ``n_data`` points in ``pts`` are treated as data and all remaining
+    points as randoms.  Counts are returned only for the first ``n_vertices``
+    points (the data block by default).  This layout is useful for simulation
+    boxes, where randoms can be generated directly after the data coordinates.
+
+    Unlike :func:`compute_delaunay_pairs`, this function consumes SciPy's CSR
+    vertex-neighbour representation in bounded chunks.  It therefore avoids the
+    Python tuple list and the structured pair catalogue, both of which dominate
+    memory for multi-million-row catalogues.
+
+    Args:
+        pts (np.ndarray): Cartesian coordinates with shape ``(N, 3)``.  A
+            C-contiguous native ``float64`` array avoids a conversion inside
+            SciPy/Qhull.
+        n_data (int): Number of leading rows representing data objects.
+        n_vertices (int | None): Number of leading vertices for which counts
+            are required.  Defaults to ``n_data``.
+        chunk_vertices (int): Maximum number of vertices whose adjacency is
+            classified at once.
+        qhull_options (str | None): Optional options forwarded to
+            :class:`scipy.spatial.Delaunay`.
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``NDATA`` and ``NRAND`` int32 arrays.
+    """
+    points = np.asarray(pts)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('pts must have shape (N, 3)')
+
+    total_points = int(points.shape[0])
+    n_data = int(n_data)
+    if n_vertices is None:
+        n_vertices = n_data
+    n_vertices = int(n_vertices)
+    if not (0 <= n_data <= total_points):
+        raise ValueError('n_data must be between zero and the number of points')
+    if not (0 <= n_vertices <= total_points):
+        raise ValueError('n_vertices must be between zero and the number of points')
+    if total_points < 5:
+        raise ValueError('At least five 3-D points are required for Delaunay triangulation')
+    if chunk_vertices is None:
+        chunk_vertices = n_vertices or 1
+    chunk_vertices = max(1, int(chunk_vertices))
+
+    tri = Delaunay(points, qhull_options=qhull_options)
+    indptr, indices = tri.vertex_neighbor_vertices
+    ndata = np.zeros(n_vertices, dtype=np.int32)
+    nrand = np.zeros(n_vertices, dtype=np.int32)
+
+    try:
+        for start in range(0, n_vertices, chunk_vertices):
+            stop = min(start + chunk_vertices, n_vertices)
+            starts = np.asarray(indptr[start:stop], dtype=np.int64)
+            ends = np.asarray(indptr[start + 1:stop + 1], dtype=np.int64)
+            totals = ends - starts
+            nonempty = totals > 0
+            if not np.any(nonempty):
+                continue
+
+            edge_start = int(starts[nonempty][0])
+            edge_stop = int(ends[nonempty][-1])
+            neighbours_are_data = np.asarray(indices[edge_start:edge_stop] < n_data,
+                                             dtype=np.int8)
+            local_starts = starts[nonempty] - edge_start
+            data_counts = np.add.reduceat(neighbours_are_data, local_starts)
+            ndata_chunk = ndata[start:stop]
+            ndata_chunk[nonempty] = data_counts.astype(np.int32, copy=False)
+            nrand[start:stop] = totals.astype(np.int32, copy=False) - ndata_chunk
+    finally:
+        del indices, indptr, tri
+        gc.collect()
+
+    return ndata, nrand
 
 
 def process_delaunay(pts, tids, is_data, iteration, tracer, tracer_id=None):
