@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import fcntl
-import gc
+import fcntl, gc
 import importlib
 import importlib.util
 import multiprocessing as mp
-import os
-import struct
-import time
-import zlib
+import os, struct, time, zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -502,13 +498,16 @@ def _accumulate_classes(counts: np.ndarray, classes: np.ndarray) -> None:
 
 
 def _consume_iteration_results(results, probability_counts,
-                               random_void_table) -> None:
+                               random_void_table) -> int:
+    random_void_count = 0
     for _, data_classes, random_void_rows, _ in results:
         if data_classes is not None:
             _accumulate_classes(probability_counts, data_classes)
         if random_void_table is not None and len(random_void_rows):
             random_void_table.append(random_void_rows)
+            random_void_count += len(random_void_rows)
         del data_classes, random_void_rows
+    return random_void_count
 
 
 def _run_locked(config: QuijoteRunConfig,
@@ -556,6 +555,7 @@ def _run_locked(config: QuijoteRunConfig,
              'need_probability': need_probability,
              'need_random_voids': need_random_voids}
     iterations = range(int(config.n_iterations))
+    random_void_count = 0
     if worker_count > 1:
         context = mp.get_context('fork')
         with context.Pool(processes=worker_count,
@@ -564,15 +564,15 @@ def _run_locked(config: QuijoteRunConfig,
             with _random_void_writer(paths.random_voids, random_void_header,
                                      need_random_voids) as random_void_table:
                 results = pool.imap(_run_iteration_worker, iterations)
-                _consume_iteration_results(results, probability_counts,
-                                           random_void_table)
+                random_void_count = _consume_iteration_results(
+                    results, probability_counts, random_void_table)
     else:
         _init_worker(state)
         with _random_void_writer(paths.random_voids, random_void_header,
                                  need_random_voids) as random_void_table:
             results = map(_run_iteration_worker, iterations)
-            _consume_iteration_results(results, probability_counts,
-                                       random_void_table)
+            random_void_count = _consume_iteration_results(
+                results, probability_counts, random_void_table)
 
     del coordinates
     state.clear()
@@ -584,7 +584,8 @@ def _run_locked(config: QuijoteRunConfig,
                            probability_header)
         print(f'quijote-astra --> wrote {paths.probability}', flush=True)
     if need_random_voids:
-        print(f'quijote-astra --> wrote {paths.random_voids}', flush=True)
+        print(f'quijote-astra --> wrote {paths.random_voids} '
+              f'rows={random_void_count:,}', flush=True)
     return paths
 
 
