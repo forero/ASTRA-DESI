@@ -20,6 +20,32 @@ SAMPLE_NAMES = ('halo_void', 'halo_sheet', 'halo_filament', 'halo_knot',
                 'random_void', 'halo_all')
 
 
+def _read_manifest_entry(path, task_index):
+    if int(task_index) < 0:
+        raise ValueError('--task-index must be non-negative')
+    data_index = 0
+    with open(str(Path(path).expanduser().resolve()), 'r') as stream:
+        for line_number, line in enumerate(stream, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            fields = stripped.split()
+            if len(fields) != 4:
+                raise ValueError('Manifest line {} must contain: parameter realization '
+                                 'omega_m w'.format(line_number))
+            try:
+                entry = (fields[0], int(fields[1]), float(fields[2]),
+                         float(fields[3]))
+            except ValueError as error:
+                raise ValueError('Invalid manifest line {}: {}'.format(
+                    line_number, stripped)) from error
+            if data_index == int(task_index):
+                return entry
+            data_index += 1
+    raise IndexError('--task-index {} is outside a {}-row manifest'.format(
+        task_index, data_index))
+
+
 def _default_threads():
     try:
         allocated = int(os.environ.get('SLURM_CPUS_PER_TASK', '8'))
@@ -164,8 +190,23 @@ def _compute_multipoles(sample, positions, args):
     if count < 2:
         raise ValueError('{} contains fewer than two points'.format(sample))
     positions = np.ascontiguousarray(positions, dtype=np.float32)
-    if np.any(positions < 0.0) or np.any(positions >= float(args.box_size)):
-        raise ValueError('{} positions lie outside [0, BoxSize)'.format(sample))
+    if not np.all(np.isfinite(positions)):
+        raise ValueError('{} positions contain NaN or infinity'.format(sample))
+    box_size32 = np.float32(args.box_size)
+    outside = (positions < 0.0) | (positions >= box_size32)
+    if np.any(outside):
+        minimum = float(np.min(positions))
+        maximum = float(np.max(positions))
+        tolerance = 2.0 * float(np.spacing(box_size32))
+        if minimum < -tolerance or maximum > float(args.box_size) + tolerance:
+            raise ValueError('{} positions lie materially outside [0, BoxSize): '
+                             'min={} max={}'.format(sample, minimum, maximum))
+        coordinate_count = int(np.count_nonzero(outside))
+        positions[outside] = np.remainder(positions[outside], box_size32)
+        print('pk-quijote --> wrapped {} {} boundary coordinate(s) '
+              'periodically into [0, BoxSize)'.format(
+                  coordinate_count, sample), flush=True)
+        del outside
 
     start = time.time()
     delta = np.zeros((args.grid, args.grid, args.grid), dtype=np.float32)
@@ -517,8 +558,10 @@ def build_parser():
     parser.add_argument('--input-root', default=DEFAULT_INPUT_ROOT)
     parser.add_argument('--astra-root', default=DEFAULT_ASTRA_ROOT)
     parser.add_argument('--output-root', default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument('--parameter', required=True)
-    parser.add_argument('--realization', type=int, required=True)
+    parser.add_argument('--parameter')
+    parser.add_argument('--realization', type=int)
+    parser.add_argument('--manifest', help='Four-column bulk manifest: parameter realization omega_m w')
+    parser.add_argument('--task-index', type=int, help='Zero-based data-row index in --manifest')
     parser.add_argument('--grid', type=int, default=512)
     parser.add_argument('--mas', choices=('NGP', 'CIC', 'TSC', 'PCS'), default='CIC')
     parser.add_argument('--threads', type=int, default=_default_threads())
@@ -544,6 +587,25 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    using_manifest = args.manifest is not None or args.task_index is not None
+    if using_manifest:
+        if args.manifest is None or args.task_index is None:
+            parser.error('--manifest and --task-index must be supplied together')
+        if args.parameter is not None or args.realization is not None:
+            parser.error('do not combine --manifest with --parameter/--realization')
+        try:
+            (args.parameter, args.realization,
+             args.omega_m, args.w) = _read_manifest_entry(
+                 args.manifest, args.task_index)
+        except (OSError, ValueError, IndexError) as error:
+            parser.error(str(error))
+        print('pk-quijote --> manifest task={} parameter={} realization={} '
+              'Omega_m={} w={}'.format(
+                  args.task_index, args.parameter, args.realization,
+                  args.omega_m, args.w), flush=True)
+    elif args.parameter is None or args.realization is None:
+        parser.error('supply --parameter and --realization, or '
+                     '--manifest and --task-index')
     if args.realization < 0:
         parser.error('--realization must be non-negative')
     if (args.grid <= 1 or args.threads <= 0 or args.box_size <= 0.0
