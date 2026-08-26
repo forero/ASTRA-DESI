@@ -11,21 +11,17 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-plt.rcParams.update({'font.family': 'serif',
-                         'axes.grid': True,
-                         'grid.alpha': 0.18,
-                        #  'figure.facecolor': 'black',
-                        #  'axes.facecolor': 'black',
-                        #  'savefig.facecolor': 'black'
-                         })
 
-from .read_data import TRACER_DISPLAY, normalize_tracer, normalize_zone
+plt.rcParams.update({'font.family': 'serif', 'axes.grid': True, 'grid.alpha': 0.18})
 
+from .read_data import (TRACER_OUTPUT_LABELS, normalize_tracer, normalize_zone)
 
-TRACER_COLORS = {'BGS_BRIGHT': '#5677A4',
-                 'LRG': '#9761B0',
-                 'ELG_LOPnotqso': '#85B5B2',
-                 'QSO': '#D4819A'}
+TRACER_COLORS = {
+    'BGS_BRIGHT': '#5677A4',
+    'BGS_ANY': '#D8A03D',
+    'LRG': '#9761B0',
+    'ELG_LOPnotqso': '#85B5B2',
+    'QSO': '#D4819A'}
 ZONE_LINESTYLES = {'NGC': '-', 'SGC': '--'}
 
 
@@ -79,11 +75,16 @@ def _pdf_and_sigma(values, edges, n_bootstrap, rng: np.random.Generator):
     bootstrap_counts = rng.multinomial(n_used, probabilities, size=int(n_bootstrap))
     bootstrap_pdf = bootstrap_counts / (float(n_used) * widths[None, :])
     sigma = np.std(bootstrap_pdf, axis=0, ddof=1)
-    return {'pdf': pdf, 'sigma': sigma, 'lower': np.clip(pdf - sigma, 0.0, None),
-            'upper': pdf + sigma, 'counts': counts, 'n': n_used}
+    return {'pdf': pdf,
+            'sigma': sigma,
+            'lower': np.clip(pdf - sigma, 0.0, None),
+            'upper': pdf + sigma,
+            'counts': counts,
+            'n': n_used}
 
 
-def _zone_significance(sgc_values, ngc_values, edges, n_bootstrap, min_combined_count, rng: np.random.Generator):
+def _zone_significance(sgc_values, ngc_values, edges, n_bootstrap, min_combined_count,
+                       rng: np.random.Generator):
     ngc = _finite(ngc_values)
     sgc = _finite(sgc_values)
     ngc_counts, _ = np.histogram(ngc, bins=edges)
@@ -99,9 +100,11 @@ def _zone_significance(sgc_values, ngc_values, edges, n_bootstrap, min_combined_
     widths = np.diff(edges)
     ngc_null = rng.multinomial(n_ngc, probability, size=int(n_bootstrap))
     sgc_null = rng.multinomial(n_sgc, probability, size=int(n_bootstrap))
-    null_delta = (ngc_null / (float(n_ngc) * widths[None, :]) - sgc_null / (float(n_sgc) * widths[None, :]))
+    null_delta = (ngc_null / (float(n_ngc) * widths[None, :]) - sgc_null /
+                  (float(n_sgc) * widths[None, :]))
     sigma = np.std(null_delta, axis=0, ddof=1)
-    observed = (ngc_counts / (float(n_ngc) * widths) - sgc_counts / (float(n_sgc) * widths))
+    observed = (ngc_counts / (float(n_ngc) * widths) - sgc_counts /
+                (float(n_sgc) * widths))
     supported = ((sigma > 0.0) & (combined >= int(min_combined_count)))
     np.divide(observed, sigma, out=result, where=supported)
     return result
@@ -119,9 +122,16 @@ def _normalized_samples(samples: Mapping):
     return normalized
 
 
-def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold = -0.25,
-                     ellip_bins = 30, reff_bins = 30, n_bootstrap = 2000, seed = 12345,
-                     min_combined_count = 5, use_tex = True):
+def plot_all_tracers(samples: Mapping,
+                     output_path,
+                     iteration=0,
+                     r_threshold=-0.25,
+                     ellip_bins=30,
+                     reff_bins=30,
+                     n_bootstrap=2000,
+                     seed=12345,
+                     min_combined_count=5,
+                     use_tex=True):
 
     samples = _normalized_samples(samples)
     if not samples:
@@ -136,23 +146,34 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
         plt.rcParams.update({'text.usetex': False})
 
     variable_samples = {
-        variable: {key: values[variable] for key, values in samples.items()
-                   if len(values[variable])} for variable in ('ELLIP', 'R_EFF')}
-    edges_by_variable = {'ELLIP': _common_edges('ELLIP', variable_samples['ELLIP'], ellip_bins),
-                         'R_EFF': _common_edges('R_EFF', variable_samples['R_EFF'], reff_bins)}
+        variable: {key: values[variable]
+                   for key, values in samples.items() if len(values[variable])}
+        for variable in ('ELLIP', 'R_EFF')}
+    edges_by_variable = {
+        'ELLIP': _common_edges('ELLIP', variable_samples['ELLIP'], ellip_bins),
+        'R_EFF': _common_edges('R_EFF', variable_samples['R_EFF'], reff_bins)}
     seed_sequence = np.random.SeedSequence(int(seed))
-    child_seeds = iter(seed_sequence.spawn(2 * len(samples) + 2 * len(TRACER_COLORS) + 4))
+    child_seeds = iter(
+        seed_sequence.spawn(2 * len(samples) + 2 * len(TRACER_COLORS) + 4))
 
     figure = plt.figure(figsize=(12, 5))
-    outer = figure.add_gridspec(1, 2, left=0.07, right=0.985, bottom=0.10,
-                               top=0.78, wspace=0.1)
+    outer = figure.add_gridspec(1,
+                                2,
+                                left=0.07,
+                                right=0.985,
+                                bottom=0.10,
+                                top=0.78,
+                                wspace=0.1)
     labels = {'ELLIP': r'$\epsilon$', 'R_EFF': r'$R_{\mathrm{eff}}\,[\mathrm{Mpc}/h]$'}
 
     try:
         for column, variable in enumerate(('ELLIP', 'R_EFF')):
             edges = edges_by_variable[variable]
             centers = 0.5 * (edges[:-1] + edges[1:])
-            inner = outer[0, column].subgridspec(2, 1, height_ratios=(3.1, 1.0), hspace=0.05)
+            inner = outer[0, column].subgridspec(2,
+                                                 1,
+                                                 height_ratios=(3.1, 1.0),
+                                                 hspace=0.05)
             upper = figure.add_subplot(inner[0])
             lower = figure.add_subplot(inner[1], sharex=upper)
 
@@ -161,8 +182,11 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
                     key = (tracer, zone)
                     if key not in samples or len(samples[key][variable]) == 0:
                         continue
-                    estimate = _pdf_and_sigma(samples[key][variable], edges, n_bootstrap=n_bootstrap,
-                                              rng=np.random.default_rng(next(child_seeds)))
+                    estimate = _pdf_and_sigma(samples[key][variable],
+                                              edges,
+                                              n_bootstrap=n_bootstrap,
+                                              rng=np.random.default_rng(
+                                                  next(child_seeds)))
                     color = TRACER_COLORS[tracer]
                     linestyle = ZONE_LINESTYLES[zone]
                     upper.fill_between(centers,
@@ -186,8 +210,12 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
                                                   edges,
                                                   n_bootstrap=n_bootstrap,
                                                   min_combined_count=min_combined_count,
-                                                  rng=np.random.default_rng(next(child_seeds)))
-                lower.plot(centers, significance, color=TRACER_COLORS[tracer], linewidth=1.35)
+                                                  rng=np.random.default_rng(
+                                                      next(child_seeds)))
+                lower.plot(centers,
+                           significance,
+                           color=TRACER_COLORS[tracer],
+                           linewidth=1.35)
             if variable == 'ELLIP':
                 upper.set_title('Ellipticity', fontsize=12)
             elif variable == 'R_EFF':
@@ -204,22 +232,22 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
             upper.set_xlim(edges[0], edges[-1])
 
             if variable == 'ELLIP':
-                lower.set_ylabel(r'$\Delta_{\mathrm{zone}}/\sigma_{\mathrm{null}}$', fontsize=14)
+                lower.set_ylabel(r'$\Delta_{\mathrm{zone}}/\sigma_{\mathrm{null}}$',
+                                 fontsize=14)
                 upper.set_ylabel(r'$\mathrm{Normalized\ PDF}$', fontsize=14)
 
-        tracer_handles = [Line2D([0], [0],
-                                 color=TRACER_COLORS[tracer],
-                                 linewidth=2.2,
-                                 label=TRACER_DISPLAY[tracer])
-            for tracer in TRACER_COLORS
+        tracer_handles = [
+            Line2D([0], [0],
+                   color=TRACER_COLORS[tracer],
+                   linewidth=2.2,
+                   label=TRACER_OUTPUT_LABELS[tracer]) for tracer in TRACER_COLORS
             if any(key[0] == tracer for key in samples)]
         zone_handles = [Line2D([0], [0],
-                                color='black',
-                                linestyle=ZONE_LINESTYLES[zone],
-                                linewidth=1.8,
-                                label=zone)
-            for zone in ('NGC', 'SGC')
-            if any(key[1] == zone for key in samples)]
+                               color='black',
+                               linestyle=ZONE_LINESTYLES[zone],
+                               linewidth=1.8,
+                               label=zone) for zone in ('NGC', 'SGC')
+                        if any(key[1] == zone for key in samples)]
         figure.legend(handles=tracer_handles,
                       loc='upper center',
                       ncol=max(1, len(tracer_handles)),
@@ -230,9 +258,11 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
                       ncol=max(1, len(zone_handles)),
                       frameon=False,
                       bbox_to_anchor=(0.5, 0.900))
-        figure.suptitle(rf'$\mathrm{{ASTRA}} \quad{{}}  \mathrm{{iteration}} \, {int(iteration)} ,\quad{{}}'
+        figure.suptitle(rf'$\mathrm{{ASTRA}} \quad{{}}  \mathrm{{iteration}} \, '
+                        rf'{int(iteration)} ,\quad{{}}'
                         rf'r_{{\mathrm{{threshold}}}}={float(r_threshold):.2f}$',
-                        y=1.02, fontsize=15)
+                        y=1.02,
+                        fontsize=15)
 
         output_path = Path(output_path)
         if not output_path.suffix:
@@ -249,6 +279,4 @@ def plot_all_tracers(samples: Mapping, output_path, iteration = 0, r_threshold =
     return output_path
 
 
-__all__ = ['TRACER_COLORS',
-           'ZONE_LINESTYLES',
-           'plot_all_tracers']
+__all__ = ['TRACER_COLORS', 'ZONE_LINESTYLES', 'plot_all_tracers']

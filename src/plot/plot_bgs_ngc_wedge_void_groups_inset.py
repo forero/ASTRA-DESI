@@ -23,16 +23,15 @@ DEFAULT_RAW = '/pscratch/sd/v/vtorresg/cosmic-web/dr2/raw/zone_NGC_BGS.fits.gz'
 DEFAULT_PROB = ('/pscratch/sd/v/vtorresg/cosmic-web/dr2/probabilities/bgs/ngc/'
                 'zone_NGC_BGS_probability_iterdata.fits.gz')
 DEFAULT_CACHE = 'cache/zone_NGC_BGS_target_class_cache.fits.gz'
-DEFAULT_CLASS_GLOB = '/pscratch/sd/v/vtorresg/cosmic-web/dr2/classification/bgs/ngc/zone_NGC_BGS_iter*.fits.gz'
+DEFAULT_CLASS_GLOB = ('/pscratch/sd/v/vtorresg/cosmic-web/dr2/'
+                      'classification/bgs/ngc/zone_NGC_BGS_iter*.fits.gz')
 DEFAULT_RANDOM_VOID_CACHE = 'cache/zone_NGC_BGS_random_void_any_iter_cache.fits.gz'
-DEFAULT_VOIDS = '/pscratch/sd/v/vtorresg/cosmic-web/dr2/void-cat-v2/dr2/voids_BGS_ANY_NGC.fits'
+DEFAULT_VOIDS = '/pscratch/sd/v/vtorresg/void_catalog/DR2_Om_2_Om0p315_h0p6736'
+DEFAULT_CONSENSUS_RELATIVE_PATH = Path('consensus/voids_BGS_NGC_n100.fits')
 DEFAULT_OUTPUT = 'plots/bgs_ngc_wedge_void_groups_inset.png'
 
 CLASS_NAMES = np.array(['Void', 'Sheet', 'Filament', 'Knot'], dtype='U8')
-CLASS_COLORS = {'Void': 'none',
-                                'Sheet': 'white',
-                                'Filament': 'white',
-                                'Knot': 'white',}
+CLASS_COLORS = {'Void': 'none', 'Sheet': 'white', 'Filament': 'white', 'Knot': 'white'}
 
 
 def parse_args():
@@ -46,14 +45,21 @@ def parse_args():
     p.add_argument('--rebuild-random-void-cache', action='store_true')
     p.add_argument('--random-iterations', default='all')
     p.add_argument('--random-chunk-size', type=int, default=1_000_000)
-    p.add_argument('--random-void-background', dest='random_void_background', action='store_true')
-    p.add_argument('--no-random-void-background', dest='random_void_background', action='store_false')
+    p.add_argument('--random-void-background',
+                   dest='random_void_background',
+                   action='store_true')
+    p.add_argument('--no-random-void-background',
+                   dest='random_void_background',
+                   action='store_false')
     p.set_defaults(random_void_background=True)
     p.add_argument('--random-void-color', default='#f2f2f2')
     p.add_argument('--random-void-point-size', type=float, default=0.015)
     p.add_argument('--random-void-alpha', type=float, default=0.12)
     p.add_argument('--zoom-random-void-point-scale', type=float, default=1.8)
-    p.add_argument('--void-input', default=DEFAULT_VOIDS)
+    p.add_argument('--void-input',
+                   default=DEFAULT_VOIDS,
+                   help=('Void FITS file or catalog root. A directory is resolved to '
+                         'consensus/voids_BGS_NGC_n100.fits.'))
     p.add_argument('--output', default=DEFAULT_OUTPUT)
     p.add_argument('--slice-width-deg', type=float, default=6.0)
     p.add_argument('--dec0', type=float, default=None)
@@ -62,8 +68,11 @@ def parse_args():
     p.add_argument('--rmax-mpc', type=float, default=1250.0)
 
     p.add_argument('--point-size', dest='galaxy_point_size', type=float, default=0.03)
-    p.add_argument('--galaxy-point-size', dest='galaxy_point_size', type=float, default=0.03)
-    p.add_argument('--alpha', type=float, default=0.45)
+    p.add_argument('--galaxy-point-size',
+                   dest='galaxy_point_size',
+                   type=float,
+                   default=0.03)
+    p.add_argument('--alpha', type=float, default=0.25)
     p.add_argument('--void-center-size', type=float, default=1.0)
     p.add_argument('--void-alpha', type=float, default=0.95)
     p.add_argument('--void-ellipse-alpha', type=float, default=0.9)
@@ -77,8 +86,12 @@ def parse_args():
     p.set_defaults(plot_members=True)
     p.add_argument('--members-include-rand', action='store_true')
 
-    p.add_argument('--plot-void-ellipses', dest='plot_void_ellipses', action='store_true')
-    p.add_argument('--no-void-ellipses', dest='plot_void_ellipses', action='store_false')
+    p.add_argument('--plot-void-ellipses',
+                   dest='plot_void_ellipses',
+                   action='store_true')
+    p.add_argument('--no-void-ellipses',
+                   dest='plot_void_ellipses',
+                   action='store_false')
     p.set_defaults(plot_void_ellipses=True)
 
     p.add_argument('--void-cmap', default='turbo')
@@ -179,7 +192,9 @@ def select_iteration_paths(pattern, iteration_spec):
         pairs = [(iteration, path) for iteration, path in pairs if iteration in wanted]
     pairs.sort(key=lambda item: item[0])
     if not pairs:
-        raise RuntimeError(f'No classification files matched {pattern!r} and iterations {iteration_spec!r}.')
+        raise RuntimeError(f'No classification files matched {pattern!r} and '
+                           'iterations '
+                           f'{iteration_spec!r}.')
     return pairs
 
 
@@ -199,12 +214,9 @@ def r_class_code(n_data, n_rand, thresholds):
 
 
 def empty_random_void_array():
-    return np.empty(0, dtype=[('TARGETID', 'i8'),
-                              ('RANDITER', 'i4'),
-                              ('RA', 'f8'),
-                              ('DEC', 'f8'),
-                              ('Z', 'f8'),
-                              ('R_VALUE', 'f4')])
+    return np.empty(0,
+                    dtype=[('TARGETID', 'i8'), ('RANDITER', 'i4'), ('RA', 'f8'),
+                           ('DEC', 'f8'), ('Z', 'f8'), ('R_VALUE', 'f4')])
 
 
 def build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
@@ -229,7 +241,9 @@ def build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
         header['DECLO'] = dec_bounds[0]
         header['DECHI'] = dec_bounds[1]
 
-    with fitsio.FITS(str(raw_path)) as raw_fobj, fitsio.FITS(str(cache_path), 'rw', clobber=True) as out_fobj:
+    with fitsio.FITS(str(raw_path)) as raw_fobj, fitsio.FITS(str(cache_path),
+                                                             'rw',
+                                                             clobber=True) as out_fobj:
         raw_hdu = raw_fobj[1]
         raw_nrows = raw_hdu.get_nrows()
         n_data_raw = find_first_non_data_row(raw_hdu, data_randiter=data_randiter)
@@ -252,13 +266,19 @@ def build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
                 iter_written = 0
                 for start in range(0, n_class_random, chunk_size):
                     stop = min(start + chunk_size, n_class_random)
-                    class_rows = np.arange(n_class_data + start, n_class_data + stop, dtype=np.int64)
-                    class_arr = class_hdu.read(columns=['TARGETID', 'RANDITER', 'NDATA', 'NRAND'],
+                    class_rows = np.arange(n_class_data + start,
+                                           n_class_data + stop,
+                                           dtype=np.int64)
+                    class_arr = class_hdu.read(columns=['TARGETID',
+                                                        'RANDITER',
+                                                        'NDATA',
+                                                        'NRAND'],
                                                rows=class_rows)
 
                     n_data = np.asarray(class_arr['NDATA'], dtype=np.float32)
                     n_rand = np.asarray(class_arr['NRAND'], dtype=np.float32)
-                    class_codes, r_value = r_class_code(n_data=n_data, n_rand=n_rand,
+                    class_codes, r_value = r_class_code(n_data=n_data,
+                                                        n_rand=n_rand,
                                                         thresholds=thresholds)
                     void_mask = class_codes == 0
 
@@ -268,14 +288,22 @@ def build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
 
                     iter_void += int(void_mask.sum())
                     raw_rows = raw_start + np.arange(start, stop, dtype=np.int64)
-                    raw_arr = raw_hdu.read(columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z'],
+                    raw_arr = raw_hdu.read(columns=['TARGETID',
+                                                    'RANDITER',
+                                                    'RA',
+                                                    'DEC',
+                                                    'Z'],
                                            rows=raw_rows[void_mask])
 
-                    if not np.array_equal(raw_arr['TARGETID'], class_arr['TARGETID'][void_mask]):
-                        raise RuntimeError('TARGETID order mismatch between raw and classification rows '
+                    if not np.array_equal(raw_arr['TARGETID'],
+                                          class_arr['TARGETID'][void_mask]):
+                        raise RuntimeError('TARGETID order mismatch between raw and '
+                                           'classification rows '
                                            f'for iteration {iter_idx}.')
-                    if not np.all(raw_arr['RANDITER'] == class_arr['RANDITER'][void_mask]):
-                        raise RuntimeError('RANDITER mismatch between raw and classification rows '
+                    if not np.all(
+                            raw_arr['RANDITER'] == class_arr['RANDITER'][void_mask]):
+                        raise RuntimeError('RANDITER mismatch between raw and '
+                                           'classification rows '
                                            f'for iteration {iter_idx}.')
 
                     ra = np.asarray(raw_arr['RA'], dtype=np.float64)
@@ -287,13 +315,17 @@ def build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
                     if not np.any(finite):
                         continue
 
-                    out = np.empty(len(ra[finite]), dtype=empty_random_void_array().dtype)
-                    out['TARGETID'] = np.asarray(raw_arr['TARGETID'], dtype=np.int64)[finite]
-                    out['RANDITER'] = np.asarray(raw_arr['RANDITER'], dtype=np.int32)[finite]
+                    out = np.empty(len(ra[finite]),
+                                   dtype=empty_random_void_array().dtype)
+                    out['TARGETID'] = np.asarray(raw_arr['TARGETID'],
+                                                 dtype=np.int64)[finite]
+                    out['RANDITER'] = np.asarray(raw_arr['RANDITER'],
+                                                 dtype=np.int32)[finite]
                     out['RA'] = ra[finite]
                     out['DEC'] = dec[finite]
                     out['Z'] = redshift[finite]
-                    out['R_VALUE'] = np.asarray(r_value[void_mask], dtype=np.float32)[finite]
+                    out['R_VALUE'] = np.asarray(r_value[void_mask],
+                                                dtype=np.float32)[finite]
 
                     if wrote_table:
                         out_fobj[-1].append(out)
@@ -305,18 +337,24 @@ def build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
                 total_random += iter_random
                 total_void += iter_void
                 total_written += iter_written
-                print(f'[random-voids] iter {iter_idx:03d}: scanned {iter_random:,} random rows, '
-                      f'void={iter_void:,}, cached={iter_written:,}', flush=True)
+                print(f'[random-voids] iter {iter_idx:03d}: scanned '
+                      f'{iter_random:,} random rows, '
+                      f'void={iter_void:,}, cached={iter_written:,}',
+                      flush=True)
 
         if not wrote_table:
-            out_fobj.write(empty_random_void_array(), extname='RANDOM_VOIDS', header=header)
+            out_fobj.write(empty_random_void_array(),
+                           extname='RANDOM_VOIDS',
+                           header=header)
 
     status = (f'rebuilt:{len(iter_paths)}iters:'
               f'scanned={total_random:,}:void={total_void:,}:written={total_written:,}:'
               f'R<{thresholds[0]:.3f}')
     if dec_bounds is not None:
         status += f':DEC=[{dec_bounds[0]:.3f},{dec_bounds[1]:.3f}]'
-    return fitsio.read(str(cache_path), columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z', 'R_VALUE']), status
+    return fitsio.read(str(cache_path),
+                       columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z',
+                                'R_VALUE']), status
 
 
 def load_or_build_random_void_cache(raw_path, class_pattern, iteration_spec, cache_path,
@@ -336,7 +374,8 @@ def load_or_build_random_void_cache(raw_path, class_pattern, iteration_spec, cac
                                        f'but this run needs DEC={dec_bounds}. '
                                        'Use --rebuild-random-void-cache or a different '
                                        '--random-void-cache.')
-            arr = fobj[1].read(columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z', 'R_VALUE'])
+            arr = fobj[1].read(
+                columns=['TARGETID', 'RANDITER', 'RA', 'DEC', 'Z', 'R_VALUE'])
         return arr, f'loaded:{len(arr):,}'
 
     return build_random_void_cache(raw_path=raw_path,
@@ -375,13 +414,14 @@ def build_class_cache(prob_path, cache_path):
     probs = np.vstack([np.asarray(parr['PVOID'], dtype=np.float32),
                        np.asarray(parr['PSHEET'], dtype=np.float32),
                        np.asarray(parr['PFILAMENT'], dtype=np.float32),
-                       np.asarray(parr['PKNOT'], dtype=np.float32),]).T
+                       np.asarray(parr['PKNOT'], dtype=np.float32)]).T
     class_code = np.argmax(probs, axis=1).astype(np.uint8)
     class_bytes = np.array([b'Void', b'Sheet', b'Filament', b'Knot'], dtype='S8')
     class_str = class_bytes[class_code]
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    out = np.empty(len(tid), dtype=[('TARGETID', 'i8'), ('CLASS_CODE', 'u1'), ('CLASS', 'S8')])
+    out = np.empty(len(tid),
+                   dtype=[('TARGETID', 'i8'), ('CLASS_CODE', 'u1'), ('CLASS', 'S8')])
     out['TARGETID'] = tid
     out['CLASS_CODE'] = class_code
     out['CLASS'] = class_str
@@ -392,7 +432,9 @@ def build_class_cache(prob_path, cache_path):
 def load_or_build_class_cache(prob_path, cache_path, rebuild):
     if (not rebuild) and cache_path.exists():
         carr = fitsio.read(str(cache_path), columns=['TARGETID', 'CLASS_CODE'])
-        return np.asarray(carr['TARGETID'], dtype=np.int64), np.asarray(carr['CLASS_CODE'], dtype=np.uint8), 'loaded'
+        return np.asarray(carr['TARGETID'],
+                          dtype=np.int64), np.asarray(carr['CLASS_CODE'],
+                                                      dtype=np.uint8), 'loaded'
 
     tid, class_code = build_class_cache(prob_path=prob_path, cache_path=cache_path)
     return tid, class_code, 'rebuilt'
@@ -417,8 +459,8 @@ def map_classes_to_raw(raw_tid, class_tid, class_code):
     return out, misses
 
 
-def _parse_h_from_header(header):
-    for key in ('H', 'H0'):
+def _parse_h_from_header(header, path=None):
+    for key in ('HUBBLE_H', 'H', 'H0'):
         try:
             val = header.get(key)
         except Exception:
@@ -433,8 +475,6 @@ def _parse_h_from_header(header):
                 return h_val, key
         except Exception:
             if isinstance(val, str):
-                import re
-
                 match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val)
                 if match:
                     try:
@@ -445,46 +485,105 @@ def _parse_h_from_header(header):
                             return h_val, key
                     except Exception:
                         pass
+    if path is not None:
+        match = re.search(r'(?:^|[/_-])h(\d+(?:p\d+|\.\d+)?)',
+                          str(path),
+                          flags=re.IGNORECASE)
+        if match:
+            h_val = float(match.group(1).replace('p', '.'))
+            if np.isfinite(h_val) and h_val > 0.0:
+                return h_val, 'catalog path'
     return 1.0, ''
 
 
-def _read_voids_table(voids_path, z_col = None, use_xyz = False):
+def _resolve_void_catalog_path(path):
+    path = Path(path)
+    if path.is_dir():
+        path = path / DEFAULT_CONSENSUS_RELATIVE_PATH
+    if not path.is_file():
+        raise FileNotFoundError(f'Void catalog not found: {path}')
+    return path
+
+
+def _read_voids_table(voids_path, z_col=None, use_xyz=False):
     with fitsio.FITS(str(voids_path)) as fobj:
-        header = fobj[0].read_header()
-        h, h_key = _parse_h_from_header(header)
         try:
             hdu = fobj['VOIDS']
         except Exception:
             hdu = fobj[1]
         cols = hdu.get_colnames()
+
+        h, h_key = _parse_h_from_header(hdu.read_header())
+        if not h_key:
+            h, h_key = _parse_h_from_header(fobj[0].read_header())
+        if not h_key:
+            h, h_key = _parse_h_from_header({}, path=voids_path)
+
+        xyz_cols = None
+        for candidates in (('X', 'Y', 'Z'), ('XCART', 'YCART', 'ZCART')):
+            if all(name in cols for name in candidates):
+                xyz_cols = candidates
+                break
+
         if use_xyz:
+            if xyz_cols is None:
+                raise RuntimeError('--void-use-xyz requested, but no X/Y/Z '
+                                   'columns exist.')
             z_kind = 'xyz'
-            z_col_final = 'Z'
+            z_col_final = xyz_cols[2]
         elif z_col is not None:
+            if z_col not in cols:
+                raise RuntimeError('Requested void redshift column is '
+                                   f'missing: {z_col}')
             z_kind = 'redshift'
             z_col_final = z_col
         elif 'REDSHIFT' in cols:
             z_kind = 'redshift'
             z_col_final = 'REDSHIFT'
-        elif 'Z' in cols and not (('X' in cols) and ('Y' in cols)):
+        elif xyz_cols is not None:
+            z_kind = 'xyz'
+            z_col_final = xyz_cols[2]
+        elif 'Z' in cols:
             z_kind = 'redshift'
             z_col_final = 'Z'
-        elif ('X' in cols) and ('Y' in cols) and ('Z' in cols):
-            z_kind = 'xyz'
-            z_col_final = 'Z'
         else:
-            raise RuntimeError('Missing redshift column. Provide --void-z-col or --void-use-xyz if X,Y,Z exist.')
+            raise RuntimeError('Missing redshift and Cartesian position '
+                               'columns in void catalog.')
 
-        use_cols = ['VOID_ID', 'RA', 'DEC', 'R_EFF', 'SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C']
+        use_cols = ['VOID_ID', 'R_EFF']
+        if 'RA' in cols and 'DEC' in cols:
+            use_cols.extend(['RA', 'DEC'])
+        elif xyz_cols is None:
+            raise RuntimeError('RA/DEC are absent and cannot be derived without X/Y/Z.')
+
+        axis_cols = ('SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C')
+        has_axes = all(name in cols for name in axis_cols)
+        if has_axes:
+            use_cols.extend(axis_cols)
         if z_kind == 'redshift':
             use_cols.append(z_col_final)
         else:
-            use_cols.extend(['X', 'Y', 'Z'])
+            use_cols.extend(xyz_cols)
+        use_cols = list(dict.fromkeys(use_cols))
 
         missing = [c for c in use_cols if c not in cols]
         if missing:
             raise RuntimeError(f'Missing columns in void catalog: {missing}')
-        data = hdu.read(columns=use_cols)
+        raw = hdu.read(columns=use_cols)
+
+    data = {name: np.asarray(raw[name]) for name in use_cols}
+    if 'RA' not in data or 'DEC' not in data:
+        ra, dec, _ = _xyz_to_radec(data[xyz_cols[0]], data[xyz_cols[1]],
+                                   data[xyz_cols[2]])
+        data['RA'] = ra
+        data['DEC'] = dec
+
+    if not has_axes:
+        # The DR2 consensus product stores R_EFF and ELLIP but no eigenvectors
+        # or semi-axes.  R_EFF is therefore the only non-fabricated outline
+        # that can be projected on the wedge.
+        for name in axis_cols:
+            data[name] = np.asarray(data['R_EFF'])
 
     colmap = {'void_id': 'VOID_ID',
               'ra': 'RA',
@@ -492,13 +591,14 @@ def _read_voids_table(voids_path, z_col = None, use_xyz = False):
               'r_eff': 'R_EFF',
               'a': 'SEMI_AXIS_A',
               'b': 'SEMI_AXIS_B',
-              'c': 'SEMI_AXIS_C',}
+              'c': 'SEMI_AXIS_C'}
     if z_kind == 'redshift':
         colmap['z'] = z_col_final
     else:
-        colmap['x'] = 'X'
-        colmap['y'] = 'Y'
-        colmap['z_cart'] = 'Z'
+        colmap['x'] = xyz_cols[0]
+        colmap['y'] = xyz_cols[1]
+        colmap['z_cart'] = xyz_cols[2]
+    colmap['shape_mode'] = 'semi-axes' if has_axes else 'R_EFF circles'
     return data, h, h_key, z_kind, colmap
 
 
@@ -581,26 +681,55 @@ def _read_point_membership(voids_path):
     return data, colmap
 
 
-def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_reff,
-                   void_colors, ra_center_deg, theta_zoom_min_deg, theta_zoom_max_deg,
-                   r_zoom_min, r_zoom_max, inset_rect, point_size, alpha, ellipse_lw,
-                   ellipse_alpha, ellipse_npts, ra_tick_step, rtick_step, bg_color,
-                   plot_ellipses=True, galaxy_theta=None, galaxy_r=None, galaxy_cls=None,
-                   class_names=None, class_colors=None, galaxy_point_size=None,
-                   member_theta=None, member_r=None, member_colors=None,
-                   member_point_size=None, member_alpha=None,
-                   random_void_theta=None, random_void_r=None,
-                   random_void_color='white', random_void_point_size=0.02,
-                   random_void_alpha=0.12):
+def add_void_inset(fig,
+                   ax,
+                   void_theta,
+                   void_r,
+                   void_ids,
+                   void_a,
+                   void_b,
+                   void_reff,
+                   void_colors,
+                   ra_center_deg,
+                   theta_zoom_min_deg,
+                   theta_zoom_max_deg,
+                   r_zoom_min,
+                   r_zoom_max,
+                   inset_rect,
+                   point_size,
+                   alpha,
+                   ellipse_lw,
+                   ellipse_alpha,
+                   ellipse_npts,
+                   ra_tick_step,
+                   rtick_step,
+                   bg_color,
+                   plot_ellipses=True,
+                   galaxy_theta=None,
+                   galaxy_r=None,
+                   galaxy_cls=None,
+                   class_names=None,
+                   class_colors=None,
+                   galaxy_point_size=None,
+                   member_theta=None,
+                   member_r=None,
+                   member_colors=None,
+                   member_point_size=None,
+                   member_alpha=None,
+                   random_void_theta=None,
+                   random_void_r=None,
+                   random_void_color='grey',
+                   random_void_point_size=0.02,
+                   random_void_alpha=0.06):
     axins = fig.add_axes(inset_rect, projection='polar', facecolor=bg_color)
     axins.set_theta_zero_location('N')
     axins.set_theta_direction(1)
 
     theta_deg = np.rad2deg(void_theta)
     mzoom = ((theta_deg >= theta_zoom_min_deg)
-              & (theta_deg <= theta_zoom_max_deg)
-              & (void_r >= r_zoom_min)
-              & (void_r <= r_zoom_max))
+             & (theta_deg <= theta_zoom_max_deg)
+             & (void_r >= r_zoom_min)
+             & (void_r <= r_zoom_max))
 
     if random_void_theta is not None and random_void_r is not None:
         rv_deg = np.rad2deg(random_void_theta)
@@ -609,56 +738,88 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
                    & (random_void_r >= r_zoom_min)
                    & (random_void_r <= r_zoom_max))
         if np.any(rv_zoom):
-            axins.scatter(random_void_theta[rv_zoom], random_void_r[rv_zoom],
-                          s=random_void_point_size, c=random_void_color,
-                          alpha=random_void_alpha, linewidths=0,
-                          rasterized=True, zorder=0)
+            axins.scatter(random_void_theta[rv_zoom],
+                          random_void_r[rv_zoom],
+                          s=random_void_point_size,
+                          c=random_void_color,
+                          alpha=random_void_alpha,
+                          linewidths=0,
+                          rasterized=True,
+                          zorder=0)
 
     if galaxy_theta is not None and galaxy_r is not None and galaxy_cls is not None:
         gdeg = np.rad2deg(galaxy_theta)
         gzoom = ((gdeg >= theta_zoom_min_deg)
-                  & (gdeg <= theta_zoom_max_deg)
-                  & (galaxy_r >= r_zoom_min)
-                  & (galaxy_r <= r_zoom_max))
+                 & (gdeg <= theta_zoom_max_deg)
+                 & (galaxy_r >= r_zoom_min)
+                 & (galaxy_r <= r_zoom_max))
         if class_names is not None and class_colors is not None:
             for code, cname in enumerate(class_names):
                 mask = gzoom & (galaxy_cls == code)
                 if np.any(mask):
-                    axins.scatter(galaxy_theta[mask], galaxy_r[mask],
-                                  s=galaxy_point_size if galaxy_point_size is not None else point_size,
-                                  c=class_colors[cname], alpha=alpha, linewidths=0,
-                                  rasterized=True, zorder=1,)
+                    axins.scatter(galaxy_theta[mask],
+                                  galaxy_r[mask],
+                                  s=galaxy_point_size
+                                  if galaxy_point_size is not None else point_size,
+                                  c=class_colors[cname],
+                                  alpha=alpha,
+                                  linewidths=0,
+                                  rasterized=True,
+                                  zorder=1,)
 
     if member_theta is not None and member_r is not None and member_colors is not None:
         mdeg = np.rad2deg(member_theta)
         mzoom2 = ((mdeg >= theta_zoom_min_deg)
-                   & (mdeg <= theta_zoom_max_deg)
-                   & (member_r >= r_zoom_min)
-                   & (member_r <= r_zoom_max))
+                  & (mdeg <= theta_zoom_max_deg)
+                  & (member_r >= r_zoom_min)
+                  & (member_r <= r_zoom_max))
         if np.any(mzoom2):
-            axins.scatter(member_theta[mzoom2], member_r[mzoom2], s=member_point_size,
-                          c=member_colors[mzoom2], alpha=member_alpha, linewidths=0,
-                          rasterized=True, zorder=2,)
+            axins.scatter(member_theta[mzoom2],
+                          member_r[mzoom2],
+                          s=member_point_size,
+                          c=member_colors[mzoom2],
+                          alpha=member_alpha,
+                          linewidths=0,
+                          rasterized=True,
+                          zorder=2,)
 
     for i in np.flatnonzero(mzoom):
         vid = int(void_ids[i])
         color = void_colors.get(vid, (1.0, 1.0, 1.0, 0.9))
         theta0 = float(void_theta[i])
         r0 = float(void_r[i])
-        a = float(void_a[i]) if np.isfinite(void_a[i]) and void_a[i] > 0 else float(void_reff[i])
-        b = float(void_b[i]) if np.isfinite(void_b[i]) and void_b[i] > 0 else float(void_reff[i])
+        a = float(void_a[i]) if np.isfinite(void_a[i]) and void_a[i] > 0 else float(
+            void_reff[i])
+        b = float(void_b[i]) if np.isfinite(void_b[i]) and void_b[i] > 0 else float(
+            void_reff[i])
         if not np.isfinite(a) or a <= 0:
-            a = float(void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
+            a = float(
+                void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
         if not np.isfinite(b) or b <= 0:
-            b = float(void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
+            b = float(
+                void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
         if r0 <= 0 or (a <= 0 and b <= 0):
             continue
 
-        axins.scatter([theta0], [r0], s=point_size, c=[color], alpha=alpha, linewidths=0, zorder=5)
+        axins.scatter([theta0], [r0],
+                      s=point_size,
+                      c=[color],
+                      alpha=alpha,
+                      linewidths=0,
+                      zorder=5)
 
         if plot_ellipses:
-            theta_e, r_e = _ellipse_theta_r(theta0=theta0, r0=r0, a=a, b=b, npts=ellipse_npts)
-            axins.plot(theta_e, r_e, color=color, linewidth=ellipse_lw, alpha=ellipse_alpha, zorder=4)
+            theta_e, r_e = _ellipse_theta_r(theta0=theta0,
+                                            r0=r0,
+                                            a=a,
+                                            b=b,
+                                            npts=ellipse_npts)
+            axins.plot(theta_e,
+                       r_e,
+                       color=color,
+                       linewidth=ellipse_lw,
+                       alpha=ellipse_alpha,
+                       zorder=4)
 
     axins.set_thetamin(theta_zoom_min_deg)
     axins.set_thetamax(theta_zoom_max_deg)
@@ -670,9 +831,12 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
 
     dtheta = theta_zoom_max_deg - theta_zoom_min_deg
 
-    ra_tick_values = np.arange(np.ceil((theta_zoom_min_deg + ra_center_deg) / ra_tick_step) * ra_tick_step,
-                               np.floor((theta_zoom_max_deg + ra_center_deg) / ra_tick_step) * ra_tick_step + 0.5 * ra_tick_step,
-                               ra_tick_step,)
+    ra_tick_values = np.arange(
+        np.ceil((theta_zoom_min_deg + ra_center_deg) / ra_tick_step) * ra_tick_step,
+        np.floor((theta_zoom_max_deg + ra_center_deg) / ra_tick_step) * ra_tick_step +
+        0.5 * ra_tick_step,
+        ra_tick_step,
+    )
 
     if len(ra_tick_values) > 0:
         max_ra_ticks = 7
@@ -681,14 +845,18 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
             tick_step = ra_tick_step * step_factor
             ra_min = theta_zoom_min_deg + ra_center_deg
             ra_max = theta_zoom_max_deg + ra_center_deg
-            ra_tick_values = np.arange(np.ceil(ra_min / tick_step) * tick_step,
-                                       np.floor(ra_max / tick_step) * tick_step + 0.5 * tick_step,
-                                       tick_step,)
+            ra_tick_values = np.arange(
+                np.ceil(ra_min / tick_step) * tick_step,
+                np.floor(ra_max / tick_step) * tick_step + 0.5 * tick_step,
+                tick_step,
+            )
 
         axins.set_xticks(np.deg2rad(ra_tick_values - ra_center_deg))
         axins.set_xticklabels([rf'${t:.0f}^\circ$' for t in ra_tick_values], fontsize=8)
 
-    rticks = np.arange(np.ceil(r_zoom_min / rtick_step) * rtick_step, r_zoom_max + 0.5 * rtick_step, rtick_step,)
+    rticks = np.arange(np.ceil(r_zoom_min / rtick_step) * rtick_step,
+                       r_zoom_max + 0.5 * rtick_step,
+                       rtick_step,)
 
     if len(rticks) > 0:
         max_r_ticks = 4
@@ -703,14 +871,21 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
     axins.tick_params(axis='x', colors='white', labelsize=8, pad=-3)
     axins.tick_params(axis='y', colors='white', labelsize=8, pad=-2)
 
-    axins.text(0.5, 0.85, r'$\alpha\;(\mathrm{RA})$',
-            transform=axins.transAxes, ha='center', va='bottom',
-            fontsize=12, color='white', rotation=6,
-            rotation_mode='anchor', clip_on=False)
+    axins.text(0.5,
+               0.85,
+               r'$\alpha\;(\mathrm{RA})$',
+               transform=axins.transAxes,
+               ha='center',
+               va='bottom',
+               fontsize=12,
+               color='white',
+               rotation=6,
+               rotation_mode='anchor',
+               clip_on=False)
 
     r_axis_theta_deg = theta_zoom_min_deg + 0.2 * dtheta
-    r_axis_rotation = _radial_label_rotation(axins, r_axis_theta_deg,
-                                            r_zoom_min, r_zoom_max)
+    r_axis_rotation = _radial_label_rotation(axins, r_axis_theta_deg, r_zoom_min,
+                                             r_zoom_max)
 
     r_label_radius = r_zoom_min + 0.3 * (r_zoom_max - r_zoom_min)
 
@@ -726,12 +901,26 @@ def add_void_inset(fig, ax, void_theta, void_r, void_ids, void_a, void_b, void_r
 
     ax.plot([th1, th1], [r_zoom_min, r_zoom_max], color='white', lw=0.9, alpha=0.9)
     ax.plot([th2, th2], [r_zoom_min, r_zoom_max], color='white', lw=0.9, alpha=0.9)
-    ax.plot(np.linspace(th1, th2, 400), np.full(400, r_zoom_max), color='white', lw=0.9, alpha=0.9,)
+    ax.plot(np.linspace(th1, th2, 400),
+            np.full(400, r_zoom_max),
+            color='white',
+            lw=0.9,
+            alpha=0.9,)
 
-    con1 = ConnectionPatch(xyA=(th1, r_zoom_max), coordsA=axins.transData, xyB=(th1, r_zoom_max),
-                           coordsB=ax.transData, color='white', lw=0.8, alpha=0.6,)
-    con2 = ConnectionPatch(xyA=(th2, r_zoom_max), coordsA=axins.transData, xyB=(th2, r_zoom_max),
-                           coordsB=ax.transData, color='white', lw=0.8, alpha=0.6,)
+    con1 = ConnectionPatch(xyA=(th1, r_zoom_max),
+                           coordsA=axins.transData,
+                           xyB=(th1, r_zoom_max),
+                           coordsB=ax.transData,
+                           color='white',
+                           lw=0.8,
+                           alpha=0.6,)
+    con2 = ConnectionPatch(xyA=(th2, r_zoom_max),
+                           coordsA=axins.transData,
+                           xyB=(th2, r_zoom_max),
+                           coordsB=ax.transData,
+                           color='white',
+                           lw=0.8,
+                           alpha=0.6,)
 
     fig.add_artist(con1)
     fig.add_artist(con2)
@@ -745,13 +934,12 @@ def main():
     prob_path = Path(args.prob_input)
     cache_path = Path(args.class_cache)
     random_void_cache_path = Path(args.random_void_cache)
-    void_path = Path(args.void_input)
+    void_path = _resolve_void_catalog_path(args.void_input)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    class_tid, class_code, cache_status = load_or_build_class_cache(prob_path=prob_path,
-                                                                    cache_path=cache_path,
-                                                                    rebuild=args.rebuild_cache)
+    class_tid, class_code, cache_status = load_or_build_class_cache(
+        prob_path=prob_path, cache_path=cache_path, rebuild=args.rebuild_cache)
 
     with fitsio.FITS(str(raw_path)) as fobj:
         hdu = fobj[1]
@@ -773,7 +961,9 @@ def main():
         dec = dec[finite]
         redshift = redshift[finite]
 
-    mapped_class, n_class_miss = map_classes_to_raw(raw_tid=raw_tid, class_tid=class_tid, class_code=class_code)
+    mapped_class, n_class_miss = map_classes_to_raw(raw_tid=raw_tid,
+                                                    class_tid=class_tid,
+                                                    class_code=class_code)
     valid_class = mapped_class <= 3
     if not np.all(valid_class):
         raw_tid = raw_tid[valid_class]
@@ -784,7 +974,9 @@ def main():
 
     half = 0.5 * args.slice_width_deg
     if args.dec0 is None:
-        dec0, centers, counts = select_auto_dec0(dec=dec, width_deg=args.slice_width_deg, step_deg=args.dec_scan_step)
+        dec0, centers, counts = select_auto_dec0(dec=dec,
+                                                 width_deg=args.slice_width_deg,
+                                                 step_deg=args.dec_scan_step)
         order = np.argsort(counts)[::-1][:5]
         top5 = [(float(centers[i]), int(counts[i])) for i in order]
     else:
@@ -840,9 +1032,12 @@ def main():
     z_grid = np.linspace(0.0, z_max + 0.02, args.z_grid_size, dtype=np.float64)
     r_grid_mpc = Planck18.comoving_distance(z_grid).value
     r_slice_mpc = np.interp(z_slice, z_grid, r_grid_mpc)
-    random_void_r_mpc = np.interp(random_void_z, z_grid, r_grid_mpc) if len(random_void_z) > 0 else np.array([], dtype=np.float64)
+    random_void_r_mpc = np.interp(random_void_z, z_grid,
+                                  r_grid_mpc) if len(random_void_z) > 0 else np.array(
+                                      [], dtype=np.float64)
     random_void_in_r = random_void_r_mpc <= args.rmax_mpc
-    random_void_theta = np.deg2rad(random_void_ra - args.ra_center_deg) if len(random_void_ra) > 0 else np.array([], dtype=np.float64)
+    random_void_theta = np.deg2rad(random_void_ra - args.ra_center_deg) if len(
+        random_void_ra) > 0 else np.array([], dtype=np.float64)
     n_random_void_rmax = int(np.count_nonzero(random_void_in_r))
 
     n_total_slice = int(in_slice.sum())
@@ -851,9 +1046,8 @@ def main():
 
     theta = np.deg2rad(ra_slice - args.ra_center_deg)
 
-    void_data, h_void, h_key, z_kind, vcols = _read_voids_table(voids_path=void_path,
-                                                                z_col=args.void_z_col,
-                                                                use_xyz=args.void_use_xyz)
+    void_data, h_void, h_key, z_kind, vcols = _read_voids_table(
+        voids_path=void_path, z_col=args.void_z_col, use_xyz=args.void_use_xyz)
     if (not np.isfinite(h_void)) or h_void <= 0.0:
         h_void = 1.0
         h_key = ''
@@ -876,7 +1070,8 @@ def main():
     if z_kind == 'redshift':
         void_finite &= np.isfinite(void_z)
     else:
-        void_finite &= np.isfinite(void_x) & np.isfinite(void_y) & np.isfinite(void_zcart)
+        void_finite &= np.isfinite(void_x) & np.isfinite(void_y) & np.isfinite(
+            void_zcart)
     if not np.all(void_finite):
         void_ra = void_ra[void_finite]
         void_dec = void_dec[void_finite]
@@ -912,7 +1107,8 @@ def main():
     if z_kind == 'redshift':
         void_r_mpc = Planck18.comoving_distance(void_z).value
     else:
-        void_r_mpc = np.sqrt(void_x * void_x + void_y * void_y + void_zcart * void_zcart) / h_void
+        void_r_mpc = np.sqrt(void_x * void_x + void_y * void_y +
+                             void_zcart * void_zcart) / h_void
 
     void_in_r = void_r_mpc <= args.rmax_mpc
     void_ra = void_ra[void_in_r]
@@ -973,10 +1169,12 @@ def main():
             if 'z' in member_cols:
                 mz = np.asarray(member_data[member_cols['z']], dtype=np.float64)
                 mr = Planck18.comoving_distance(mz).value
-            if ('x' in member_cols) and ('y' in member_cols) and ('z_cart' in member_cols):
+            if ('x' in member_cols) and ('y' in member_cols) and ('z_cart'
+                                                                  in member_cols):
                 mx = np.asarray(member_data[member_cols['x']], dtype=np.float64)
                 my = np.asarray(member_data[member_cols['y']], dtype=np.float64)
-                mzcart = np.asarray(member_data[member_cols['z_cart']], dtype=np.float64)
+                mzcart = np.asarray(member_data[member_cols['z_cart']],
+                                    dtype=np.float64)
                 if mra is None or mdec is None:
                     mra, mdec, mr_xyz = _xyz_to_radec(mx, my, mzcart)
                     if mr is None:
@@ -1008,8 +1206,12 @@ def main():
     theta_min_deg = float(np.rad2deg(np.min(theta)))
     theta_max_deg = float(np.rad2deg(np.max(theta)))
     if n_random_void_rmax > 0:
-        theta_min_deg = min(theta_min_deg, float(np.rad2deg(np.min(random_void_theta[random_void_in_r]))))
-        theta_max_deg = max(theta_max_deg, float(np.rad2deg(np.max(random_void_theta[random_void_in_r]))))
+        theta_min_deg = min(
+            theta_min_deg,
+            float(np.rad2deg(np.min(random_void_theta[random_void_in_r]))))
+        theta_max_deg = max(
+            theta_max_deg,
+            float(np.rad2deg(np.max(random_void_theta[random_void_in_r]))))
     if len(void_ra) > 0:
         theta_void = np.deg2rad(void_ra - args.ra_center_deg)
         theta_min_deg = min(theta_min_deg, float(np.rad2deg(np.min(theta_void))))
@@ -1038,9 +1240,14 @@ def main():
                 continue
             mask = in_r & (cls_slice == code)
             if np.any(mask):
-                ax.scatter(theta[mask], r_slice_mpc[mask], s=args.galaxy_point_size,
-                           c=CLASS_COLORS[cname], alpha=args.alpha, linewidths=0,
-                           rasterized=True, zorder=1,)
+                ax.scatter(theta[mask],
+                           r_slice_mpc[mask],
+                           s=args.galaxy_point_size,
+                           c=CLASS_COLORS[cname],
+                           alpha=args.alpha,
+                           linewidths=0,
+                           rasterized=True,
+                           zorder=1,)
 
     color_ids = void_ids
     if member_gid is not None and len(member_gid) > 0:
@@ -1048,9 +1255,16 @@ def main():
     void_colors = _build_void_color_map(color_ids, args.void_cmap)
 
     if member_theta is not None and member_gid is not None and len(member_gid) > 0:
-        member_colors = np.array([void_colors.get(int(g), (1.0, 1.0, 1.0, 0.9)) for g in member_gid])
-        ax.scatter( member_theta, member_r, s=args.member_point_size, c=member_colors,
-                   alpha=args.member_alpha, linewidths=0, rasterized=True, zorder=2,)
+        member_colors = np.array([
+            void_colors.get(int(g), (1.0, 1.0, 1.0, 0.9)) for g in member_gid])
+        ax.scatter(member_theta,
+                   member_r,
+                   s=args.member_point_size,
+                   c=member_colors,
+                   alpha=args.member_alpha,
+                   linewidths=0,
+                   rasterized=True,
+                   zorder=2,)
     else:
         member_colors = None
 
@@ -1060,21 +1274,39 @@ def main():
         color = void_colors.get(vid, (1.0, 1.0, 1.0, 0.9))
         theta0 = float(void_theta[i])
         r0 = float(void_r_mpc[i])
-        a = float(void_a[i]) if np.isfinite(void_a[i]) and void_a[i] > 0 else float(void_reff[i])
-        b = float(void_b[i]) if np.isfinite(void_b[i]) and void_b[i] > 0 else float(void_reff[i])
+        a = float(void_a[i]) if np.isfinite(void_a[i]) and void_a[i] > 0 else float(
+            void_reff[i])
+        b = float(void_b[i]) if np.isfinite(void_b[i]) and void_b[i] > 0 else float(
+            void_reff[i])
         if not np.isfinite(a) or a <= 0:
-            a = float(void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
+            a = float(
+                void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
         if not np.isfinite(b) or b <= 0:
-            b = float(void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
+            b = float(
+                void_reff[i]) if np.isfinite(void_reff[i]) and void_reff[i] > 0 else 0.0
         if r0 <= 0 or (a <= 0 and b <= 0):
             continue
 
-        ax.scatter([theta0], [r0], s=args.void_center_size, c=[color], alpha=args.void_alpha, linewidths=0, zorder=5,)
+        ax.scatter([theta0],
+                   [r0],
+                   s=args.void_center_size,
+                   c=[color],
+                   alpha=args.void_alpha,
+                   linewidths=0,
+                   zorder=5,)
 
         if args.plot_void_ellipses:
-            theta_e, r_e = _ellipse_theta_r(theta0=theta0, r0=r0, a=a, b=b, npts=args.void_ellipse_npts)
-            ax.plot(theta_e, r_e, color=color, linewidth=args.void_ellipse_lw,
-                    alpha=args.void_ellipse_alpha, zorder=4,)
+            theta_e, r_e = _ellipse_theta_r(theta0=theta0,
+                                            r0=r0,
+                                            a=a,
+                                            b=b,
+                                            npts=args.void_ellipse_npts)
+            ax.plot(theta_e,
+                    r_e,
+                    color=color,
+                    linewidth=args.void_ellipse_lw,
+                    alpha=args.void_ellipse_alpha,
+                    zorder=4,)
 
     ax.set_thetamin(theta_min_deg)
     ax.set_thetamax(theta_max_deg)
@@ -1087,70 +1319,106 @@ def main():
     ax.set_yticks([])
     ax.tick_params(axis='both', which='both', length=0)
 
-    ax.set_title(rf'$\mathrm{{BGS\ NGC\ void\ groups}},\ \delta={args.slice_width_deg:.0f}^\circ'
-                 rf'\ (\mathrm{{DEC\ center}}={dec0:.2f}^\circ)$',
-                 fontsize=17,
-                 pad=28,
-                 color='white',)
+    ax.set_title(
+        rf'$\mathrm{{BGS\ NGC\ void\ groups}},\ \delta={args.slice_width_deg:.0f}^\circ'
+        rf'\ (\mathrm{{DEC\ center}}={dec0:.2f}^\circ)$',
+        fontsize=17,
+        pad=28,
+        color='white',
+    )
 
-    ax.text(0.2, 0.215, rf'$\delta = {args.slice_width_deg:.0f}^\circ$',
-            transform=ax.transAxes, ha='left', va='center',
-            fontsize=20, color='white', rotation=-7,
+    ax.text(0.2,
+            0.215,
+            rf'$\delta = {args.slice_width_deg:.0f}^\circ$',
+            transform=ax.transAxes,
+            ha='left',
+            va='center',
+            fontsize=20,
+            color='white',
+            rotation=-7,
             clip_on=False)
 
     theta_plot = theta[in_r]
     r_plot = r_slice_mpc[in_r]
     cls_plot = cls_slice[in_r]
 
-    theta_zoom_min_deg = theta_min_deg if args.zoom_ra_min is None else args.zoom_ra_min - args.ra_center_deg
-    theta_zoom_max_deg = theta_max_deg if args.zoom_ra_max is None else args.zoom_ra_max - args.ra_center_deg
+    theta_zoom_min_deg = (theta_min_deg if args.zoom_ra_min is None else
+                          args.zoom_ra_min - args.ra_center_deg)
+    theta_zoom_max_deg = (theta_max_deg if args.zoom_ra_max is None else
+                          args.zoom_ra_max - args.ra_center_deg)
     if theta_zoom_min_deg >= theta_zoom_max_deg:
         raise ValueError('Inset RA range must satisfy --zoom-ra-min < --zoom-ra-max.')
 
-    add_void_inset(fig=fig, ax=ax, void_theta=void_theta, void_r=void_r_mpc,
-                   void_ids=void_ids, void_a=void_a, void_b=void_b, void_reff=void_reff,
-                   void_colors=void_colors, ra_center_deg=args.ra_center_deg,
-                   theta_zoom_min_deg=theta_zoom_min_deg, theta_zoom_max_deg=theta_zoom_max_deg,
-                   r_zoom_min=args.zoom_r_min, r_zoom_max=args.zoom_r_max,
-                   inset_rect=(args.inset_left, args.inset_bottom, args.inset_width, args.inset_height),
-                   point_size=args.void_center_size * args.zoom_point_scale,
-                   alpha=min(1.0, args.void_alpha + args.zoom_alpha_boost), ellipse_lw=args.void_ellipse_lw,
-                   ellipse_alpha=min(1.0, args.void_ellipse_alpha + args.zoom_alpha_boost),
-                   ellipse_npts=args.void_ellipse_npts, ra_tick_step=args.zoom_ra_tick_step,
-                   rtick_step=args.zoom_r_tick_step, bg_color=args.bg_color, plot_ellipses=args.plot_void_ellipses,
-                   galaxy_theta=(theta_plot if args.plot_galaxies else None), galaxy_r=(r_plot if args.plot_galaxies else None),
-                   galaxy_cls=(cls_plot if args.plot_galaxies else None), class_names=CLASS_NAMES, class_colors=CLASS_COLORS,
-                   galaxy_point_size=(args.galaxy_point_size * args.zoom_galaxy_point_scale), member_theta=member_theta,
-                   member_r=member_r, member_colors=member_colors, member_point_size=(args.member_point_size * args.zoom_point_scale),
-                   member_alpha=min(1.0, args.member_alpha + args.zoom_alpha_boost),
-                   random_void_theta=(random_void_theta if args.random_void_background else None),
-                   random_void_r=(random_void_r_mpc if args.random_void_background else None),
-                   random_void_color=args.random_void_color,
-                   random_void_point_size=args.random_void_point_size * args.zoom_random_void_point_scale,
-                   random_void_alpha=min(1.0, args.random_void_alpha + args.zoom_alpha_boost),)
+    add_void_inset(
+        fig=fig,
+        ax=ax,
+        void_theta=void_theta,
+        void_r=void_r_mpc,
+        void_ids=void_ids,
+        void_a=void_a,
+        void_b=void_b,
+        void_reff=void_reff,
+        void_colors=void_colors,
+        ra_center_deg=args.ra_center_deg,
+        theta_zoom_min_deg=theta_zoom_min_deg,
+        theta_zoom_max_deg=theta_zoom_max_deg,
+        r_zoom_min=args.zoom_r_min,
+        r_zoom_max=args.zoom_r_max,
+        inset_rect=(args.inset_left, args.inset_bottom, args.inset_width,
+                    args.inset_height),
+        point_size=args.void_center_size * args.zoom_point_scale,
+        alpha=min(1.0, args.void_alpha + args.zoom_alpha_boost),
+        ellipse_lw=args.void_ellipse_lw,
+        ellipse_alpha=min(1.0, args.void_ellipse_alpha + args.zoom_alpha_boost),
+        ellipse_npts=args.void_ellipse_npts,
+        ra_tick_step=args.zoom_ra_tick_step,
+        rtick_step=args.zoom_r_tick_step,
+        bg_color=args.bg_color,
+        plot_ellipses=args.plot_void_ellipses,
+        galaxy_theta=(theta_plot if args.plot_galaxies else None),
+        galaxy_r=(r_plot if args.plot_galaxies else None),
+        galaxy_cls=(cls_plot if args.plot_galaxies else None),
+        class_names=CLASS_NAMES,
+        class_colors=CLASS_COLORS,
+        galaxy_point_size=(args.galaxy_point_size * args.zoom_galaxy_point_scale),
+        member_theta=member_theta,
+        member_r=member_r,
+        member_colors=member_colors,
+        member_point_size=(args.member_point_size * args.zoom_point_scale),
+        member_alpha=min(1.0, args.member_alpha + args.zoom_alpha_boost),
+        random_void_theta=(random_void_theta if args.random_void_background else None),
+        random_void_r=(random_void_r_mpc if args.random_void_background else None),
+        random_void_color=args.random_void_color,
+        random_void_point_size=args.random_void_point_size *
+        args.zoom_random_void_point_scale,
+        random_void_alpha=min(1.0, args.random_void_alpha + args.zoom_alpha_boost),
+    )
 
     if not args.hide_legend:
         handles = []
         if args.random_void_background and n_random_void_rmax > 0:
-            handles.append(Line2D([0], [0],
+            handles.append(
+                Line2D([0], [0],
+                       marker='o',
+                       linestyle='',
+                       markersize=5,
+                       markerfacecolor=args.random_void_color,
+                       markeredgecolor='none',
+                       label='Random voids',
+                       alpha=min(0.8, max(args.random_void_alpha * 3.0, 0.25))))
+        if args.plot_galaxies:
+            handles.append(Line2D([0],
+                                  [0],
                                   marker='o',
                                   linestyle='',
-                                  markersize=5,
-                                  markerfacecolor=args.random_void_color,
+                                  markersize=7,
+                                  markerfacecolor='white',
                                   markeredgecolor='none',
-                                  label='Random voids',
-                                  alpha=min(0.8, max(args.random_void_alpha * 3.0, 0.25))))
-        if args.plot_galaxies:
-            handles.append(Line2D([0], [0],
-                           marker='o',
-                           linestyle='',
-                           markersize=7,
-                           markerfacecolor='white',
-                           markeredgecolor='none',
-                           label='Sheet/Filament/Knot',
-                           alpha=0.9,))
+                                  label='Sheet/Filament/Knot',
+                                  alpha=0.9,))
         if member_theta is not None and member_gid is not None and len(member_gid) > 0:
-            handles.append(Line2D([0], [0],
+            handles.append(Line2D([0],
+                                  [0],
                                   marker='o',
                                   linestyle='',
                                   markersize=7,
@@ -1158,7 +1426,8 @@ def main():
                                   markeredgecolor='white',
                                   label='Void members',
                                   alpha=0.9,))
-        handles.append(Line2D([0], [0],
+        handles.append(Line2D([0],
+                              [0],
                               marker='o',
                               linestyle='',
                               markersize=7,
@@ -1194,10 +1463,12 @@ def main():
     else:
         print(f'Void catalog h: {h_void:.6f} (default, header missing H/H0)')
     print(f'Void distance mode: {z_kind}')
+    print(f'Void outline mode: {vcols["shape_mode"]}')
     print(f'Void counts: total={n_void_total:,} | finite={n_void_finite:,} | '
           f'in DEC slice={n_void_slice:,} | in rmax={n_void_rmax:,}')
     if args.plot_members:
-        print(f'Void members: total={n_members_total:,} | plotted={n_members_plotted:,}')
+        print(
+            f'Void members: total={n_members_total:,} | plotted={n_members_plotted:,}')
     if args.random_void_background:
         print(f'Random void background: total={n_random_void_total:,} | '
               f'finite={n_random_void_finite:,} | in rmax={n_random_void_rmax:,}')
@@ -1210,10 +1481,10 @@ def main():
     if top5:
         print('Top DEC centers by population (deg, count):', top5)
     print(f'Chosen DEC slice: [{dec_lo:.3f}, {dec_hi:.3f}] deg (center={dec0:.3f}) -> '
-        f'{n_total_slice:,} galaxies')
+          f'{n_total_slice:,} galaxies')
     print(f'Within r <= {args.rmax_mpc:.1f} Mpc: {n_in_rmax:,}')
-    print('Class counts plotted slice (all): '
-          + ', '.join([f'{CLASS_NAMES[i]}={int(class_counts_slice[i]):,}' for i in range(4)]))
+    print('Class counts plotted slice (all): ' + ', '.join([
+        f'{CLASS_NAMES[i]}={int(class_counts_slice[i]):,}' for i in range(4)]))
     print(f'Void groups plotted: {len(void_ids):,}')
 
 

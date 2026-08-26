@@ -1,8 +1,13 @@
-import argparse, json, os, sys, time
+import argparse
+import gc
+import os
+from pathlib import Path
+import re
+import sys
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
@@ -10,449 +15,425 @@ os.environ.setdefault('MKL_NUM_THREADS', '1')
 os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
 
 import numpy as np
-from astropy.io import fits
-from astropy.table import Table
 
-from group_finder.astra import (add_cartesian_columns,
-                                build_cosmology,
-                                compute_neighbor_statistics,
-                                add_neighbor_columns_to_tables)
-from group_finder.make_cat import (AXIS_VECTOR_COLUMNS,
-                                   build_point_membership_table,
-                                   consolidate_group_info,
-                                   ellipticity_from_axes,
-                                   ELLIPTICITY_DEFINITION,
-                                   J1J3_DEFINITION,
-                                   REFF_DEFINITION)
-from group_finder.read_data import (DEFAULT_COLUMNS,
-                                    DEFAULT_RA_MAX,
-                                    DEFAULT_RA_MIN,
-                                    DEFAULT_TRACERS_DR2,
-                                    load_all_tracer_samples)
-from group_finder.watershed import BOUNDARY_ID, assign_group_ids_to_tables, run_watershed
+try:
+    from .astra_catalog_pipeline import (DEFAULT_H, DEFAULT_MEMORY_BYTES_PER_POINT,
+                                         DEFAULT_MEMORY_FRACTION, DEFAULT_MIN_MEMBERS,
+                                         DEFAULT_MIN_RANDOMS_PER_PIXEL,
+                                         DEFAULT_MIN_RANDOMS_PER_RADIAL_BIN,
+                                         DEFAULT_NSIDE, DEFAULT_RADIAL_BIN_WIDTH,
+                                         DEFAULT_RA_MAX, DEFAULT_RA_MIN,
+                                         DEFAULT_R_THRESHOLD, IterationConfig,
+                                         build_case_consensus, concatenate_sky_samples,
+                                         make_cartesian_case, normalize_catalog_tracer,
+                                         parse_iteration_tokens, random_pool_signature,
+                                         read_sky_sample, run_realizations,
+                                         validate_common_options)
+    from .publish_final_consensus import (FINAL_DATASET_NAMES,
+                                          publish_consensus_products)
+except ImportError:
+    from astra_catalog_pipeline import (DEFAULT_H, DEFAULT_MEMORY_BYTES_PER_POINT,
+                                        DEFAULT_MEMORY_FRACTION, DEFAULT_MIN_MEMBERS,
+                                        DEFAULT_MIN_RANDOMS_PER_PIXEL,
+                                        DEFAULT_MIN_RANDOMS_PER_RADIAL_BIN,
+                                        DEFAULT_NSIDE, DEFAULT_RADIAL_BIN_WIDTH,
+                                        DEFAULT_RA_MAX, DEFAULT_RA_MIN,
+                                        DEFAULT_R_THRESHOLD, IterationConfig,
+                                        build_case_consensus, concatenate_sky_samples,
+                                        make_cartesian_case, normalize_catalog_tracer,
+                                        parse_iteration_tokens, random_pool_signature,
+                                        read_sky_sample, run_realizations,
+                                        validate_common_options)
+    from publish_final_consensus import (FINAL_DATASET_NAMES,
+                                         publish_consensus_products)
 
-
-DEFAULT_DATA_DIR = ('/global/cfs/cdirs/desi/survey/catalogs/DA2/LSS/loa-v1/LSScats/v1.1/nonKP/')
+DEFAULT_DATA_DIR = ('/global/cfs/cdirs/desi/survey/catalogs/DA2/LSS/'
+                    'loa-v1/LSScats/v1.1/nonKP')
 DEFAULT_OUTPUT_ROOT = '/pscratch/sd/v/vtorresg/void_catalog'
-DEFAULT_H = 0.6736
-COSMOLOGIES = (('DR2_Om_1_Om0p301_h0p6736', 0.301),
-               ('DR2_Om_2_Om0p315_h0p6736', 0.315),
+COSMOLOGIES = (('DR2_Om_1_Om0p301_h0p6736', 0.301), ('DR2_Om_2_Om0p315_h0p6736', 0.315),
                ('DR2_Om_3_Om0p329_h0p6736', 0.329))
+COSMOLOGY_NAMES = ('low', 'default', 'high')
+COSMOLOGY_BY_NAME = dict(zip(COSMOLOGY_NAMES, COSMOLOGIES))
+DISK_TRACERS = {'BGS': 'BGS_ANY', 'LRG': 'LRG', 'ELG': 'ELGnotqso', 'QSO': 'QSO'}
 
 
-def utc_timestamp():
-    return time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+def _tracer_argument(value):
+    try:
+        return normalize_catalog_tracer(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def log_message(log_fh, message, verbose=True):
-    line = f'[{utc_timestamp()}] {message}'
-    log_fh.write(line + '\n')
-    log_fh.flush()
-    if verbose:
-        print(message, flush=True)
-
-
-def normalize_tracer(value):
-    aliases = {t.upper(): t for t in DEFAULT_TRACERS_DR2}
-    aliases['BGS'] = 'BGS_ANY'
-    aliases['BGS_BRIGHT'] = 'BGS_ANY'
-    aliases['ELGNOTQSO'] = 'ELGnotqso'
-    aliases['ELG_NOTQSO'] = 'ELGnotqso'
-    aliases['ELG'] = 'ELGnotqso'
-    key = str(value).strip().upper()
-    if key not in aliases:
-        allowed = ', '.join(DEFAULT_TRACERS_DR2)
-        raise argparse.ArgumentTypeError(f'Invalid DR2 tracer {value!r}. Expected one of: {allowed}')
-    return aliases[key]
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('tracer', type=normalize_tracer)
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('tracer', type=_tracer_argument)
     parser.add_argument('--data-dir', default=DEFAULT_DATA_DIR)
     parser.add_argument('--output-root', default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument('--log-dir', default=None)
-    parser.add_argument('--caps', nargs='+', default=['NGC', 'SGC'], choices=['NGC', 'SGC'])
-    parser.add_argument('--random-index', type=int, default=0)
-    parser.add_argument('--seed', type=int, default=12345)
+    parser.add_argument(
+        '--final-catalog-root',
+        default=None,
+        help=('Optional compact final-catalog root. Production jobs use '
+              '/pscratch/sd/v/vtorresg/void_catalog_dr2_new.'))
+    parser.add_argument('--caps',
+                        nargs='+',
+                        choices=('NGC', 'SGC'),
+                        default=['NGC', 'SGC'])
+    parser.add_argument('--cosmologies',
+                        nargs='+',
+                        choices=COSMOLOGY_NAMES,
+                        default=list(COSMOLOGY_NAMES),
+                        help=('Cosmologies to process: low (Omega_m=0.301), default '
+                              '(0.315), and/or high (0.329). Default: all three.'))
+    parser.add_argument('--iterations', nargs='+', default=['0-99'])
+    random_selection = parser.add_mutually_exclusive_group()
+    random_selection.add_argument(
+        '--random-indices',
+        nargs='+',
+        default=None,
+        help='Random files to pool (for example 0-17). Default: all available.')
+    random_selection.add_argument(
+        '--random-index',
+        type=int,
+        default=None,
+        help='Use one random file only (legacy/debug option).')
+    parser.add_argument('--workers', default='auto')
+    parser.add_argument('--memory-fraction',
+                        type=float,
+                        default=DEFAULT_MEMORY_FRACTION)
+    parser.add_argument('--memory-bytes-per-point',
+                        type=int,
+                        default=DEFAULT_MEMORY_BYTES_PER_POINT)
     parser.add_argument('--h', type=float, default=DEFAULT_H)
     parser.add_argument('--ra-min', type=float, default=DEFAULT_RA_MIN)
     parser.add_argument('--ra-max', type=float, default=DEFAULT_RA_MAX)
-    parser.add_argument('--r-threshold', type=float, default=-0.25)
-    parser.add_argument('--seed-threshold', type=float, default=-0.85)
-    parser.add_argument('--merge-threshold', type=float, default=-0.85)
-    parser.add_argument('--min-group-size', type=int, default=4)
-    parser.add_argument('--min-rand-for-shape', type=int, default=4)
-    parser.add_argument('--healpix-edge-nside', type=int, default=256)
-    parser.add_argument('--healpix-edge-min-randoms', type=int, default=3)
-    parser.add_argument('--healpix-edge-min-data-ngc', type=int, default=3)
-    parser.add_argument('--healpix-edge-min-data-sgc', type=int, default=4)
-    parser.add_argument('--disable-healpix-edge-data-cut', action='store_true',
-                        default=False)
-    parser.add_argument('--mode', choices=['underdense', 'overdense'], default='underdense')
+    parser.add_argument('--z-min', type=float, default=None)
+    parser.add_argument('--z-max', type=float, default=None)
+    parser.add_argument('--seed', type=int, default=12345)
+    parser.add_argument('--random-factor', type=float, default=1.0)
+    parser.add_argument('--r-threshold', type=float, default=DEFAULT_R_THRESHOLD)
+    parser.add_argument('--min-members', type=int, default=DEFAULT_MIN_MEMBERS)
+    parser.add_argument('--healpix-nside', type=int, default=DEFAULT_NSIDE)
+    parser.add_argument('--min-randoms-per-pixel',
+                        type=int,
+                        default=DEFAULT_MIN_RANDOMS_PER_PIXEL)
+    parser.add_argument('--min-randoms-per-radial-bin',
+                        type=int,
+                        default=DEFAULT_MIN_RANDOMS_PER_RADIAL_BIN)
+    parser.add_argument('--radial-bin-width',
+                        type=float,
+                        default=DEFAULT_RADIAL_BIN_WIDTH)
+    parser.add_argument('--mask-cache', default=None)
+    parser.add_argument('--mask-chunk-size', type=int, default=1_000_000)
+    parser.add_argument('--edge-chunk-size', type=int, default=250_000)
+    parser.add_argument('--input-chunk-size', type=int, default=2_000_000)
     parser.add_argument('--include-membership', action='store_true')
-    parser.add_argument('--overwrite', action='store_true')
+    consensus_mode = parser.add_mutually_exclusive_group()
+    consensus_mode.add_argument('--no-consensus', action='store_true')
+    consensus_mode.add_argument('--consensus-only', action='store_true')
+    parser.add_argument('--consensus-keep-all', action='store_true')
+    parser.add_argument('--consensus-vol-frac', type=float, default=0.5)
+    parser.add_argument('--consensus-v-cut', type=float, default=0.5)
+    parser.add_argument('--consensus-workers', default='auto')
+    output_mode = parser.add_mutually_exclusive_group()
+    output_mode.add_argument('--resume', action='store_true')
+    output_mode.add_argument('--overwrite', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--quiet', action='store_true')
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def output_path_for(output_root, cosmo_label, tracer, cap):
-    return os.path.join(output_root, cosmo_label, f'voids_{tracer}_{cap}.fits')
-
-
-def healpix_edge_min_data_for_case(args, tracer, cap):
-    if args.disable_healpix_edge_data_cut:
+def parse_random_indices(tokens=None, single_index=None):
+    """Return selected source indices, or ``None`` for all discovered files."""
+    if single_index is not None:
+        if int(single_index) < 0:
+            raise ValueError('--random-index must be non-negative.')
+        return (int(single_index),)
+    if not tokens:
         return None
-    if str(tracer).upper() != 'LRG':
+    normalized = [str(value).strip().lower() for value in tokens]
+    if 'all' in normalized:
+        if len(normalized) != 1:
+            raise ValueError('Use --random-indices all by itself.')
         return None
-
-    cap_upper = str(cap).upper()
-    if cap_upper == 'NGC':
-        return args.healpix_edge_min_data_ngc
-    if cap_upper == 'SGC':
-        return args.healpix_edge_min_data_sgc
-    return None
+    try:
+        return parse_iteration_tokens(tokens, default=(0, 0))
+    except ValueError as exc:
+        raise ValueError(f'Invalid --random-indices: {exc}') from exc
 
 
-def common_void_table(group_table, filter_edge=True, filter_footprint_edge=None):
-    '''
-    Return the common VOIDS table. By default, footprint-edge voids are
-    excluded so downstream radius/shape statistics use only footprint-clean
-    objects.
-    '''
-    if filter_footprint_edge is None:
-        filter_footprint_edge = bool(filter_edge)
+def select_cosmologies(names):
+    """Resolve CLI names to unique cosmologies in the requested order."""
+    selected = []
+    for name in names:
+        if name not in COSMOLOGY_BY_NAME:
+            raise ValueError(f'Unknown cosmology {name!r}.')
+        cosmology = COSMOLOGY_BY_NAME[name]
+        if cosmology not in selected:
+            selected.append(cosmology)
+    return tuple(selected)
 
-    source = group_table
-    if filter_footprint_edge:
-        if 'FOOTPRINT_EDGE' in group_table.colnames:
-            footprint_edge = np.asarray(group_table['FOOTPRINT_EDGE'], dtype=bool)
-            source = group_table[~footprint_edge]
-        elif 'EDGE' in group_table.colnames:
-            footprint_edge = np.asarray(group_table['EDGE'], dtype=bool)
-            source = group_table[~footprint_edge]
 
-    out = Table()
-    out['VOID_ID'] = np.asarray(source['VOID_ID'], dtype=np.int32)
-    out['RA'] = np.asarray(source['RA'], dtype=np.float64)
-    out['DEC'] = np.asarray(source['DEC'], dtype=np.float64)
-    out['REDSHIFT'] = np.asarray(source['REDSHIFT'], dtype=np.float64)
-    out['R_EFF'] = np.asarray(source['R_EFF'], dtype=np.float64)
-    out['ELLIP'] = ellipticity_from_axes(source)
+def _indexed_random_files(data_dir, prefix):
+    pattern = re.compile(rf'^{re.escape(prefix)}_(\d+)_clustering\.ran\.fits$')
+    found = {}
+    for path in Path(data_dir).glob(f'{prefix}_*_clustering.ran.fits'):
+        match = pattern.match(path.name)
+        if match:
+            found[int(match.group(1))] = path
+    return found
 
-    extra_cols = ('N_DATA_IN_GROUP', 'N_RAND_IN_GROUP',
-                  'LAMBDA_1', 'LAMBDA_2', 'LAMBDA_3',
-                  'GEOM_BAD',
-                  'EDGE', 'FOOTPRINT_EDGE',
-                  'TOUCHES_RADIAL_EDGE', 'CENTER_NEAR_RADIAL_EDGE',
-                  'TOUCHES_RA_EDGE', 'TOUCHES_DEC_EDGE',
-                  'TOUCHES_HEALPIX_EDGE',
-                  'TOUCHES_CART_EDGE', 'CENTER_NEAR_CART_EDGE',
-                  'X', 'Y', 'Z',
-                  'SEMI_AXIS_A', 'SEMI_AXIS_B', 'SEMI_AXIS_C',
-                  *AXIS_VECTOR_COLUMNS)
-    for col in extra_cols:
-        if col in source.colnames:
-            out[col] = np.asarray(source[col])
-    if 'FOOTPRINT_EDGE' not in out.colnames:
-        if 'EDGE' in source.colnames:
-            out['FOOTPRINT_EDGE'] = np.asarray(source['EDGE'], dtype=np.bool_)
-        else:
-            out['FOOTPRINT_EDGE'] = np.zeros(len(out), dtype=np.bool_)
-    if 'EDGE' in out.colnames:
-        out['EDGE'] = np.zeros(len(out), dtype=np.bool_)
+
+def dr2_data_path(data_dir, tracer, cap):
+    """Return the data path and an optional cap cut for combined files."""
+    data_dir = Path(data_dir).expanduser()
+    disk = DISK_TRACERS[normalize_catalog_tracer(tracer)]
+    cap_data = data_dir / f'{disk}_{cap}_clustering.dat.fits'
+    if cap_data.is_file():
+        return cap_data, None
+    combined_data = data_dir / f'{disk}_clustering.dat.fits'
+    return combined_data, cap
+
+
+def dr2_random_paths(data_dir, tracer, cap, requested_indices=None):
+    """Resolve an ordered multi-file random pool for one survey cap."""
+    data_dir = Path(data_dir).expanduser()
+    disk = DISK_TRACERS[normalize_catalog_tracer(tracer)]
+    cap_files = _indexed_random_files(data_dir, f'{disk}_{cap}')
+    if cap_files:
+        available = cap_files
+        cap_cut = None
     else:
-        out['EDGE'] = np.zeros(len(out), dtype=np.bool_)
-    return out
-
-
-def write_common_void_fits(group_table, output_path, tracer, cap, cosmo_label,
-                           omega_m, args, point_table=None):
-    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-    if 'FOOTPRINT_EDGE' in group_table.colnames:
-        footprint_edge_flags = np.asarray(group_table['FOOTPRINT_EDGE'], dtype=bool)
-        n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
-        n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
-    elif 'EDGE' in group_table.colnames:
-        footprint_edge_flags = np.asarray(group_table['EDGE'], dtype=bool)
-        n_footprint_edge = int(np.count_nonzero(footprint_edge_flags))
-        n_footprint_clean = int(np.count_nonzero(~footprint_edge_flags))
-    else:
-        n_footprint_edge = 0
-        n_footprint_clean = len(group_table)
-    voids = common_void_table(group_table)
-    n_edge = int(np.count_nonzero(np.asarray(voids['EDGE'], dtype=bool)))
-    n_footprint_written = int(np.count_nonzero(np.asarray(voids['FOOTPRINT_EDGE'], dtype=bool)))
-
-    primary = fits.PrimaryHDU()
-    hdr = primary.header
-    hdr['RELEASE'] = ('DR2', 'DESI data release')
-    hdr['TRACER'] = (tracer, 'Tracer type')
-    hdr['CAP'] = (cap, 'Sky cap')
-    hdr['COSMO'] = (cosmo_label, 'Cosmology label')
-    hdr['H'] = (float(args.h), 'h = H0 / 100')
-    hdr['OMEGA_M'] = (float(omega_m), 'Matter density parameter')
-    hdr['RANDIDX'] = (int(args.random_index), 'DR2 random index')
-    hdr['SEED'] = (int(args.seed), 'Random subsampling seed')
-    hdr['RTHRESH'] = (float(args.r_threshold), 'Watershed R threshold')
-    if args.seed_threshold is not None:
-        hdr['SEEDTHR'] = (float(args.seed_threshold), 'Watershed seed threshold')
-    if args.merge_threshold is not None:
-        hdr['MERGETHR'] = (float(args.merge_threshold), 'Watershed saddle merge threshold')
-    hdr['MINGRP'] = (int(args.min_group_size), 'Minimum watershed group size')
-    hdr['MINRSHAP'] = (int(args.min_rand_for_shape), 'Min randoms for axes')
-    hdr['WMODE'] = (args.mode, 'Watershed mode')
-    hdr['NVOIDS'] = (len(voids), 'Clean voids written')
-    hdr['NVOIDRAW'] = (len(group_table), 'Voids before footprint cut')
-    if 'GEOM_BAD' in voids.colnames:
-        geom_flags = np.asarray(voids['GEOM_BAD'], dtype=bool)
-        hdr['NGEOMBAD'] = (int(np.count_nonzero(geom_flags)), 'Number of GEOM_BAD=True voids')
-    hdr['UNITSXYZ'] = ('Mpc/h', 'Units for R_EFF, X/Y/Z, semi-axes')
-    hdr['REFFDEF'] = (REFF_DEFINITION, 'R_EFF')
-    hdr['LAMDEF'] = ('eig(<dx_i dx_j>)', 'LAMBDA_1..3 definition')
-    hdr['AXDEF'] = ('SEMI_AXIS_j=sqrt(5*LAMBDA_j)', 'Semi-axis definition')
-    hdr['UNITSAX'] = ('unitless', 'Units for X1..Z3 axis-vector columns')
-    hdr['AXVEC'] = ('Xj,Yj,Zj', 'Unit-vector components for axis j')
-    hdr['UNITSANG'] = ('deg', 'Units for RA and DEC')
-    hdr['ZUNIT'] = ('redshift', 'Units for REDSHIFT')
-    hdr['ELLIPDEF'] = (ELLIPTICITY_DEFINITION, 'Ellipticity definition')
-    hdr['J1J3'] = (J1J3_DEFINITION, 'Moment ratio')
-    hdr['GEOMDEF'] = ('1-C/A>0.9', 'GEOM_BAD definition')
-    hdr['EDGEDEF'] = ('GROUPID==boundary_id', 'EDGE=True means watershed boundary')
-    hdr['FPEDDEF'] = ('HEALPix low-data mask', 'FOOTPRINT_EDGE definition')
-    hdr['FPCUT'] = (True, 'Drop FOOTPRINT_EDGE rows')
-    hdr['NEDGE'] = (n_edge, 'EDGE=True rows in VOIDS')
-    hdr['NFPEDGE'] = (n_footprint_edge, 'Footprint-edge rows dropped')
-    hdr['NFPCLN'] = (n_footprint_clean, 'Clean voids written')
-    hdr['NFPWRT'] = (n_footprint_written, 'Footprint-edge rows written')
-    hdr['GIDM1'] = (-1, 'GROUPID=-1 means unassigned point')
-    hdr['GIDM2'] = (int(BOUNDARY_ID), 'GROUPID for watershed boundary point')
-    if 'SURVEY_VOL' in group_table.meta and np.isfinite(group_table.meta['SURVEY_VOL']):
-        hdr['SURVVOL'] = (float(group_table.meta['SURVEY_VOL']), 'Survey volume in (Mpc/h)^3')
-    if 'SURVEY_OMG' in group_table.meta and np.isfinite(group_table.meta['SURVEY_OMG']):
-        hdr['SURVOMG'] = (float(group_table.meta['SURVEY_OMG']), 'Survey solid angle in sr')
-    if 'RAND_DENS' in group_table.meta and np.isfinite(group_table.meta['RAND_DENS']):
-        hdr['RANDDENS'] = (float(group_table.meta['RAND_DENS']), 'Mean random density h^3/Mpc^3')
-    if 'NRAND_DENS' in group_table.meta:
-        hdr['NRANDDEN'] = (int(group_table.meta['NRAND_DENS']), 'Randoms used for mean density')
-    if 'HPX_EDGE' in group_table.meta:
-        hdr['HPXEDGE'] = (bool(group_table.meta['HPX_EDGE']), 'HEALPix angular edge enabled')
-    if 'HPX_NSIDE' in group_table.meta:
-        hdr['HPXNSIDE'] = (int(group_table.meta['HPX_NSIDE']), 'HEALPix edge NSIDE')
-    if 'HPX_NEST' in group_table.meta:
-        hdr['HPXNEST'] = (bool(group_table.meta['HPX_NEST']), 'HEALPix NESTED ordering')
-    if 'HPX_MINR' in group_table.meta:
-        hdr['HPXMINR'] = (int(group_table.meta['HPX_MINR']), 'Min randoms per HEALPix pixel')
-    if 'HPX_EBUF' in group_table.meta:
-        hdr['HPXEBUF'] = (float(group_table.meta['HPX_EBUF']), 'HEALPix edge buffer in deg')
-    if 'HPX_NOBS' in group_table.meta:
-        hdr['HPXNOBS'] = (int(group_table.meta['HPX_NOBS']), 'Observed HEALPix pixels')
-    if 'HPX_NEDGE' in group_table.meta:
-        hdr['HPXNEDG'] = (int(group_table.meta['HPX_NEDGE']), 'Angular edge HEALPix pixels')
-    if 'HPX_NBUF' in group_table.meta:
-        hdr['HPXNBUF'] = (int(group_table.meta['HPX_NBUF']), 'Buffered angular edge HEALPix pixels')
-    if 'HPX_MINDATA' in group_table.meta:
-        hdr['HPXMIND'] = (int(group_table.meta['HPX_MINDATA']), 'N_data/Npix threshold')
-    if 'HPX_NLOWDATA' in group_table.meta:
-        hdr['HPXNLOW'] = (int(group_table.meta['HPX_NLOWDATA']), 'Pixels failing N_data/Npix cut')
-    if point_table is not None:
-        hdr['NPOINTS'] = (len(point_table), 'Rows in POINT_MEMBERSHIP')
-        point_gids = np.asarray(point_table['GROUPID'], dtype=np.int32)
-        hdr['NPTASGN'] = (int(np.count_nonzero(point_gids >= 0)), 'Assigned points')
-        hdr['NPTUNASN'] = (int(np.count_nonzero(point_gids == -1)), 'Unassigned points')
-        hdr['NPTBND'] = (int(np.count_nonzero(point_gids == int(BOUNDARY_ID))),
-                         'Watershed boundary points')
-
-    hdus = [primary, fits.BinTableHDU(data=voids.as_array(), name='VOIDS')]
-    if point_table is not None:
-        hdus.append(fits.BinTableHDU(data=point_table.as_array(),
-                                     name='POINT_MEMBERSHIP'))
-
-    fits.HDUList(hdus).writeto(output_path, overwrite=args.overwrite)
-    return output_path
-
-
-def read_void_catalog(path):
-    with fits.open(path, memmap=True) as hdul:
-        if 'VOIDS' in hdul:
-            table = Table(hdul['VOIDS'].data)
-        else:
-            table = Table(hdul[1].data)
-    required = ('VOID_ID', 'RA', 'DEC', 'REDSHIFT', 'R_EFF')
-    missing = [col for col in required if col not in table.colnames]
+        available = _indexed_random_files(data_dir, disk)
+        cap_cut = cap
+    if not available:
+        raise FileNotFoundError(f'No indexed random catalogues found for '
+                                f'{disk} {cap} in '
+                                f'{data_dir}.')
+    indices = (tuple(sorted(available)) if requested_indices is None else tuple(
+        int(value) for value in requested_indices))
+    missing = [value for value in indices if value not in available]
     if missing:
-        raise KeyError(f'{path} missing required columns: {missing}')
-    return table
+        raise FileNotFoundError(f'Random indices not found for {disk} {cap}: '
+                                f'{missing}. '
+                                f'Available: {sorted(available)}')
+    return tuple(available[value] for value in indices), indices, cap_cut
 
 
-def run_case(data_table, rand_table, tracer, cap, cosmo_label, omega_m,
-             cosmo, output_path, args, log_fh, verbose):
-    if os.path.exists(output_path) and not args.overwrite:
-        log_message(log_fh, f'skip existing {output_path}', verbose=verbose)
-        return output_path
-
-    data_tbl = data_table.copy(copy_data=True)
-    rand_tbl = rand_table.copy(copy_data=True)
-
-    t0 = time.time()
-    log_message(log_fh, f'case start cosmo={cosmo_label} tracer={tracer} cap={cap} '
-                        f'n_data={len(data_tbl)} n_rand={len(rand_tbl)}',
-                        verbose=verbose)
-
-    step = time.time()
-    add_cartesian_columns(data_tbl, cosmo=cosmo, h=args.h)
-    add_cartesian_columns(rand_tbl, cosmo=cosmo, h=args.h)
-    log_message(log_fh, f'case={cosmo_label}/{tracer}/{cap} cartesian '
-                        f'elapsed_s={time.time() - step:.3f}',
-                        verbose=verbose)
-
-    step = time.time()
-    stats = compute_neighbor_statistics(data_tbl, rand_tbl)
-    add_neighbor_columns_to_tables(data_tbl, rand_tbl, stats)
-    rvals = stats['r_values']
-    log_message(log_fh, f'case={cosmo_label}/{tracer}/{cap} neighbors '
-                        f'elapsed_s={time.time() - step:.3f} '
-                        f'n={len(rvals)} min={float(rvals.min()):.3f} '
-                        f'max={float(rvals.max()):.3f}',
-                        verbose=verbose)
-
-    step = time.time()
-    ws = run_watershed(neighbors=stats['neighbors'],
-                       r_values=stats['r_values'],
-                       r_threshold=args.r_threshold,
-                       min_group_size=args.min_group_size,
-                       mode=args.mode,
-                       seed_threshold=args.seed_threshold,
-                       merge_threshold=args.merge_threshold)
-    assign_group_ids_to_tables(data_tbl, rand_tbl, ws['group_of'],
-                               group_col='GROUPID')
-    log_message(log_fh, f"case={cosmo_label}/{tracer}/{cap} watershed "
-                        f"elapsed_s={time.time() - step:.3f} "
-                        f"groups={ws['n_groups']} assigned={ws['n_assigned']} "
-                        f"boundary={ws['n_boundary_nodes']} "
-                        f"unassigned={ws['n_unassigned']}",
-                verbose=verbose)
-
-    step = time.time()
-    group_table = consolidate_group_info(data_table=data_tbl,
-                                         rand_table=rand_tbl,
-                                         cosmo=cosmo,
-                                         h=args.h,
-                                         group_col='GROUPID',
-                                         min_rand_for_shape=args.min_rand_for_shape,
-                                         healpix_edge_nside=getattr(args, 'healpix_edge_nside', 256),
-                                         healpix_edge_min_randoms=getattr(args, 'healpix_edge_min_randoms', 3),
-                                         healpix_edge_min_data_per_pix=healpix_edge_min_data_for_case(
-                                             args, tracer, cap))
-    log_message(log_fh, f'case={cosmo_label}/{tracer}/{cap} consolidate '
-                        f'elapsed_s={time.time() - step:.3f} '
-                        f'n_voids={len(group_table)}',
-                        verbose=verbose)
-
-    point_table = None
-    if args.include_membership:
-        step = time.time()
-        point_table = build_point_membership_table(data_tbl, rand_tbl,
-                                                   group_col='GROUPID')
-        log_message(log_fh, f'case={cosmo_label}/{tracer}/{cap} membership '
-                            f'elapsed_s={time.time() - step:.3f} '
-                            f'n_points={len(point_table)}',
-                            verbose=verbose)
-
-    step = time.time()
-    write_common_void_fits(group_table=group_table,
-                           output_path=output_path,
-                           tracer=tracer,
-                           cap=cap,
-                           cosmo_label=cosmo_label,
-                           omega_m=omega_m,
-                           args=args,
-                           point_table=point_table)
-    log_message(log_fh, f'case={cosmo_label}/{tracer}/{cap} write '
-                        f'elapsed_s={time.time() - step:.3f} '
-                        f'output={output_path}',
-                        verbose=verbose)
-    log_message(log_fh, f'case done cosmo={cosmo_label} tracer={tracer} cap={cap} '
-                        f'elapsed_s={time.time() - t0:.3f}',
-                        verbose=verbose)
-    return output_path
+def _config(args, case_root, label, omega_m, cap, random_paths, random_indices,
+            pool_signature):
+    if args.mask_cache:
+        mask_cache = Path(args.mask_cache) / label
+    else:
+        mask_cache = Path(case_root) / 'mask_cache'
+    return IterationConfig(
+        case_root=str(case_root),
+        dataset=label,
+        tracer=args.tracer,
+        zone=cap,
+        random_source=str(random_paths[0]),
+        random_sources=tuple(str(Path(path).resolve()) for path in random_paths),
+        random_source_indices=tuple(int(value) for value in random_indices),
+        random_pool_signature=pool_signature,
+        mask_cache=str(mask_cache),
+        base_seed=args.seed,
+        random_factor=args.random_factor,
+        r_threshold=args.r_threshold,
+        min_members=args.min_members,
+        healpix_nside=args.healpix_nside,
+        min_randoms_per_pixel=args.min_randoms_per_pixel,
+        min_randoms_per_radial_bin=args.min_randoms_per_radial_bin,
+        radial_bin_width=args.radial_bin_width,
+        mask_chunk_size=args.mask_chunk_size,
+        edge_chunk_size=args.edge_chunk_size,
+        h=args.h,
+        omega_m=omega_m,
+        include_membership=args.include_membership,
+        overwrite=args.overwrite)
 
 
-def main():
-    args = parse_args()
-    verbose = not args.quiet
-    output_root = os.path.abspath(os.path.expanduser(args.output_root))
-
-    planned = []
-    for cosmo_label, _omega_m in COSMOLOGIES:
-        for cap in args.caps:
-            planned.append(output_path_for(output_root, cosmo_label,
-                                           args.tracer, cap))
-
+def main(argv=None):
+    args = parse_args(argv)
+    iterations = parse_iteration_tokens(args.iterations)
+    cosmologies = select_cosmologies(args.cosmologies)
+    requested_random_indices = parse_random_indices(args.random_indices,
+                                                    args.random_index)
+    if args.final_catalog_root and args.consensus_keep_all:
+        raise ValueError('--final-catalog-root is reserved for the standard '
+                         'support-cut '
+                         'consensus; do not combine it with --consensus-keep-all.')
+    for _, omega_m in cosmologies:
+        validate_common_options(
+            iterations,
+            args.random_factor,
+            args.r_threshold,
+            args.min_members,
+            args.h,
+            omega_m,
+            args.memory_fraction,
+            args.memory_bytes_per_point,
+            healpix_nside=args.healpix_nside,
+            min_randoms_per_pixel=args.min_randoms_per_pixel,
+            min_randoms_per_radial_bin=args.min_randoms_per_radial_bin,
+            radial_bin_width=args.radial_bin_width,
+            mask_chunk_size=args.mask_chunk_size,
+            edge_chunk_size=args.edge_chunk_size,
+            input_chunk_size=args.input_chunk_size,
+            consensus_vol_frac=args.consensus_vol_frac,
+            consensus_v_cut=args.consensus_v_cut,
+            consensus_workers=args.consensus_workers,
+            ra_min=args.ra_min,
+            ra_max=args.ra_max,
+            z_min=args.z_min,
+            z_max=args.z_max,
+            workers=args.workers,
+            seed=args.seed)
+    output_root = Path(args.output_root).expanduser().resolve()
     if args.dry_run:
-        print('Planned output FITS files:')
-        for path in planned:
-            print(path)
-        return
+        print(f'DR2 source: {Path(args.data_dir).expanduser().resolve()}')
+        print(f'Cosmologies: {", ".join(args.cosmologies)}')
+        print(f'Realizations: {iterations[0]}..{iterations[-1]} '
+              f'({len(iterations)})')
+        for cap in args.caps:
+            data_path, _ = dr2_data_path(args.data_dir, args.tracer, cap)
+            random_paths, random_indices, _ = dr2_random_paths(
+                args.data_dir, args.tracer, cap, requested_random_indices)
+            print(f'{cap}: data={data_path}')
+            print(f'  random pool={len(random_paths)} files; '
+                  f'indices={list(random_indices)}')
+            for label, _ in cosmologies:
+                case_root = output_root / label
+                print(f'{label} {cap}: pool -> '
+                      f'{case_root}/{args.tracer.lower()}/{cap.lower()}/'
+                      'iterNN/all.fits')
+                if not args.no_consensus:
+                    print(f'  consensus: {case_root}/consensus/'
+                          f'voids_{args.tracer}_{cap}_n{len(iterations)}.fits')
+                    if args.final_catalog_root:
+                        dataset = FINAL_DATASET_NAMES[label]
+                        print(f'  final: {Path(args.final_catalog_root) / dataset}/'
+                              f'voids_{args.tracer}_{cap}.fits')
+        return 0
 
-    log_dir = args.log_dir or os.path.join(output_root, 'logs')
-    os.makedirs(log_dir, exist_ok=True)
+    for cap in args.caps:
+        if args.consensus_only:
+            for label, omega_m in cosmologies:
+                consensus_paths = build_case_consensus(
+                    output_root / label,
+                    args.tracer,
+                    cap,
+                    iterations,
+                    resume=args.resume,
+                    overwrite=args.overwrite,
+                    keep_all=args.consensus_keep_all,
+                    vol_frac=args.consensus_vol_frac,
+                    v_cut=args.consensus_v_cut,
+                    query_workers=args.consensus_workers,
+                    quiet=args.quiet)
+                if args.final_catalog_root:
+                    published = publish_consensus_products(consensus_paths,
+                                                           args.final_catalog_root,
+                                                           FINAL_DATASET_NAMES[label],
+                                                           args.tracer,
+                                                           cap,
+                                                           omega_m=omega_m,
+                                                           resume=args.resume,
+                                                           overwrite=args.overwrite)
+                    if not args.quiet:
+                        print(f'[final] {published["fits"]}', flush=True)
+            continue
 
-    log_path = os.path.join(log_dir,
-                            f'run_dr2_voids_{args.tracer}_rand{args.random_index:02d}_'
-                            f'{time.strftime("%Y%m%d_%H%M%S", time.gmtime())}.log')
+        data_path, data_cap_cut = dr2_data_path(args.data_dir, args.tracer, cap)
+        random_paths, random_indices, random_cap_cut = dr2_random_paths(
+            args.data_dir, args.tracer, cap, requested_random_indices)
+        if not data_path.is_file():
+            raise FileNotFoundError(data_path)
+        for random_path in random_paths:
+            if not random_path.is_file():
+                raise FileNotFoundError(random_path)
 
-    with open(log_path, 'a', encoding='utf-8') as log_fh:
-        t0 = time.time()
-        log_message(log_fh, f'run start log_file={log_path}', verbose=verbose)
-        log_message(log_fh, f'config={json.dumps(vars(args), sort_keys=True)}',
-                    verbose=verbose)
-        log_message(log_fh, f'cosmologies={json.dumps(COSMOLOGIES)}',
-                    verbose=verbose)
+        if not args.quiet:
+            print(f'[DR2 {args.tracer} {cap}] reading {data_path.name} and '
+                  f'{len(random_paths)} random files '
+                  f'({random_indices[0]}..{random_indices[-1]})',
+                  flush=True)
+        objects = read_sky_sample(data_path,
+                                  data_cap_cut,
+                                  args.ra_min,
+                                  args.ra_max,
+                                  args.z_min,
+                                  args.z_max,
+                                  chunk_size=args.input_chunk_size)
+        random_parts = []
+        random_counts = []
+        for position, (source_index,
+                       random_path) in enumerate(zip(random_indices, random_paths),
+                                                 start=1):
+            if not args.quiet:
+                print(f'[DR2 {args.tracer} {cap}] random source '
+                      f'{position}/{len(random_paths)}: index={source_index} '
+                      f'{random_path.name}',
+                      flush=True)
+            part = read_sky_sample(random_path,
+                                   random_cap_cut,
+                                   args.ra_min,
+                                   args.ra_max,
+                                   args.z_min,
+                                   args.z_max,
+                                   chunk_size=args.input_chunk_size)
+            random_parts.append(part)
+            random_counts.append(len(part))
+        randoms = concatenate_sky_samples(random_parts)
+        random_source_index = np.repeat(np.asarray(random_indices, dtype=np.int16),
+                                        np.asarray(random_counts, dtype=np.int64))
+        del random_parts
+        gc.collect()
+        pool_signature = random_pool_signature(random_paths, random_indices)
+        if not args.quiet:
+            print(f'[DR2 {args.tracer} {cap}] pooled '
+                  f'{len(randoms):,} random rows from '
+                  f'{len(random_paths)} sources',
+                  flush=True)
 
-        step = time.time()
-        all_data = load_all_tracer_samples(data_dir=args.data_dir,
-                                           tracers=[args.tracer],
-                                           random_index=args.random_index,
-                                           columns=DEFAULT_COLUMNS,
-                                           ra_min=args.ra_min,
-                                           ra_max=args.ra_max,
-                                           seed=args.seed,
-                                           caps=args.caps,
-                                           release='dr2',
-                                           tracer_aliases=None,
-                                           mask_dir=None,
-                                           verbose=verbose)
-        log_message(log_fh, f'loaded tracer={args.tracer} '
-                            f'elapsed_s={time.time() - step:.3f}',
-                            verbose=verbose)
-
-        outputs = []
-        for cosmo_label, omega_m in COSMOLOGIES:
-            cosmo = build_cosmology(h=args.h, omega_m=omega_m)
-            for cap in args.caps:
-                key = f'{args.tracer}_{cap}'
-                rand_key = f'{args.tracer}_RAND_{cap}'
-                output_path = output_path_for(output_root, cosmo_label,
-                                              args.tracer, cap)
-                outputs.append(run_case(data_table=all_data[key],
-                                        rand_table=all_data[rand_key],
-                                        tracer=args.tracer,
-                                        cap=cap,
-                                        cosmo_label=cosmo_label,
-                                        omega_m=omega_m,
-                                        cosmo=cosmo,
-                                        output_path=output_path,
-                                        args=args,
-                                        log_fh=log_fh,
-                                        verbose=verbose))
-
-        log_message(log_fh, f'run complete elapsed_s={time.time() - t0:.3f}',
-                    verbose=verbose)
-        log_message(log_fh, 'outputs=' + json.dumps(outputs, indent=2),
-                    verbose=verbose)
+        for label, omega_m in cosmologies:
+            case_root = output_root / label
+            config = _config(args, case_root, label, omega_m, cap, random_paths,
+                             random_indices, pool_signature)
+            if not args.quiet:
+                print(f'[{label} {args.tracer} {cap}] Cartesian conversion', flush=True)
+            case = make_cartesian_case(objects,
+                                       randoms,
+                                       omega_m,
+                                       random_source_index=random_source_index)
+            consensus_paths = run_realizations(
+                case,
+                config,
+                iterations,
+                workers=args.workers,
+                resume=args.resume,
+                memory_fraction=args.memory_fraction,
+                memory_bytes_per_point=args.memory_bytes_per_point,
+                consensus=not args.no_consensus,
+                consensus_keep_all=args.consensus_keep_all,
+                consensus_vol_frac=args.consensus_vol_frac,
+                consensus_v_cut=args.consensus_v_cut,
+                consensus_workers=args.consensus_workers,
+                quiet=args.quiet)
+            if args.final_catalog_root and not args.no_consensus:
+                published = publish_consensus_products(consensus_paths,
+                                                       args.final_catalog_root,
+                                                       FINAL_DATASET_NAMES[label],
+                                                       args.tracer,
+                                                       cap,
+                                                       omega_m=omega_m,
+                                                       resume=args.resume,
+                                                       overwrite=args.overwrite)
+                if not args.quiet:
+                    print(f'[final] {published["fits"]}', flush=True)
+            del case
+        del objects, randoms, random_source_index
+        gc.collect()
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

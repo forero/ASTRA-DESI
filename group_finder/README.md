@@ -54,6 +54,9 @@ For split DR2 files, separate raw labels such as `BGS_ANY_DATA` /
    ELLIP = 1 - ((lambda_3 + lambda_2) / (lambda_2 + lambda_1))^(1/4).
    ```
 
+   The catalogue also stores the three eigenvalues and their unit
+   eigenvectors.  Axis 1 is the major ellipsoid axis.
+
 ## Outputs
 
 Each tracer/cap case produces:
@@ -76,6 +79,8 @@ moment ellipsoid, its undefined shape values are stored as `NaN`.
 | `XCART`, `YCART`, `ZCART` | Mean Cartesian position of the retained random members, in `Mpc/h`. |
 | `R_EFF` | Effective radius in `Mpc/h`. |
 | `ELLIP` | Ellipticity. |
+| `EIGVAL_1`, `EIGVAL_2`, `EIGVAL_3` | Moment-tensor eigenvalues in descending order, in `(Mpc/h)^2`. |
+| `EIGVEC_1_X` ... `EIGVEC_3_Z` | Cartesian components of the corresponding unit eigenvectors; axis 1 is the major axis. |
 | `BORDER` | Whether the original group touched angular or radial selection. |
 
 ### `clean.fits`
@@ -83,7 +88,7 @@ moment ellipsoid, its undefined shape values are stored as `NaN`.
 The `BORDER=False` subset of `all.fits`. It contains:
 
 ```text
-VOID_ID XCART YCART ZCART R_EFF ELLIP
+VOID_ID XCART YCART ZCART R_EFF ELLIP EIGVAL_1 ... EIGVEC_3_Z
 ```
 
 ### `membership.fits`

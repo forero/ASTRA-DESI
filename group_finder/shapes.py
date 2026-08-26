@@ -16,6 +16,7 @@ class VoidShapes:
     n_random: np.ndarray
     center: np.ndarray
     lambda_values: np.ndarray
+    eigenvectors: np.ndarray
     semi_axes: np.ndarray
     r_eff: np.ndarray
     ellipticity: np.ndarray
@@ -33,8 +34,7 @@ def _positions_array(values):
 def _boolean_labels(values, n_points):
     labels = np.asarray(values)
     if labels.ndim != 1 or len(labels) != n_points:
-        raise ValueError(
-            'is_data must be one-dimensional and match positions.')
+        raise ValueError('is_data must be one-dimensional and match positions.')
     if labels.dtype.kind != 'b':
         raise TypeError('is_data must have boolean dtype.')
     return labels
@@ -43,8 +43,7 @@ def _boolean_labels(values, n_points):
 def _group_labels(values, n_points):
     labels = np.asarray(values)
     if labels.ndim != 1 or len(labels) != n_points:
-        raise ValueError(
-            'group_ids must be one-dimensional and match positions.')
+        raise ValueError('group_ids must be one-dimensional and match positions.')
     if labels.dtype.kind not in 'iu':
         raise TypeError('group_ids must have integer dtype.')
     return labels.astype(np.int64, copy=False)
@@ -68,6 +67,7 @@ def _empty_shapes() -> VoidShapes:
                       n_random=empty_int.copy(),
                       center=np.empty((0, 3), dtype=np.float64),
                       lambda_values=np.empty((0, 3), dtype=np.float64),
+                      eigenvectors=np.empty((0, 3, 3), dtype=np.float64),
                       semi_axes=np.empty((0, 3), dtype=np.float64),
                       r_eff=empty_float.copy(),
                       ellipticity=empty_float.copy())
@@ -78,7 +78,11 @@ def _moment_measurements(positions):
     centered = positions - group_center
     shape = centered.T @ centered / float(len(positions))
     shape = 0.5 * (shape + shape.T)
-    eigenvalues = np.linalg.eigvalsh(shape)[::-1]
+    eigenvalues, eigenvectors = np.linalg.eigh(shape)
+    eigenvalues = eigenvalues[::-1]
+    # Store one principal axis per row, ordered like the eigenvalues.  NumPy
+    # returns eigenvectors in columns, hence the transpose after reversing.
+    eigenvectors = eigenvectors[:, ::-1].T
 
     machine_epsilon = np.finfo(np.float64).eps
     eigenvalue_scale = max(float(np.max(np.abs(eigenvalues))),
@@ -92,18 +96,27 @@ def _moment_measurements(positions):
     if eigenvalues[0] <= 0.0 or eigenvalues[2] <= rank_tolerance:
         return None
 
+    # An eigenvector and its negative describe the same ellipsoid axis.  Pick
+    # a deterministic representative by making its largest-magnitude
+    # Cartesian component positive.  The LOS angle remains sign-independent.
+    for axis in range(3):
+        component = int(np.argmax(np.abs(eigenvectors[axis])))
+        if eigenvectors[axis, component] < 0.0:
+            eigenvectors[axis] *= -1.0
+
     axes = np.sqrt(5.0 * eigenvalues)
-    effective_radius = np.sqrt(5.0) * np.exp(
-        np.sum(np.log(eigenvalues)) / 6.0)
+    effective_radius = np.sqrt(5.0) * np.exp(np.sum(np.log(eigenvalues)) / 6.0)
     moment_ratio = ((eigenvalues[2] + eigenvalues[1]) /
                     (eigenvalues[1] + eigenvalues[0]))
     moment_ratio = float(np.clip(moment_ratio, 0.0, 1.0))
-    ellipticity = 1.0 - moment_ratio ** 0.25
-    return (group_center, eigenvalues, axes,
-            float(effective_radius), float(ellipticity))
+    ellipticity = 1.0 - moment_ratio**0.25
+    return (group_center, eigenvalues, eigenvectors, axes, float(effective_radius),
+            float(ellipticity))
 
 
-def compute_void_shapes(positions, is_data, group_ids,
+def compute_void_shapes(positions,
+                        is_data,
+                        group_ids,
                         coordinate_scale=1.0) -> VoidShapes:
     """Measure every post-mask group without statistical quality cuts."""
 
@@ -132,6 +145,7 @@ def compute_void_shapes(positions, is_data, group_ids,
     n_random = np.zeros(n_groups, dtype=np.int64)
     center = np.full((n_groups, 3), np.nan, dtype=np.float64)
     lambda_values = np.full((n_groups, 3), np.nan, dtype=np.float64)
+    eigenvectors = np.full((n_groups, 3, 3), np.nan, dtype=np.float64)
     semi_axes = np.full((n_groups, 3), np.nan, dtype=np.float64)
     r_eff = np.full(n_groups, np.nan, dtype=np.float64)
     ellipticity = np.full(n_groups, np.nan, dtype=np.float64)
@@ -152,9 +166,10 @@ def compute_void_shapes(positions, is_data, group_ids,
         if measurements is None:
             continue
 
-        (_, eigenvalues, axes, effective_radius,
+        (_, eigenvalues, principal_axes, axes, effective_radius,
          shape_ellipticity) = measurements
         lambda_values[row] = eigenvalues
+        eigenvectors[row] = principal_axes
         semi_axes[row] = axes
         r_eff[row] = effective_radius
         ellipticity[row] = shape_ellipticity
@@ -165,6 +180,7 @@ def compute_void_shapes(positions, is_data, group_ids,
                       n_random=n_random,
                       center=center,
                       lambda_values=lambda_values,
+                      eigenvectors=eigenvectors,
                       semi_axes=semi_axes,
                       r_eff=r_eff,
                       ellipticity=ellipticity)
@@ -179,8 +195,8 @@ def write_void_shapes_npz(path, shapes: VoidShapes, metadata, overwrite=False):
     if not isinstance(overwrite, (bool, np.bool_)):
         raise TypeError('overwrite must be boolean.')
     if path.exists() and not overwrite:
-        raise FileExistsError(
-            f'Output already exists: {path}. Set overwrite=True to replace it.')
+        raise FileExistsError(f'Output already exists: {path}. Set '
+                              'overwrite=True to replace it.')
 
     metadata_json = json.dumps(metadata, sort_keys=True, allow_nan=False)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,15 +213,15 @@ def write_void_shapes_npz(path, shapes: VoidShapes, metadata, overwrite=False):
                                 n_random=np.asarray(shapes.n_random),
                                 center=np.asarray(shapes.center),
                                 lambda_values=np.asarray(shapes.lambda_values),
+                                eigenvectors=np.asarray(shapes.eigenvectors),
                                 semi_axes=np.asarray(shapes.semi_axes),
                                 r_eff=np.asarray(shapes.r_eff),
                                 ellipticity=np.asarray(shapes.ellipticity),
                                 metadata=np.asarray(metadata_json))
 
         if path.exists() and not overwrite:
-            raise FileExistsError(
-                f'Output already exists: {path}. '
-                'Set overwrite=True to replace it.')
+            raise FileExistsError(f'Output already exists: {path}. '
+                                  'Set overwrite=True to replace it.')
         os.replace(temporary, path)
     finally:
         if temporary.exists():

@@ -2,20 +2,25 @@ from pathlib import Path
 import fitsio
 import numpy as np
 
-
 ZONES = ('NGC', 'SGC')
 TRACER_LABELS = {'BGS': 'BGS_BRIGHT',
                  'LRG': 'LRG',
                  'ELG': 'ELG_LOPnotqso',
                  'QSO': 'QSO'}
 TRACER_DISPLAY = {'BGS_BRIGHT': 'BGS',
+                  'BGS_ANY': 'BGS_ANY',
                   'LRG': 'LRG',
                   'ELG_LOPnotqso': 'ELG',
                   'QSO': 'QSO'}
-TRACER_CODES = {'BGS_BRIGHT': 1,
-                'LRG': 2,
-                'ELG_LOPnotqso': 3,
-                'QSO': 4}
+# Exact labels used by the modular void finder for paths and products.  Keep
+# TRACER_DISPLAY's legacy ``BGS`` spelling for the independent catalogue
+# runners, while allowing BGS_BRIGHT and BGS_ANY to coexist in one output root.
+TRACER_OUTPUT_LABELS = {'BGS_BRIGHT': 'BGS_BRIGHT',
+                        'BGS_ANY': 'BGS_ANY',
+                        'LRG': 'LRG',
+                        'ELG_LOPnotqso': 'ELG',
+                        'QSO': 'QSO'}
+TRACER_CODES = {'BGS_BRIGHT': 1, 'LRG': 2, 'ELG_LOPnotqso': 3, 'QSO': 4, 'BGS_ANY': 5}
 RAW_COLUMNS = ('TARGETID', 'RA', 'DEC', 'Z', 'XCART', 'YCART', 'ZCART')
 
 
@@ -37,14 +42,15 @@ def normalize_tracer(value):
     upper = label.upper()
     aliases = {'BGS': 'BGS_BRIGHT',
                'BGS_BRIGHT': 'BGS_BRIGHT',
+               'BGS_ANY': 'BGS_ANY',
                'LRG': 'LRG',
                'ELG': 'ELG_LOPnotqso',
                'ELG_LOPNOTQSO': 'ELG_LOPnotqso',
                'QSO': 'QSO',
                'QSOS': 'QSO'}
     if upper not in aliases:
-        raise ValueError(
-            f'Unknown tracer {value!r}; expected BGS, LRG, ELG, or QSO.')
+        raise ValueError(f'Unknown tracer {value!r}; expected BGS_BRIGHT, BGS_ANY, '
+                         'LRG, ELG, or QSO.')
     return aliases[upper]
 
 
@@ -53,7 +59,7 @@ def raw_tracer_label_pairs(value):
     tracer = normalize_tracer(value)
     display = TRACER_DISPLAY[tracer]
     pairs = [(tracer, tracer), (display, display)]
-    if display == 'BGS':
+    if tracer == 'BGS_ANY':
         pairs.append(('BGS_ANY_DATA', 'BGS_ANY_RAND'))
     else:
         pairs.append((f'{display}_DATA', f'{display}_RAND'))
@@ -61,8 +67,8 @@ def raw_tracer_label_pairs(value):
 
 
 def raw_random_tracer_labels(value):
-    return tuple(dict.fromkeys(
-        random_label for _, random_label in raw_tracer_label_pairs(value)))
+    return tuple(dict.fromkeys(random_label
+                               for _, random_label in raw_tracer_label_pairs(value)))
 
 
 def raw_zone_path(raw_dir, zone, tracer=None):
@@ -73,9 +79,11 @@ def raw_zone_path(raw_dir, zone, tracer=None):
         return combined
 
     tracer = normalize_tracer(tracer)
-    label = TRACER_DISPLAY[tracer]
-    split_candidates = (raw_dir / f'zone_{zone}_{label}.fits.gz',
-                        raw_dir / f'zone_{zone}_{label}_xyz.fits.gz')
+    exact_label = TRACER_OUTPUT_LABELS[tracer]
+    legacy_label = TRACER_DISPLAY[tracer]
+    labels = tuple(dict.fromkeys((exact_label, legacy_label)))
+    split_candidates = tuple(raw_dir / f'zone_{zone}_{label}{suffix}.fits.gz'
+                             for label in labels for suffix in ('', '_xyz'))
     for candidate in split_candidates:
         if candidate.is_file():
             return candidate
@@ -117,8 +125,8 @@ def _locate_realization_rows(hdu, tracer, iteration):
                     'random_start': int(random_start),
                     'random_stop': int(random_stop)}
 
-    pairs = ', '.join(
-        f'{data}/{random}' for data, random in raw_tracer_label_pairs(tracer))
+    pairs = ', '.join(f'{data}/{random}'
+                      for data, random in raw_tracer_label_pairs(tracer))
     if not found_data:
         raise ValueError(f'No object rows found for TRACERTYPE pairs ({pairs}).')
     raise ValueError(f'No random rows found for TRACERTYPE pairs ({pairs}), '
@@ -133,8 +141,7 @@ def _read_contiguous(hdu, columns, start, stop):
 def _raw_metadata(raw, hdu, path, tracer, iteration, rows):
     table_header = hdu.read_header()
     primary_header = raw[0].read_header()
-    zone = _decode_text(
-        table_header.get('ZONE', primary_header.get('ZONE', 'UNKNOWN')))
+    zone = _decode_text(table_header.get('ZONE', primary_header.get('ZONE', 'UNKNOWN')))
     release = _decode_text(
         table_header.get('RELEASE', primary_header.get('RELEASE', 'UNKNOWN')))
     return {'input': str(path),
@@ -144,13 +151,13 @@ def _raw_metadata(raw, hdu, path, tracer, iteration, rows):
             'zone': zone,
             'release': release,
             'iteration': int(iteration),
-            **{name: int(rows[name]) for name in (
-                'data_start', 'data_stop', 'random_start', 'random_stop')}}
+            **{name: int(rows[name])
+               for name in ('data_start', 'data_stop', 'random_start', 'random_stop')}}
 
 
 def _validate_iteration(iteration):
-    if isinstance(iteration, (bool, np.bool_)) or not isinstance(
-            iteration, (int, np.integer)):
+    if isinstance(iteration,
+                  (bool, np.bool_)) or not isinstance(iteration, (int, np.integer)):
         raise TypeError('iteration must be a non-negative integer.')
     iteration = int(iteration)
     if iteration < 0:
@@ -168,10 +175,10 @@ def read_raw_realization(path, tracer, iteration):
     with fitsio.FITS(str(path)) as raw:
         hdu = raw[1]
         rows = _locate_realization_rows(hdu, tracer, iteration)
-        objects = _read_contiguous(hdu, RAW_COLUMNS,
-                                   rows['data_start'], rows['data_stop'])
-        randoms = _read_contiguous(hdu, RAW_COLUMNS,
-                                   rows['random_start'], rows['random_stop'])
+        objects = _read_contiguous(hdu, RAW_COLUMNS, rows['data_start'],
+                                   rows['data_stop'])
+        randoms = _read_contiguous(hdu, RAW_COLUMNS, rows['random_start'],
+                                   rows['random_stop'])
         metadata = _raw_metadata(raw, hdu, path, tracer, iteration, rows)
     return objects, randoms, metadata
 
@@ -186,10 +193,9 @@ def read_raw_object_positions(path, tracer, reference_iteration=0):
     with fitsio.FITS(str(path)) as raw:
         hdu = raw[1]
         rows = _locate_realization_rows(hdu, tracer, reference_iteration)
-        records = _read_contiguous(hdu, ('XCART', 'YCART', 'ZCART'),
-                                   rows['data_start'], rows['data_stop'])
-        metadata = _raw_metadata(raw, hdu, path, tracer,
-                                 reference_iteration, rows)
+        records = _read_contiguous(hdu, ('XCART', 'YCART', 'ZCART'), rows['data_start'],
+                                   rows['data_stop'])
+        metadata = _raw_metadata(raw, hdu, path, tracer, reference_iteration, rows)
     return cartesian_positions(records), metadata
 
 
@@ -203,16 +209,17 @@ def read_raw_random_realization(path, tracer, iteration):
     with fitsio.FITS(str(path)) as raw:
         hdu = raw[1]
         rows = _locate_realization_rows(hdu, tracer, iteration)
-        randoms = _read_contiguous(hdu, RAW_COLUMNS,
-                                   rows['random_start'], rows['random_stop'])
+        randoms = _read_contiguous(hdu, RAW_COLUMNS, rows['random_start'],
+                                   rows['random_stop'])
         metadata = _raw_metadata(raw, hdu, path, tracer, iteration, rows)
     return randoms, metadata
 
 
 def cartesian_positions(records):
-    positions = np.column_stack((np.asarray(records['XCART'], dtype=np.float64),
-                                 np.asarray(records['YCART'], dtype=np.float64),
-                                 np.asarray(records['ZCART'], dtype=np.float64)))
+    positions = np.column_stack(
+        (np.asarray(records['XCART'],
+                    dtype=np.float64), np.asarray(records['YCART'], dtype=np.float64),
+         np.asarray(records['ZCART'], dtype=np.float64)))
     if positions.ndim != 2 or positions.shape[1] != 3:
         raise ValueError('Raw Cartesian columns must form an (N, 3) array.')
     if not np.all(np.isfinite(positions)):
@@ -224,6 +231,7 @@ __all__ = ['RAW_COLUMNS',
            'TRACER_CODES',
            'TRACER_DISPLAY',
            'TRACER_LABELS',
+           'TRACER_OUTPUT_LABELS',
            'ZONES',
            'cartesian_positions',
            'normalize_tracer',
