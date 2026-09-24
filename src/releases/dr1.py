@@ -1,20 +1,26 @@
-import fcntl, glob, json, os, re
+import fcntl, glob, json, os, re, sys
 import astropy.units as u
 import healpy as hp
 import numpy as np
-from argparse import Namespace
+from argparse import ArgumentParser, Namespace
 from astropy.coordinates import SkyCoord
 from astropy.cosmology import Planck18
 from astropy.io import fits
 import fitsio
 from astropy.table import Column, Table, vstack
 
+if not __package__:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from desiproc.implement_astra import register_tracer_mapping
 from desiproc.paths import safe_tag, zone_tag
 
-from .dr2 import build_raw_dr2_zone
-
-from .base import ReleaseConfig
+if __package__:
+    from .dr2 import build_raw_dr2_zone
+    from .base import ReleaseConfig
+else:
+    from releases.dr2 import build_raw_dr2_zone
+    from releases.base import ReleaseConfig
 
 
 TRACERS = ['BGS_ANY', 'BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
@@ -25,6 +31,7 @@ RANDOM_SUFFIX = {'N': '_NGC_{i}_clustering.ran.fits', 'S': '_SGC_{i}_clustering.
 N_RANDOM_FILES = 18
 REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
 RANDOM_COLUMNS = REAL_COLUMNS
+COMPLETENESS_WEIGHT_COLUMN = 'WEIGHT_COMP'
 DEFAULT_ZONES = ['NGC', 'SGC']
 ZONE_ALIASES = {'NGC': 'NGC', 'SGC': 'SGC'}
 ZONE_VALUES = {'NGC': 1001, 'SGC': 1002}
@@ -47,6 +54,13 @@ TRACER_MASK_PROGRAM = {'BGS_BRIGHT': 'bright',
 MASK_PROGRAMS = ('bright', 'dark')
 MASK_ZONE_SUFFIX = {'NGC': 'ngc', 'SGC': 'sgc'}
 MASK_NSIDE_RE = re.compile(r'_nside(?P<nside>\d+)_')
+DEFAULT_LSS_BASE = ('/global/cfs/cdirs/desi/public/dr1/survey/catalogs/dr1/'
+                    'LSS/iron/LSScats/v1.5pip')
+FOOTPRINT_TRACERS = {'bright': ('BGS_BRIGHT',),
+                     'dark': ('LRG', 'ELG_LOPnotqso', 'QSO')}
+FOOTPRINT_ZONES = ('NGC', 'SGC')
+DEFAULT_FOOTPRINT_NSIDE = 512
+DEFAULT_MASK_CHUNK_ROWS = 1_000_000
 EMLINE_CATALOG_PATH = ('/global/cfs/cdirs/desi/public/dr1/vac/dr1/stellar-mass-emline/'
                        'v1.0/dr1_galaxy_stellarmass_lineinfo_v1.0.fits')
 EMLINE_REQUIRED_COLUMNS = ('TARGETID', 'ZERR', 'FLUX_G', 'FLUX_R')
@@ -56,6 +70,174 @@ EMLINE_OUTPUT_MAP = {'SED_SFR': ('SED_SFR', 'SFR_CG'),
                      'FLUX_R': ('FLUX_R',)}
 PROPERTY_COLUMNS = ('TARGETID', 'SED_SFR', 'SED_MASS', 'FLUX_G', 'FLUX_R')
 _EMLINE_BEST_CACHE = None
+
+
+def _default_footprint_output_dir():
+    scratch_root = os.environ.get('PSCRATCH') or os.environ.get('SCRATCH')
+    if not scratch_root:
+        raise RuntimeError('PSCRATCH/SCRATCH is not defined; pass output_dir/--out-dir explicitly')
+    return os.path.join(scratch_root, 'cosmic-web', 'dr1', 'masks', 'footprint')
+
+
+def _accumulate_random_footprint(mask, path, nside,
+                                 chunk_rows=DEFAULT_MASK_CHUNK_ROWS):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f'DR1 random catalogue not found: {path}')
+    if int(chunk_rows) <= 0:
+        raise ValueError('chunk_rows must be greater than zero')
+
+    valid_rows = 0
+    invalid_rows = 0
+    with fitsio.FITS(path) as hdus:
+        hdu = hdus[1]
+        columns = set(hdu.get_colnames())
+        missing = sorted({'RA', 'DEC'}.difference(columns))
+        if missing:
+            raise KeyError(f'DR1 random catalogue {path} is missing columns: {missing}')
+
+        nrows = hdu.get_nrows()
+        for start in range(0, nrows, int(chunk_rows)):
+            stop = min(start + int(chunk_rows), nrows)
+            rows = np.arange(start, stop, dtype=np.int64)
+            coords = hdu.read(columns=['RA', 'DEC'], rows=rows)
+            ra = np.asarray(coords['RA'], dtype=np.float64)
+            dec = np.asarray(coords['DEC'], dtype=np.float64)
+            valid = (np.isfinite(ra) & np.isfinite(dec)
+                     & (dec >= -90.0) & (dec <= 90.0))
+            nvalid = int(np.count_nonzero(valid))
+            valid_rows += nvalid
+            invalid_rows += len(coords) - nvalid
+            if nvalid:
+                pixels = hp.ang2pix(nside, np.mod(ra[valid], 360.0), dec[valid], lonlat=True)
+                mask[pixels] = True
+
+    return valid_rows, invalid_rows
+
+
+def build_dr1_footprint_masks(lss_base=DEFAULT_LSS_BASE, output_dir=None,
+                              nside=DEFAULT_FOOTPRINT_NSIDE,
+                              random_indices=(0,),
+                              chunk_rows=DEFAULT_MASK_CHUNK_ROWS,
+                              overwrite=True):
+    nside = int(nside)
+    if not hp.isnsideok(nside):
+        raise ValueError(f'Invalid HEALPix NSIDE: {nside}')
+    random_indices = tuple(dict.fromkeys(int(index) for index in random_indices))
+    if not random_indices or any(index < 0 for index in random_indices):
+        raise ValueError('random_indices must contain at least one non-negative index')
+
+    lss_base = os.path.abspath(os.path.expanduser(str(lss_base)))
+    if not os.path.isdir(lss_base):
+        raise FileNotFoundError(f'DR1 LSS catalogue directory not found: {lss_base}')
+    output_dir = (_default_footprint_output_dir() if output_dir is None
+                  else os.path.abspath(os.path.expanduser(str(output_dir))))
+    os.makedirs(output_dir, exist_ok=True)
+
+    npix = hp.nside2npix(nside)
+    pixel_area_deg2 = float(hp.nside2pixarea(nside, degrees=True))
+    output_paths = {}
+
+    for program, tracers in FOOTPRINT_TRACERS.items():
+        mask = np.zeros(npix, dtype=bool)
+        valid_rows = 0
+        invalid_rows = 0
+        source_paths = []
+        for tracer in tracers:
+            for zone in FOOTPRINT_ZONES:
+                for random_index in random_indices:
+                    path = os.path.join(lss_base,
+                                        f'{tracer}_{zone}_{random_index}_clustering.ran.fits')
+                    before = int(np.count_nonzero(mask))
+                    nvalid, ninvalid = _accumulate_random_footprint(mask, path, nside, chunk_rows=chunk_rows)
+                    after = int(np.count_nonzero(mask))
+                    valid_rows += nvalid
+                    invalid_rows += ninvalid
+                    source_paths.append(path)
+                    print(f'[dr1-mask] program={program} file={os.path.basename(path)} '
+                          f'valid_rows={nvalid:,} new_pixels={after - before:,}',
+                          flush=True)
+
+        occupied_pixels = int(np.count_nonzero(mask))
+        area_deg2 = occupied_pixels * pixel_area_deg2
+        output_path = os.path.join(output_dir, f'dr1_footprint_{program}_nside{nside}.fits')
+        if os.path.exists(output_path) and not overwrite:
+            raise FileExistsError(f'DR1 footprint already exists: {output_path}')
+
+        tmp_path = f'{output_path}.{os.getpid()}.tmp.fits'
+        headers = [('PROGRAM', program.upper(), 'DESI observing program'),
+                   ('RANINDX', ','.join(map(str, random_indices)), 'Random indices used'),
+                   ('TRACERS', ','.join(tracers), 'Random catalogues combined'),
+                   ('NFILES', len(source_paths), 'Number of input random files'),
+                   ('NVALID', valid_rows, 'Input rows with valid coordinates'),
+                   ('NBAD', invalid_rows, 'Input rows with invalid coordinates'),
+                   ('NPIXKEEP', occupied_pixels, 'HEALPix pixels inside footprint'),
+                   ('AREA_DEG', area_deg2, 'Pixelized footprint area in deg2'),
+                   ('SRCBASE', lss_base, 'Input catalogue directory')]
+        try:
+            hp.write_map(tmp_path, mask.astype(np.uint8), nest=False, coord='C',
+                         dtype=np.uint8, column_names=['MASK'], extra_header=headers,
+                         overwrite=True)
+            os.replace(tmp_path, output_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        output_paths[program] = output_path
+        print(f'[dr1-mask] wrote {program}: pixels={occupied_pixels:,}/{npix:,} '
+              f'area={area_deg2:,.2f} deg2 path={output_path}', flush=True)
+
+    return output_paths
+
+
+def _footprint_cli():
+    parser = ArgumentParser()
+    parser.add_argument('--lss-base', default=DEFAULT_LSS_BASE)
+    parser.add_argument('--out-dir', default=None)
+    parser.add_argument('--nside', type=int, default=DEFAULT_FOOTPRINT_NSIDE)
+    parser.add_argument('--random-indices', type=int, nargs='+', default=[0])
+    parser.add_argument('--chunk-rows', type=int, default=DEFAULT_MASK_CHUNK_ROWS)
+    parser.add_argument('--no-overwrite', action='store_true')
+    args = parser.parse_args()
+    build_dr1_footprint_masks(lss_base=args.lss_base,
+                              output_dir=args.out_dir,
+                              nside=args.nside,
+                              random_indices=args.random_indices,
+                              chunk_rows=args.chunk_rows,
+                              overwrite=not args.no_overwrite)
+
+
+def subsample_randoms_by_completeness(random_tables, tracer, zone_label, seed=20260912):
+    zone_label = _normalize_zone_label(zone_label)
+    try:
+        zone_tables = random_tables[tracer][zone_label]
+    except KeyError as error:
+        raise KeyError(f'No DR1 random tables for {tracer} {zone_label}') from error
+    if not zone_tables:
+        raise ValueError(f'No DR1 random tables for {tracer} {zone_label}')
+
+    total_before = total_after = invalid = 0
+    zone_code = ZONE_VALUES.get(zone_label, 1999)
+    for file_index in sorted(zone_tables):
+        table = zone_tables[file_index]
+
+        weight = np.asarray(table[COMPLETENESS_WEIGHT_COLUMN], dtype=np.float64)
+        probability = np.divide(1.0, weight, out=np.zeros_like(weight),
+                                where=np.isfinite(weight) & (weight > 0))
+        np.clip(probability, 0.0, 1.0, out=probability)
+        invalid += int(np.count_nonzero(~np.isfinite(weight) | (weight <= 0)))
+        rng = np.random.default_rng(np.random.SeedSequence([int(seed), int(zone_code), int(file_index)]))
+        keep = rng.random(len(table)) < probability
+        kept = int(np.count_nonzero(keep))
+        total_before += len(table)
+        total_after += kept
+        columns = [name for name in table.colnames if name != COMPLETENESS_WEIGHT_COLUMN]
+        zone_tables[file_index] = table[keep][columns]
+        print(f'[dr1-comptile] tracer={tracer} zone={zone_label} file={file_index:02d} '
+              f'kept={kept:,}/{len(table):,} ({np.mean(keep):.3%})', flush=True)
+    print(f'[dr1-comptile] total kept={total_after:,}/{total_before:,} '
+          f'({total_after / total_before:.3%}); invalid weights={invalid:,}',
+          flush=True)
+    return {'before': total_before, 'after': total_after, 'invalid': invalid}
 
 
 def _float_with_nan(column):
@@ -741,33 +923,41 @@ def create_config(args):
                parsed_args, release_tag):
         label = _normalize_zone_label(zone)
         zone_value = ZONE_VALUES.get(label, 1999)
+        if getattr(parsed_args, 'dr1_completeness_randoms', False) and random_tables:
+            for tracer in sel_tracers:
+                subsample_randoms_by_completeness(random_tables, tracer, label,
+                                                  seed=getattr(parsed_args, 'dr1_completeness_seed', 20260912))
         raw = build_raw_dr2_zone(
             label, sel_tracers, real_tables, random_tables,
             parsed_args.raw_out, parsed_args.n_random, zone_value,
             out_tag=parsed_args.out_tag, release_tag=release_tag,
             tracer_ids=tracer_ids, tracer_full_labels=tracer_full_labels,
             log_label='dr1')
-        property_tracers = [
-            tracer for tracer in available_tracers
-            if os.path.exists(os.path.join(
-                parsed_args.base_dir, f'{tracer}_{label}_clustering.dat.fits'))
-        ]
-        if not property_tracers:
-            property_tracers = list(sel_tracers)
-        write_zone_properties(parsed_args.base_dir, parsed_args.class_out, label,
-                              property_tracers, release_tag=release_tag)
+        if not getattr(parsed_args, 'skip_dr1_properties', False):
+            property_tracers = [
+                tracer for tracer in available_tracers
+                if os.path.exists(os.path.join(parsed_args.base_dir, f'{tracer}_{label}_clustering.dat.fits'))]
+            if not property_tracers:
+                property_tracers = list(sel_tracers)
+            write_zone_properties(parsed_args.base_dir, parsed_args.class_out, label,
+                                  property_tracers, release_tag=release_tag)
         return raw
 
-    preload_kwargs = {
-        'real_template': '{tracer}_{zone}_clustering.dat.fits',
-        'random_template': '{tracer}_{zone}_{idx}_clustering.ran.fits',
-        'log_label': 'dr1',
-        'zones_to_keep': zones,
-    }
+    preload_kwargs = {'real_template': '{tracer}_{zone}_clustering.dat.fits',
+                      'random_template': '{tracer}_{zone}_{idx}_clustering.ran.fits',
+                      'log_label': 'dr1',
+                      'zones_to_keep': zones}
+    random_columns = (list(RANDOM_COLUMNS) + [COMPLETENESS_WEIGHT_COLUMN]
+                      if getattr(args, 'dr1_completeness_randoms', False)
+                      else RANDOM_COLUMNS)
     return ReleaseConfig(
         name='DR1', release_tag='DR1', tracers=available_tracers,
         tracer_alias=tracer_alias, real_suffix=None, random_suffix=None,
         n_random_files=N_RANDOM_FILES, real_columns=REAL_COLUMNS,
-        random_columns=RANDOM_COLUMNS, use_dr2_preload=True,
+        random_columns=random_columns, use_dr2_preload=True,
         preload_kwargs=preload_kwargs, zones=zones,
         build_raw=_build, combine_outputs=False)
+
+
+if __name__ == '__main__':
+    _footprint_cli()

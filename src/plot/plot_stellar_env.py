@@ -1,15 +1,28 @@
+"""DR1 stellar-mass PDFs for five tracers, using properties/probabilities and cached counts.
+
+DR1 runs the mass-distribution figure; --release edr retains the legacy suite.
+"""
 import argparse, os, re
+import sys
+import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from astropy.io import fits
 import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import seaborn as sns
 from scipy.ndimage import gaussian_filter
 from sklearn.metrics import mutual_info_score
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+from dr1_plot_io import table_chunks
 
 
 ENV_ORDER = ['Void', 'Sheet', 'Filament', 'Knot']
@@ -33,7 +46,7 @@ PAIR_LABELS = {'GR|LOGM': r'$(g-r)$' + '\n' + r'$\mathrm{vs}$' + '\n' + r'$\log_
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--release', required=True, choices=['edr', 'dr1', 'EDR', 'DR1'])
+    parser.add_argument('--release', default='dr1', choices=['edr', 'dr1', 'EDR', 'DR1'])
     parser.add_argument('--base-dir', default=None)
     parser.add_argument('--out-dir', default=None)
     parser.add_argument('--zones', nargs='+', default=None)
@@ -41,7 +54,18 @@ def parse_args():
     parser.add_argument('--dpi', type=int, default=360)
     parser.add_argument('--nmi-jackknife', type=int, default=50)
     parser.add_argument( '--no-tex', action='store_true')
-    return parser.parse_args()
+    parser.add_argument('--chunk-rows', type=int, default=250_000)
+    parser.add_argument('--mass-bins', type=int, default=40)
+    parser.add_argument('--mass-range', nargs=2, type=float, default=[6., 13.])
+    parser.add_argument('--force', action='store_true', help='Recompute DR1 histogram caches')
+    args = parser.parse_args()
+    if args.dpi <= 0 or args.chunk_rows <= 0 or args.mass_bins <= 0:
+        parser.error('dpi, chunk-rows and mass-bins must be positive')
+    if not np.isfinite(args.mass_range).all() or args.mass_range[0] >= args.mass_range[1]:
+        parser.error('--mass-range must be finite and increasing')
+    if args.max_zones is not None and args.max_zones <= 0:
+        parser.error('--max-zones must be positive')
+    return args
 
 
 def setup_style(use_tex=True, dpi=360):
@@ -110,8 +134,8 @@ def as_native_endian(values):
 
 
 def read_raw_data_rows(raw_path, zone):
-    required = ['TARGETID', 'TRACERTYPE', 'RANDITER', 'Z', 'SED_SFR', 'SED_MASS',
-                'FLUX_G', 'FLUX_R']
+    required = ['TARGETID', 'TRACERTYPE', 'RANDITER', 'ROSETTE_R', 'Z', 'SED_SFR',
+                'SED_MASS', 'FLUX_G', 'FLUX_R']
     with fits.open(raw_path, memmap=True) as hdul:
         if len(hdul) < 2:
             raise ValueError(f'Raw file has no table HDU 1: {raw_path}')
@@ -239,6 +263,11 @@ def build_tracer_samples(df):
         mask &= df['Z'] < cuts['z_max']
         mask &= df['LOGSFR'] > cuts['logsfr_min']
         mask &= df['LOGSFR'] < cuts['logsfr_max']
+        if 'ROSETTE_R' in df:
+            radius = pd.to_numeric(df['ROSETTE_R'], errors='coerce')
+            mask &= np.isfinite(radius) & (radius <= 1.5)
+            if tracer == 'ELG':
+                mask &= radius >= 0.3
         samples[tracer] = df.loc[mask].copy()
     return samples
 
@@ -268,53 +297,56 @@ def plot_main_sequence_hexbin(df_bgs, out_path, cmap, dpi):
     xmin, xmax = float(xq[0] - 0.2), float(xq[1] + 0.2)
     ymin, ymax = float(yq[0] - 0.3), float(yq[1] + 0.3)
 
+    # Fixed paper limits keep the guide lines and background regions spanning
+    # the complete square panel, including the intentionally empty margins.
+    xmin, xmax = 5.8, 12.35
+    ymin, ymax = -3.7, 3.0
     xx = np.linspace(xmin, xmax, 300)
     y_ms = m * xx + b_ms
     y_bcgv = m * xx + b_bcgv
     y_gvrs = m * xx + b_gvrs
     angle = np.degrees(np.arctan(m))
 
-    fig, ax = plt.subplots(figsize=(6, 5), sharex=True, sharey=True)
+    fig, ax = plt.subplots(figsize=(8, 7), sharex=True, sharey=True)
     ax.grid(lw=0.2)
 
-    ax.fill_between(xx, y_bcgv, 1e9, color='royalblue', alpha=0.2, zorder=0)
-    ax.fill_between(xx, y_gvrs, y_bcgv, color='lightgreen', alpha=0.2, zorder=0)
-    ax.fill_between(xx, -1e9, y_gvrs, color='lightcoral', alpha=0.2, zorder=0)
+    # Keep the regions visible as a light overlay on top of the density map.
+    ax.fill_between(xx, y_bcgv, 1e9, color='royalblue', alpha=0.13, zorder=2)
+    ax.fill_between(xx, y_gvrs, y_bcgv, color='lightgreen', alpha=0.16, zorder=2)
+    ax.fill_between(xx, -1e9, y_gvrs, color='lightcoral', alpha=0.13, zorder=2)
 
-    hb = ax.hexbin(x, y, gridsize=120, cmap=cmap, mincnt=1, linewidths=0)
+    hb = ax.hexbin(x, y, gridsize=120, cmap=cmap, mincnt=1, linewidths=0, zorder=1)
 
-    ax.plot(xx, y_ms, ls='--', lw=1.0, color='black')
-    ax.plot(xx, y_bcgv, ls=':', lw=0.9, color='darkgreen')
-    ax.plot(xx, y_gvrs, ls=':', lw=0.9, color='firebrick')
+    ax.plot(xx, y_ms, ls='--', lw=1.2, color='black', zorder=3)
+    ax.plot(xx, y_bcgv, ls=':', lw=1.1, color='darkgreen', zorder=3)
+    ax.plot(xx, y_gvrs, ls=':', lw=1.1, color='firebrick', zorder=3)
 
-    # ax.set_xlim(xmin, xmax)
-    # ax.set_ylim(ymin, ymax)
-    ax.set_xlim(9.3, 11.7)
-    ax.set_ylim(-3.0, 3.0)
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
 
     ax.plot([0.04, 0.10], [0.93, 0.93], transform=ax.transAxes, ls='--', lw=1.2,
-            color='black', clip_on=False)
+            color='black', clip_on=False, zorder=4)
     ax.text(0.12, 0.93, 'Main Sequence', transform=ax.transAxes, ha='left',
-            va='center', fontsize=15,
-            color='black', fontweight='bold')
+            va='center', fontsize=16, color='black')
     ax.text(0.04, 0.86, 'Blue Cloud', transform=ax.transAxes, ha='left', va='top',
-            fontsize=15,
-            color='royalblue', fontweight='bold')
+            fontsize=16, color='royalblue')
     ax.text(0.96, 0.05, 'Red Sequence', transform=ax.transAxes, ha='right', va='bottom',
-            fontsize=15,
-            color='firebrick', fontweight='bold')
+            fontsize=16, color='firebrick')
     x0, x1 = ax.get_xlim()
     x_text = x0 + 0.02 * (x1 - x0)
     y_text = m * x_text + 0.5 * (b_bcgv + b_gvrs)
     ax.text(x_text, y_text, 'Green Valley',
             rotation=angle, rotation_mode='anchor', transform_rotates_text=True,
-            fontsize=15, color='darkgreen', ha='left', va='center')
+            fontsize=16, color='darkgreen', ha='left', va='center')
 
-    ax.set_ylabel(r'$\log_{10}(\mathrm{SFR}/M_\odot\,\mathrm{yr}^{-1})$', fontsize=22, labelpad=10)
-    ax.set_xlabel(r'$\log_{10}(M_*/M_\odot)$', fontsize=22, labelpad=10)
+    ax.set_ylabel(r'$\log_{10}(\mathrm{SFR}/M_\odot\,\mathrm{yr}^{-1})$', fontsize=18, labelpad=10)
+    ax.set_xlabel(r'$\log_{10}(M_*/M_\odot)$', fontsize=18, labelpad=10)
 
     cbar = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(r'$N_{\mathrm{Gal}}$', fontsize=22, labelpad=12)
+    cbar.set_label(r'$N_{\mathrm{Gal}}$', fontsize=18, labelpad=12)
+
+    # Keep a square plotting region with breathing room for labels/colorbar.
+    fig.subplots_adjust(left=0.16, right=0.86, bottom=0.15, top=0.92)
 
     save_figure(fig, out_path, dpi)
 
@@ -334,8 +366,8 @@ def plot_pdf_distributions(df_bgs, out_path, dpi):
             axes[0].hist(x, bins=40, density=True, histtype='step', lw=1.5,
                          color=ENV_COLORS[env], ls='-')
 
-    axes[0].set_xlabel(r'$(g-r)$', labelpad=10, fontsize=20)
-    axes[0].set_ylabel('PDF', labelpad=10, fontsize=19)
+    axes[0].set_xlabel(r'$(g-r)$', labelpad=10, fontsize=18)
+    axes[0].set_ylabel('PDF', labelpad=10, fontsize=18)
     axes[0].set_xlim(-0.1, 2.2)
     axes[0].grid(ls='--', lw=0.5, alpha=0.5)
 
@@ -359,12 +391,12 @@ def plot_pdf_distributions(df_bgs, out_path, dpi):
                          color=ENV_COLORS[env], ls='-')
 
     axes[2].set_xlabel(r'$\log_{10}(\mathrm{sSFR}/\mathrm{yr}^{-1})$', labelpad=10,
-                       fontsize=20)
+                       fontsize=18)
     axes[2].set_xlim(-14.0, -7.7)
     axes[2].grid(ls='--', lw=0.5, alpha=0.5)
 
     handles = [Line2D([0], [0], color=ENV_COLORS[e], lw=2, ls='-', label=e) for e in ENV_ORDER]
-    fig.legend(handles=handles, loc='upper center', ncol=4, frameon=True, fontsize=19)
+    fig.legend(handles=handles, loc='upper center', ncol=4, frameon=True, fontsize=17)
     fig.tight_layout(rect=[0, 0, 1, 0.85])
 
     save_figure(fig, out_path, dpi)
@@ -476,7 +508,7 @@ def plot_nmi_comparison(samples, out_path, dpi, n_jack=50):
         print('[skip] nmi: no BGS/LRG samples')
         return
 
-    fig, axes = plt.subplots(1, len(tracers), figsize=(5.5 * len(tracers), 5), squeeze=False)
+    fig, axes = plt.subplots(1, len(tracers), figsize=(7.0 * len(tracers), 6.0), squeeze=False)
 
     legend_handles = []
     for i, tracer in enumerate(tracers):
@@ -513,7 +545,7 @@ def plot_nmi_comparison(samples, out_path, dpi, n_jack=50):
 
         labels = [PAIR_LABELS.get(pid, pid.replace('|', '\nvs\n')) for pid in pair_order]
         ax.set_yticks(y_base)
-        ax.set_yticklabels(labels, fontsize=14, multialignment='center')
+        ax.set_yticklabels(labels, fontsize=15, multialignment='center')
         ax.tick_params(axis='y', pad=3)
         ax.set_xlabel('NMI', labelpad=4)
         ax.grid(alpha=0.5, ls='--', lw=0.5)
@@ -525,7 +557,7 @@ def plot_nmi_comparison(samples, out_path, dpi, n_jack=50):
             unique[env] = handle
     if unique:
         fig.legend(unique.values(), unique.keys(), loc='upper center', ncol=4,
-                   frameon=True, bbox_to_anchor=(0.5, 1.02), markerscale=1.2, fontsize=16)
+                   frameon=True, bbox_to_anchor=(0.5, 1.02), markerscale=1.2, fontsize=15)
 
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     save_figure(fig, out_path, dpi)
@@ -735,7 +767,7 @@ def plot_mass_color_hexbin_env(df_bgs, out_path, cmap, dpi):
             ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
 
         ax.grid(lw=0.5, ls='--', alpha=0.5)
-        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=17, color='black',
+        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=18, color='black',
                 fontweight='bold')
 
         if j in [0, 2]:
@@ -792,7 +824,7 @@ def plot_mass_color_hexbin_two_zranges(df_bgs, out_path, dpi, low_range=(0.02, 0
                                cmap='Blues', linewidths=0)
 
         ax.grid(lw=0.5, ls='--', alpha=0.5)
-        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=17,
+        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=18,
                 color='black', fontweight='bold')
 
         if j in [0, 2]:
@@ -863,7 +895,7 @@ def plot_mass_color_contours_two_zranges(df_bgs, out_path, dpi, low_range=(0.02,
                 ax.contour(xx, yy, h2, levels=levels2, cmap='Reds', linewidths=1.8, linestyles='--')
 
         ax.grid(lw=0.5, ls='--', alpha=0.5)
-        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=17,
+        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=18,
                 color='black', fontweight='bold')
 
         if j in [0, 2]:
@@ -887,7 +919,7 @@ def plot_mass_color_contours_all(df_bgs, out_path, cmap, dpi):
     envs = split_by_env(df_bgs)
 
     fig, axes = plt.subplots(2, 2, figsize=(7.5, 7), sharex=True, sharey=True,
-                             gridspec_kw={'wspace': 0, 'hspace': 0})
+                             gridspec_kw={'wspace': 0, 'hspace': 0.06})
     axes = axes.flatten()
 
     xmin, xmax = 0.0, 2.2
@@ -918,8 +950,9 @@ def plot_mass_color_contours_all(df_bgs, out_path, cmap, dpi):
             ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
 
         ax.grid(lw=0.5, ls='--', alpha=0.5)
-        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=17,
-                color='black', fontweight='bold')
+        ax.text(0.97, 0.95, env, transform=ax.transAxes, ha='right', va='top', fontsize=18,
+                color='black')
+                # , fontweight='bold')
 
         if j in [0, 2]:
             ax.set_ylabel(r'$\log_{10}(M_*/M_\odot)$', labelpad=10)
@@ -934,9 +967,178 @@ def plot_mass_color_contours_all(df_bgs, out_path, cmap, dpi):
     save_figure(fig, out_path, dpi)
 
 
+DR1_TRACERS = ('BGS_ANY', 'BGS_BRIGHT', 'LRG', 'ELG', 'QSO')
+DR1_FAMILIES = dict(zip(DR1_TRACERS, ('bgs', 'bgs', 'lrg', 'elg', 'qso')))
+
+
+def dr1_input_paths(base_dir, zone, tracer):
+    base = Path(base_dir)
+    properties = base / 'properties' / f'zone_{zone}_properties.fits.gz'
+    directory = base / 'probabilities' / DR1_FAMILIES[tracer] / zone.lower()
+    candidates = [directory / f'zone_{zone}_{tracer}_probability{suffix}{extension}'
+                  for suffix in ('_iterdata', '') for extension in ('.fits.gz', '.fits')]
+    probability = next((p for p in candidates if p.is_file()), candidates[0])
+    if not properties.is_file():
+        properties = properties.with_suffix('')
+    for path in (properties, probability):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    return properties, probability
+
+
+def read_dr1_masses(path, chunk_rows):
+    """Properties contain real targets only; keep compact sorted IDs and log masses."""
+    parts = []
+    for chunk in table_chunks(path, ('TARGETID', 'SED_MASS'), chunk_rows):
+        mass = chunk['SED_MASS']
+        valid = np.isfinite(mass) & (mass > 0)
+        parts.append((chunk['TARGETID'][valid].copy(), np.log10(mass[valid])))
+    ids = np.concatenate([p[0] for p in parts]) if parts else np.array([], dtype=np.int64)
+    masses = np.concatenate([p[1] for p in parts]) if parts else np.array([], dtype=float)
+    order = np.argsort(ids)
+    ids, masses = ids[order], masses[order]
+    if np.any(np.diff(ids) == 0):
+        raise ValueError(f'Duplicate TARGETID in properties: {path}')
+    return ids, masses
+
+
+def dr1_mass_counts(probability, tracer, ids, masses, edges, chunk_rows):
+    counts = np.zeros((4, len(edges) - 1), dtype=np.int64)
+    totals = np.zeros(4, dtype=np.int64)
+    # Deduplicate across blocks, keeping the largest maximum probability as in
+    # the original reader. Arrays scale with real targets, never with randoms.
+    best = np.full(len(ids), -np.inf)
+    environments = np.full(len(ids), -1, dtype=np.int8)
+    aliases = [tracer, 'ELG_LOPnotqso'] if tracer == 'ELG' else [tracer]
+    allowed = [f'{name}{suffix}'.encode() for name in aliases for suffix in ('', '_DATA')]
+    rows = matched = 0
+    for chunk in table_chunks(probability, ('TARGETID', 'TRACERTYPE', *P_COLS), chunk_rows):
+        rows += len(chunk['TARGETID'])
+        if not len(ids):
+            continue
+        positions = np.searchsorted(ids, chunk['TARGETID'])
+        np.minimum(positions, len(ids) - 1, out=positions)
+        valid = (ids[positions] == chunk['TARGETID']) & np.isin(chunk['TRACERTYPE'], allowed)
+        probabilities = np.column_stack([chunk[col] for col in P_COLS])
+        valid &= (np.isfinite(probabilities).all(axis=1)
+                  & (probabilities >= 0).all(axis=1) & (probabilities <= 1).all(axis=1)
+                  & (probabilities.sum(axis=1) > 0))
+        positions, probabilities = positions[valid], probabilities[valid]
+        matched += len(positions)
+        if not len(positions):
+            continue
+        maximum = probabilities.max(axis=1)
+        # Stable sorting preserves first-row tie handling and selects one row/ID.
+        order = np.argsort(-maximum, kind='stable')
+        _, first = np.unique(positions[order], return_index=True)
+        selected = order[first]
+        pos = positions[selected]
+        improve = maximum[selected] > best[pos]
+        pos, selected = pos[improve], selected[improve]
+        best[pos] = maximum[selected]
+        environments[pos] = probabilities[selected].argmax(axis=1)
+    for env in range(4):
+        values = masses[environments == env]
+        totals[env] = len(values)
+        counts[env] = np.histogram(values, bins=edges)[0]
+    print(f'[mass] {tracer}: probability_rows={rows}, matched_rows={matched}, '
+          f'unique_valid_mass={totals.sum()}, within_bins={counts.sum()}', flush=True)
+    return counts, totals
+
+
+def plot_dr1_mass_distributions(histograms, edges, out_path, dpi, zones):
+    fig, axes = plt.subplots(2, 3, figsize=(17, 9), sharex=True, sharey=True)
+    for ax, tracer in zip(axes.flat, DR1_TRACERS):
+        counts, totals = histograms[tracer]
+        for index, env in enumerate(ENV_ORDER):
+            n = counts[index].sum()
+            if n:
+                pdf = counts[index] / (n * np.diff(edges))
+                ax.stairs(pdf, edges, color=ENV_COLORS[env], linewidth=2,
+                          label=f'{env} (N={n:,})')
+        ax.set_title(tracer.replace('_', ' '))
+        ax.set_xlabel(LABELS_LATEX['LOGM'])
+        ax.set_ylabel('PDF')
+        ax.grid(ls='--', alpha=0.3)
+        if counts.sum():
+            ax.legend(fontsize=10)
+        else:
+            ax.text(.5, .5, 'No valid stellar masses', transform=ax.transAxes, ha='center')
+    axes.flat[-1].axis('off')
+    axes.flat[-1].text(0.05, 0.75,
+                       'Positive, finite stellar masses only\n'
+                       'Environment = maximum probability\n'
+                       'Each PDF normalized within the plotted range\n'
+                       'N = objects within the plotted range',
+                       transform=axes.flat[-1].transAxes, fontsize=12, va='top', linespacing=1.8)
+    fig.suptitle('DESI DR1 (' + ' + '.join(zones) + ') — stellar mass by environment')
+    fig.tight_layout()
+    save_figure(fig, out_path, dpi)
+
+
+def run_dr1_mass(args):
+    """Pool NGC/SGC counts, normalize each environment PDF within mass limits.
+
+    No SFR/color/redshift cuts: only positive finite mass and valid environment
+    probabilities. Ties use Void, Sheet, Filament, Knot order. BGS selections
+    remain separate and may overlap. Missing masses are excluded, not imputed.
+    """
+    base = Path(args.base_dir or '/pscratch/sd/v/vtorresg/cosmic-web/dr1')
+    out = Path(args.out_dir or PROJECT_ROOT / 'plots/dr1/stellar_props')
+    zones = [str(z).upper() for z in (args.zones or ['NGC', 'SGC'])]
+    if any(z not in ('NGC', 'SGC') for z in zones) or len(set(zones)) != len(zones):
+        raise ValueError('DR1 zones must be distinct NGC/SGC values')
+    if args.max_zones:
+        zones = zones[:args.max_zones]
+    edges = np.linspace(*args.mass_range, args.mass_bins + 1)
+    out.mkdir(parents=True, exist_ok=True)
+    cache_dir = out / 'cache'
+    cache_dir.mkdir(exist_ok=True)
+    histograms = {tr: [np.zeros((4, args.mass_bins), dtype=np.int64), np.zeros(4, dtype=np.int64)]
+                  for tr in DR1_TRACERS}
+    for zone in zones:
+        mass_data = None
+        for tracer in DR1_TRACERS:
+            paths = dr1_input_paths(base, zone, tracer)
+            metadata = json.dumps({'version': 1, 'zone': zone, 'tracer': tracer,
+                                   'edges': edges.tolist(),
+                                   'sources': [(str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns)
+                                               for p in paths]}, sort_keys=True)
+            cache = cache_dir / f'{zone}_{tracer}_mass.npz'
+            result = None
+            if cache.is_file() and not args.force:
+                try:
+                    with np.load(cache, allow_pickle=False) as stored:
+                        if str(stored['metadata']) == metadata:
+                            result = stored['counts'].copy(), stored['totals'].copy()
+                            if result[0].shape != (4, args.mass_bins) or result[1].shape != (4,):
+                                result = None
+                except (OSError, ValueError, KeyError, EOFError):
+                    pass
+            if result is None:
+                if mass_data is None:
+                    print(f'[load] {paths[0]}', flush=True)
+                    mass_data = read_dr1_masses(paths[0], args.chunk_rows)
+                result = dr1_mass_counts(paths[1], tracer, *mass_data, edges, args.chunk_rows)
+                with tempfile.NamedTemporaryFile(dir=cache_dir, suffix='.npz', delete=False) as stream:
+                    temporary = stream.name
+                    np.savez(stream, metadata=metadata, counts=result[0], totals=result[1])
+                os.replace(temporary, cache)
+            else:
+                print(f'[cache] {zone} {tracer}', flush=True)
+            for dest, value in zip(histograms[tracer], result):
+                dest += value
+    plot_dr1_mass_distributions(histograms, edges, out / 'stellar_mass_dr1_by_environment.png',
+                                args.dpi, zones)
+
+
 def main() -> None:
     args = parse_args()
     release = args.release.lower()
+    if release == 'dr1':
+        setup_style(use_tex=False, dpi=args.dpi)
+        run_dr1_mass(args)
+        return
 
     default_base = os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release)
     base_dir = args.base_dir or default_base
@@ -970,7 +1172,7 @@ def main() -> None:
     df_bgs = samples.get('BGS', pd.DataFrame())
 
     if not df_bgs.empty:
-        plot_main_sequence_hexbin(df_bgs, os.path.join(out_dir, 'seq_bgs.png'), cmap=cmap, dpi=args.dpi)
+        plot_main_sequence_hexbin(df_bgs, os.path.join(out_dir, 'seq_bgs.png'), cmap='magma_r', dpi=args.dpi)
         plot_pdf_distributions(df_bgs, os.path.join(out_dir, 'pdf.png'), dpi=args.dpi)
         plot_sfr_mass_lines(df_bgs, os.path.join(out_dir, 'sfr_mass_lines_env.png'), dpi=args.dpi)
         plot_mass_color_hexbin_env(df_bgs, os.path.join(out_dir, 'mass_color_hexbin.png'), cmap=cmap, dpi=args.dpi)

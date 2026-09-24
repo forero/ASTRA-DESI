@@ -586,6 +586,13 @@ def main():
         p.add_argument('--local-zone-files', action='store_true',
                        help='DR1 compatibility option enabling the extended local tracer list; '
                             'DR1 always reads native {tracer}_{zone} files without RA/DEC or mask filtering.')
+        p.add_argument('--dr1-completeness-randoms', action='store_true',
+                       help='DR1 only: retain each random row with probability 1/WEIGHT_COMP '
+                            'before constructing ASTRA random realizations.')
+        p.add_argument('--dr1-completeness-seed', type=int, default=20260912,
+                       help='Base seed for --dr1-completeness-randoms (default: 20260912).')
+        p.add_argument('--skip-dr1-properties', action='store_true',
+                       help='DR1 only: skip the auxiliary stellar-property catalogue.')
 
         args = p.parse_args()
 
@@ -608,6 +615,10 @@ def main():
             astra._DEFAULT_CHUNK_ROWS = max(1, int(args.chunk_rows))
 
         release = args.release.upper()
+        if args.dr1_completeness_randoms and release != 'DR1':
+            raise ValueError('--dr1-completeness-randoms is supported only for DR1')
+        if args.skip_dr1_properties and release != 'DR1':
+            raise ValueError('--skip-dr1-properties is supported only for DR1')
 
         config_factory = RELEASE_FACTORIES.get(release)
         if config_factory is None:
