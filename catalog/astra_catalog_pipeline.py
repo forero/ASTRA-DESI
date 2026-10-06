@@ -801,8 +801,12 @@ def build_case_consensus(case_root,
     # though their on-disk basename and realization directory are simply
     # ``BGS``/``bgs``.  Preserve that scientific selection in consensus
     # filenames, FITS headers, and JSON metadata.
+    # Dedicated volume-limited catalogues may explicitly pass ``BGS_BRIGHT``;
+    # preserve that label so the two scientifically different samples cannot
+    # overwrite one another in the consensus directory.
+    input_tracer = str(tracer).strip().upper()
     consensus_tracer = ('BGS_ANY'
-                        if normalize_catalog_tracer(tracer) == 'BGS' else tracer)
+                        if input_tracer in {'BGS', 'BGS_ANY'} else tracer)
     output_root = Path(case_root) / 'consensus'
     paths = consensus_output_paths(output_root,
                                    consensus_tracer,

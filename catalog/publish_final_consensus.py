@@ -26,11 +26,10 @@ FINAL_DATASET_NAMES = {'DR2_Om_1_Om0p301_h0p6736': 'low_omega',
 def normalize_final_tracer(value):
     tracer = str(value).strip().upper()
     aliases = {'BGS_ANY': 'BGS',
-               'BGS_BRIGHT': 'BGS',
                'ELGNOTQSO': 'ELG',
                'ELG_LOPNOTQSO': 'ELG'}
     tracer = aliases.get(tracer, tracer)
-    if tracer not in {'BGS', 'LRG', 'ELG', 'QSO'}:
+    if tracer not in {'BGS', 'BGS_BRIGHT', 'LRG', 'ELG', 'QSO'}:
         raise ValueError(f'Unsupported final-catalog tracer: {value!r}.')
     return tracer
 
