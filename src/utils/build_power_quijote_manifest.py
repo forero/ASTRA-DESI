@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 from pathlib import Path
 
@@ -7,6 +8,7 @@ DEFAULT_INPUT_ROOT = '/pscratch/sd/v/vtorresg/quijotes/Halos/FoF'
 DEFAULT_ASTRA_ROOT = '/pscratch/sd/v/vtorresg/quijotes/ASTRA/FoF'
 DEFAULT_OUTPUT_ROOT = '/pscratch/sd/v/vtorresg/quijotes/PowerSpectrum/FoF'
 SNAPSHOT = 3
+LATIN_PARAMETERS = Path(__file__).resolve().parents[1] / 'data' / 'latin_hypercube_params.txt'
 SAMPLES = ('halo_void', 'halo_sheet', 'halo_filament', 'halo_knot',
            'random_void', 'halo_all')
 
@@ -24,7 +26,35 @@ FIDUCIAL_BACKGROUND_PARAMETERS = {'fiducial', 'fiducial_ZA',
                                   's8_m', 's8_p'}
 
 
-def _cosmology(parameter):
+def _load_latin_parameters(path):
+    '''Official LH rows are ordered by realization number, starting at zero.'''
+    values = []
+    with Path(path).open(encoding='utf-8') as stream:
+        for line_number, line in enumerate(stream, 1):
+            fields = line.split('#', 1)[0].split()
+            if not fields:
+                continue
+            if len(fields) != 5:
+                raise ValueError('Latin Hypercube parameter row {} must have five columns'.format(line_number))
+            try:
+                row = tuple(float(value) for value in fields)
+            except ValueError as error:
+                raise ValueError('Invalid Latin Hypercube parameter row {}'.format(line_number)) from error
+            if not all(math.isfinite(value) for value in row) or not 0.0 < row[0] < 1.0:
+                raise ValueError('Invalid Omega_m or non-finite value on Latin Hypercube row {}'.format(line_number))
+            values.append(row)
+    if len(values) != 2000:
+        raise ValueError('Latin Hypercube parameter table must contain 2000 rows; found {}'.format(len(values)))
+    return values
+
+
+def _cosmology(parameter, realization=None, latin_parameters=None):
+    if parameter == 'latin_hypercube':
+        if latin_parameters is None:
+            raise ValueError('Latin Hypercube parameters were not loaded')
+        if realization is None or not 0 <= realization < len(latin_parameters):
+            raise ValueError('Latin Hypercube realization is outside 0..1999: {}'.format(realization))
+        return latin_parameters[realization][0], -1.0
     if parameter in BACKGROUND_COSMOLOGY:
         return BACKGROUND_COSMOLOGY[parameter]
     if parameter in FIDUCIAL_BACKGROUND_PARAMETERS:
@@ -40,7 +70,7 @@ def _binning_tag(bin_width_kf, kmax):
 
 
 def _spectrum_paths(output_root, parameter, realization, grid, mas, axis,
-                    bin_width_kf, kmax, real_space):
+                    bin_width_kf, kmax, real_space, monopole_only=False):
     root = Path(output_root).expanduser().resolve() / parameter / str(realization)
     tag = _binning_tag(bin_width_kf, kmax)
     paths = []
@@ -51,6 +81,8 @@ def _spectrum_paths(output_root, parameter, realization, grid, mas, axis,
             space = 'rsd{}'.format(axis)
         name = 'group_{:03d}_pk_{}_{}_{}_N{}_{}.npz'.format(
             SNAPSHOT, sample, space, mas, grid, tag)
+        if monopole_only:
+            name = name[:-4] + '_mono.npz'
         paths.append(root / name)
     return paths
 
@@ -59,6 +91,8 @@ def _discover(args):
     input_root = Path(args.input_root).expanduser().resolve()
     astra_root = Path(args.astra_root).expanduser().resolve()
     selected = set(args.parameter) if args.parameter else None
+    latin_parameters = _load_latin_parameters(args.latin_parameters) if (
+        selected is None or 'latin_hypercube' in selected) else None
     pattern = '*/*/groups_{0:03d}/group_tab_{0:03d}.0'.format(SNAPSHOT)
     entries = []
     missing_astra = 0
@@ -79,10 +113,11 @@ def _discover(args):
                 and (products / 'group_003_random_voids.fits.gz').is_file()):
             missing_astra += 1
             continue
-        omega_m, w = _cosmology(parameter)
+        omega_m, w = _cosmology(parameter, realization, latin_parameters)
         outputs = _spectrum_paths(
             args.output_root, parameter, realization, args.grid, args.mas,
-            args.axis, args.bin_width_kf, args.kmax, args.real_space)
+            args.axis, args.bin_width_kf, args.kmax, args.real_space,
+            args.monopole_only)
         if args.skip_complete and all(path.is_file() for path in outputs):
             complete += 1
             continue
@@ -98,6 +133,7 @@ def main():
     parser.add_argument('--output-root', default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument('--output', required=True)
     parser.add_argument('--parameter', action='append', default=None, help='Only include this parameter directory; repeatable')
+    parser.add_argument('--latin-parameters', type=Path, default=LATIN_PARAMETERS)
     parser.add_argument('--skip-complete', action='store_true', help='Omit simulations having all six requested spectra')
     parser.add_argument('--grid', type=int, default=512)
     parser.add_argument('--mas', choices=('NGP', 'CIC', 'TSC', 'PCS'), default='CIC')
@@ -105,13 +141,15 @@ def main():
     parser.add_argument('--bin-width-kf', type=int, default=2)
     parser.add_argument('--kmax', type=float, default=0.5)
     parser.add_argument('--real-space', action='store_true')
+    parser.add_argument('--monopole-only', action='store_true',
+                        help='Find only outputs containing P0; pair with --real-space')
     args = parser.parse_args()
     if args.grid <= 1 or args.bin_width_kf <= 0 or args.kmax <= 0.0:
         parser.error('--grid, --bin-width-kf, and --kmax must be positive')
 
     try:
         entries, missing_astra, complete = _discover(args)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         parser.error(str(error))
     output = Path(args.output).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

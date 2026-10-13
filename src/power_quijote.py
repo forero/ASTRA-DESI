@@ -224,13 +224,13 @@ def _compute_multipoles(sample, positions, args):
     if multipoles.ndim != 2 or multipoles.shape[1] < 3:
         raise ValueError('Pylians did not return P0, P2, and P4')
     p0 = multipoles[:, 0].copy()
-    p2 = multipoles[:, 1].copy()
-    p4 = multipoles[:, 2].copy()
+    p2 = None if args.monopole_only else multipoles[:, 1].copy()
+    p4 = None if args.monopole_only else multipoles[:, 2].copy()
     nmodes = np.asarray(spectrum.Nmodes3D, dtype=np.float64).copy()
     shot_noise = float(args.box_size) ** 3 / float(count)
     rebinned = _rebin_multipoles(
         k, p0, p2, p4, nmodes, float(args.box_size),
-        int(args.bin_width_kf), float(args.kmax))
+        int(args.bin_width_kf), float(args.kmax), args.monopole_only)
     rebinned['Pk0_raw'] = rebinned.pop('Pk0')
     rebinned['Pk0_shot_subtracted'] = rebinned['Pk0_raw'] - shot_noise
     elapsed = time.time() - start
@@ -246,50 +246,56 @@ def _compute_multipoles(sample, positions, args):
 
 
 def _rebin_multipoles(k, p0, p2, p4, nmodes, box_size,
-                      bin_width_kf, kmax):
-    arrays = tuple(np.asarray(value, dtype=np.float64)
-                   for value in (k, p0, p2, p4, nmodes))
+                      bin_width_kf, kmax, monopole_only=False):
+    inputs = (k, p0, nmodes) if monopole_only else (k, p0, p2, p4, nmodes)
+    arrays = tuple(np.asarray(value, dtype=np.float64) for value in inputs)
     if any(value.ndim != 1 or len(value) != len(arrays[0])
            for value in arrays):
         raise ValueError('Pylians multipole arrays have inconsistent shapes')
 
     fundamental_mode = 2.0 * np.pi / float(box_size)
     delta_k = float(bin_width_kf) * fundamental_mode
+    mode_index = 2 if monopole_only else 4
     valid = (np.isfinite(arrays[0]) & np.isfinite(arrays[1])
-             & np.isfinite(arrays[2]) & np.isfinite(arrays[3])
-             & np.isfinite(arrays[4]) & (arrays[0] > 0.0)
-             & (arrays[0] <= float(kmax)) & (arrays[4] > 0.0))
+             & (arrays[0] > 0.0) & (arrays[0] <= float(kmax))
+             & np.isfinite(arrays[mode_index]) & (arrays[mode_index] > 0.0))
+    if not monopole_only:
+        valid &= np.isfinite(arrays[2]) & np.isfinite(arrays[3])
     if not np.any(valid):
         raise ValueError('No Fourier modes lie at or below kmax={}'.format(kmax))
 
     selected = tuple(value[valid] for value in arrays)
     bin_index = np.floor(selected[0] / delta_k).astype(np.int64)
     size = int(np.max(bin_index)) + 1
-    mode_sum = np.bincount(bin_index, weights=selected[4], minlength=size)
+    mode_sum = np.bincount(bin_index, weights=selected[mode_index], minlength=size)
     populated = mode_sum > 0.0
     populated_index = np.nonzero(populated)[0]
 
     def weighted_mean(values):
         total = np.bincount(
-            bin_index, weights=values * selected[4], minlength=size)
+            bin_index, weights=values * selected[mode_index], minlength=size)
         return total[populated] / mode_sum[populated]
 
-    return {'k': weighted_mean(selected[0]),
+    result = {'k': weighted_mean(selected[0]),
             'k_center': (populated_index.astype(np.float64) + 0.5) * delta_k,
             'k_bin_low': populated_index.astype(np.float64) * delta_k,
             'k_bin_high': (populated_index.astype(np.float64) + 1.0) * delta_k,
             'Pk0': weighted_mean(selected[1]),
-            'Pk2': weighted_mean(selected[2]),
-            'Pk4': weighted_mean(selected[3]),
             'Nmodes': mode_sum[populated],
             'fundamental_mode': fundamental_mode,
             'delta_k': delta_k}
+    if not monopole_only:
+        result['Pk2'] = weighted_mean(selected[2])
+        result['Pk4'] = weighted_mean(selected[3])
+    return result
 
 
 def _output_path(paths, sample, args):
     space = _sample_space(sample, args, filename=True)
     name = 'group_003_pk_{}_{}_{}_N{}_{}.npz'.format(
         sample, space, args.mas, int(args.grid), _binning_tag(args))
+    if args.monopole_only:
+        name = name[:-4] + '_mono.npz'
     return paths['output_root'] / name
 
 
@@ -318,34 +324,37 @@ def _write_result(path, result, sample, args, probability_header,
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name('.{}.tmp.{}.npz'.format(path.stem, os.getpid()))
     try:
-        np.savez_compressed(str(temporary),
-                            k=result['k'], k_center=result['k_center'],
-                            k_bin_low=result['k_bin_low'], k_bin_high=result['k_bin_high'],
-                            Pk0=result['Pk0_raw'], Pk0_raw=result['Pk0_raw'],
-                            Pk0_shot_subtracted=result['Pk0_shot_subtracted'],
-                            Pk2=result['Pk2'], Pk4=result['Pk4'], Nmodes=result['Nmodes'],
-                            shot_noise=np.float64(result['shot_noise']),
-                            n_objects=np.int64(result['n_objects']),
-                            seconds=np.float64(result['seconds']),
-                            sample=np.asarray(sample), parameter=np.asarray(args.parameter),
-                            realization=np.int64(args.realization), snapshot=np.int64(SNAPSHOT),
-                            redshift=np.float64(args.redshift), box_size=np.float64(args.box_size),
-                            grid=np.int64(args.grid), axis=np.int64(args.axis),
-                            mas=np.asarray(args.mas),
-                            space=np.asarray(_sample_space(sample, args)),
-                            omega_m=np.float64(args.omega_m), w=np.float64(args.w),
-                            hubble=np.float64(hubble),
-                            fundamental_mode=np.float64(result['fundamental_mode']),
-                            delta_k=np.float64(result['delta_k']),
-                            bin_width_kf=np.int64(args.bin_width_kf),
-                            kmax=np.float64(args.kmax),
-                            n_bins=np.int64(len(result['k'])),
-                            binning=np.asarray('Nmodes_weighted_Pylians_kf_shells'),
-                            probability_iterations=np.int64(probability_header.get('NITER', -1)),
-                            class_assignment=np.asarray('argmax_void_sheet_filament_knot'),
-                            probability_ties=np.int64(tie_count),
-                            shot_noise_products=np.asarray('raw_and_subtracted'),
-                            shot_noise_subtracted=np.bool_(False))
+        arrays = dict(k=result['k'], k_center=result['k_center'],
+                      k_bin_low=result['k_bin_low'], k_bin_high=result['k_bin_high'],
+                      Pk0=result['Pk0_raw'], Pk0_raw=result['Pk0_raw'],
+                      Pk0_shot_subtracted=result['Pk0_shot_subtracted'],
+                      Nmodes=result['Nmodes'],
+                      shot_noise=np.float64(result['shot_noise']),
+                      n_objects=np.int64(result['n_objects']),
+                      seconds=np.float64(result['seconds']),
+                      sample=np.asarray(sample), parameter=np.asarray(args.parameter),
+                      realization=np.int64(args.realization), snapshot=np.int64(SNAPSHOT),
+                      redshift=np.float64(args.redshift), box_size=np.float64(args.box_size),
+                      grid=np.int64(args.grid), axis=np.int64(args.axis),
+                      mas=np.asarray(args.mas),
+                      space=np.asarray(_sample_space(sample, args)),
+                      omega_m=np.float64(args.omega_m), w=np.float64(args.w),
+                      hubble=np.float64(hubble),
+                      fundamental_mode=np.float64(result['fundamental_mode']),
+                      delta_k=np.float64(result['delta_k']),
+                      bin_width_kf=np.int64(args.bin_width_kf),
+                      kmax=np.float64(args.kmax),
+                      n_bins=np.int64(len(result['k'])),
+                      binning=np.asarray('Nmodes_weighted_Pylians_kf_shells'),
+                      probability_iterations=np.int64(probability_header.get('NITER', -1)),
+                      class_assignment=np.asarray('argmax_void_sheet_filament_knot'),
+                      probability_ties=np.int64(tie_count),
+                      shot_noise_products=np.asarray('raw_and_subtracted'),
+                      shot_noise_subtracted=np.bool_(False),
+                      monopole_only=np.bool_(args.monopole_only))
+        if not args.monopole_only:
+            arrays.update(Pk2=result['Pk2'], Pk4=result['Pk4'])
+        np.savez_compressed(str(temporary), **arrays)
         os.replace(str(temporary), str(path))
     finally:
         if temporary.exists():
@@ -376,9 +385,13 @@ def _existing_result_matches(path, sample, args, probability_header, hubble):
                 'probability_iterations': int(probability_header.get('NITER', -1)),
                 'shot_noise_products': 'raw_and_subtracted',
                 'shot_noise_subtracted': False}
+    if args.monopole_only:
+        expected['monopole_only'] = True
 
     required_arrays = ('k', 'k_center', 'k_bin_low', 'k_bin_high', 'Pk0', 'Pk0_raw',
-                       'Pk0_shot_subtracted', 'Pk2', 'Pk4', 'Nmodes')
+                       'Pk0_shot_subtracted', 'Nmodes')
+    if not args.monopole_only:
+        required_arrays += ('Pk2', 'Pk4')
 
     try:
         with np.load(str(path), allow_pickle=False) as stored:
@@ -468,7 +481,7 @@ def _should_compute_sample(sample, args, paths, probability_header, hubble):
             return False
         raise RuntimeError('Existing power spectrum is incompatible ({}): {}. '
                            'Use --force to replace it.'.format(reason, output))
-    if not args.force:
+    if not args.force and not args.monopole_only:
         legacy = _legacy_output_path(paths, sample, args)
         if legacy.is_file():
             matches, reason = _legacy_result_matches(
@@ -574,6 +587,7 @@ def build_parser():
     parser.add_argument('--w', type=float, default=-1.0, help='Constant dark-energy equation of state used for H(z)')
     parser.add_argument('--hubble', type=float, default=None, help='Explicit H(z) in km/s/(Mpc/h), overriding Omega_m and w')
     parser.add_argument('--real-space', action='store_true', help='Do not displace halos into redshift space')
+    parser.add_argument('--monopole-only', action='store_true', help='Save only P0, without P2 or P4')
     parser.add_argument('--plot-shot-noise', choices=('raw', 'subtracted'), default='raw', help='Monopole variant shown in the plot (default: raw)')
     parser.add_argument('--subtract-shot-noise', action='store_true', help='Both monopoles are always saved')
     parser.add_argument('--samples', nargs='+', choices=SAMPLE_NAMES,  default=list(SAMPLE_NAMES))
@@ -616,6 +630,8 @@ def main():
         parser.error('--omega-m must lie between zero and one')
     if args.subtract_shot_noise:
         args.plot_shot_noise = 'subtracted'
+    if args.monopole_only and not args.no_plot:
+        parser.error('--monopole-only requires --no-plot')
     args.samples = tuple(dict.fromkeys(args.samples))
 
     paths = _paths(args)

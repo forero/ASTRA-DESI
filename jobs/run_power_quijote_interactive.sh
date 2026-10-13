@@ -34,6 +34,8 @@ AXIS=${AXIS:-2}
 BIN_WIDTH_KF=${BIN_WIDTH_KF:-2}
 KMAX=${KMAX:-0.5}
 MAKE_PLOTS=${MAKE_PLOTS:-0}
+REAL_SPACE=${REAL_SPACE:-1}
+MONOPOLE_ONLY=${MONOPOLE_ONLY:-1}
 
 INPUT_ROOT=${INPUT_ROOT:-/pscratch/sd/v/vtorresg/quijotes/Halos/FoF}
 ASTRA_ROOT=${ASTRA_ROOT:-/pscratch/sd/v/vtorresg/quijotes/ASTRA/FoF}
@@ -52,8 +54,14 @@ if ! [[ "${START_TASK}" =~ ^[0-9]+$ ]]; then
   echo "START_TASK must be a non-negative integer." >&2
   exit 2
 fi
-if [[ "${MAKE_PLOTS}" != 0 && "${MAKE_PLOTS}" != 1 ]]; then
-  echo "MAKE_PLOTS must be 0 or 1." >&2
+for flag in MAKE_PLOTS REAL_SPACE MONOPOLE_ONLY; do
+  if [[ "${!flag}" != 0 && "${!flag}" != 1 ]]; then
+    echo "${flag} must be 0 or 1." >&2
+    exit 2
+  fi
+done
+if (( MONOPOLE_ONLY == 1 && MAKE_PLOTS == 1 )); then
+  echo "Monopole-only plotting is unavailable; set MAKE_PLOTS=0." >&2
   exit 2
 fi
 if (( PK_THREADS > CPUS_PER_SIM )); then
@@ -108,14 +116,23 @@ MANIFEST="${LOG_ROOT}/manifest.snapshot"
 cp "${MANIFEST_SOURCE}" "${MANIFEST}"
 
 extra_args=(--no-plot)
+if (( REAL_SPACE == 1 )); then
+  extra_args+=(--real-space)
+fi
+if (( MONOPOLE_ONLY == 1 )); then
+  extra_args+=(--monopole-only)
+fi
 if (( MAKE_PLOTS == 1 )); then
   module load python/3.12
   extra_args=()
+  if (( REAL_SPACE == 1 )); then
+    extra_args+=(--real-space)
+  fi
 fi
 
 echo "power-quijote --> allocation=${SLURM_JOB_ID} CPUs=${AVAILABLE_CPUS}"
 echo "power-quijote --> tasks=${START_TASK}..${STOP_TASK} simulations=${SIMS_PARALLEL} threads/simulation=${PK_THREADS}"
-echo "power-quijote --> grid=${GRID} MAS=${MAS} delta_k=${BIN_WIDTH_KF}kf kmax=${KMAX} plots=${MAKE_PLOTS}"
+echo "power-quijote --> grid=${GRID} MAS=${MAS} delta_k=${BIN_WIDTH_KF}kf kmax=${KMAX} real=${REAL_SPACE} monopole=${MONOPOLE_ONLY} plots=${MAKE_PLOTS}"
 echo "power-quijote --> logs=${LOG_ROOT} manifest=${MANIFEST}"
 
 seq "${START_TASK}" "${STOP_TASK}" | parallel \
