@@ -11,7 +11,8 @@ TRACER_DISPLAY = {'BGS_BRIGHT': 'BGS',
                   'BGS_ANY': 'BGS_ANY',
                   'LRG': 'LRG',
                   'ELG_LOPnotqso': 'ELG',
-                  'QSO': 'QSO'}
+                  'QSO': 'QSO',}
+                #   'CMASS': 'CMASS'}
 # Exact labels used by the modular void finder for paths and products.  Keep
 # TRACER_DISPLAY's legacy ``BGS`` spelling for the independent catalogue
 # runners, while allowing BGS_BRIGHT and BGS_ANY to coexist in one output root.
@@ -19,8 +20,9 @@ TRACER_OUTPUT_LABELS = {'BGS_BRIGHT': 'BGS_BRIGHT',
                         'BGS_ANY': 'BGS_ANY',
                         'LRG': 'LRG',
                         'ELG_LOPnotqso': 'ELG',
-                        'QSO': 'QSO'}
-TRACER_CODES = {'BGS_BRIGHT': 1, 'LRG': 2, 'ELG_LOPnotqso': 3, 'QSO': 4, 'BGS_ANY': 5}
+                        'QSO': 'QSO',}
+                        # 'CMASS': 'CMASS'}
+TRACER_CODES = {'BGS_BRIGHT': 1, 'LRG': 2, 'ELG_LOPnotqso': 3, 'QSO': 4, 'BGS_ANY': 5, 'CMASS': 6}
 RAW_COLUMNS = ('TARGETID', 'RA', 'DEC', 'Z', 'XCART', 'YCART', 'ZCART')
 
 
@@ -47,10 +49,11 @@ def normalize_tracer(value):
                'ELG': 'ELG_LOPnotqso',
                'ELG_LOPNOTQSO': 'ELG_LOPnotqso',
                'QSO': 'QSO',
-               'QSOS': 'QSO'}
+               'QSOS': 'QSO',
+               'CMASS': 'CMASS'}
     if upper not in aliases:
         raise ValueError(f'Unknown tracer {value!r}; expected BGS_BRIGHT, BGS_ANY, '
-                         'LRG, ELG, or QSO.')
+                         'LRG, ELG, QSO, or CMASS.')
     return aliases[upper]
 
 
